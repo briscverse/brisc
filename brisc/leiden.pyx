@@ -300,8 +300,11 @@ def leiden(float[::1] data,
                     error_message += '; consider decreasing resolution'
                 raise ValueError(error_message)
 
-            if min_cluster_size == 1:
-                return num_refined_communities, False, False
+            # Map each cell's refined community through `communities` (the
+            # move-phase labels of the nodes in the supergraph) to get its
+            # final cluster
+            for i in range(num_cells):
+                final_communities[i] = communities[final_communities[i]]
 
             # Merge cells in communities of size less than `min_cluster_size`
             # (which are often disconnected from the rest of the shared nearest
@@ -309,20 +312,17 @@ def leiden(float[::1] data,
             # that is in a cluster of size ≥ `min_cluster_size`. Relabel the
             # final communities so that they will be contiguous after excluding
             # the too-small communities.
-            community_sizes[:num_refined_communities] = 0
+            community_sizes[:num_cells] = 0
             for i in range(num_cells):
                 community_sizes[final_communities[i]] += 1
             num_final_communities = 0
-            for community in range(num_refined_communities):
+            for community in range(num_cells):
                 community_size = community_sizes[community]
                 if community_size >= min_cluster_size:
                     original_to_contiguous[community] = num_final_communities
                     contiguous_community_sizes[num_final_communities] = \
                         community_size
                     num_final_communities += 1
-            if num_final_communities == num_refined_communities:
-                # All communities already had size ≥ `min_cluster_size`
-                return num_final_communities, False, False
             for i in range(num_cells):
                 community = final_communities[i]
                 if community_sizes[community] < min_cluster_size:
@@ -1113,8 +1113,11 @@ cdef inline unsigned leiden_nogil(
                     error_message += f' (resolution = {resolution})'
                     raise ValueError(error_message)
 
-            if min_cluster_size == 1:
-                return num_refined_communities
+            # Map each cell's refined community through `communities` (the
+            # move-phase labels of the nodes in the supergraph) to get its
+            # final cluster
+            for i in range(num_cells):
+                final_communities[i] = communities[final_communities[i]]
 
             # Merge cells in communities of size less than `min_cluster_size`
             # (which are often disconnected from the rest of the shared nearest
@@ -1122,20 +1125,17 @@ cdef inline unsigned leiden_nogil(
             # that is in a cluster of size ≥ `min_cluster_size`. Relabel the
             # final communities so that they will be contiguous after excluding
             # the too-small communities.
-            fill(community_sizes, community_sizes + num_refined_communities, 0)
+            fill(community_sizes, community_sizes + num_cells, 0)
             for i in range(num_cells):
                 community_sizes[final_communities[i]] += 1
             num_final_communities = 0
-            for community in range(num_refined_communities):
+            for community in range(num_cells):
                 community_size = community_sizes[community]
                 if community_size >= min_cluster_size:
                     original_to_contiguous[community] = num_final_communities
                     contiguous_community_sizes[num_final_communities] = \
                         community_size
                     num_final_communities += 1
-            if num_final_communities == num_refined_communities:
-                # All communities already had size ≥ `min_cluster_size`
-                return num_final_communities
             for i in range(num_cells):
                 community = final_communities[i]
                 if community_sizes[community] < min_cluster_size:
