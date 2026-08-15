@@ -4755,17 +4755,46 @@ class Pseudobulk:
                            unordered_columns + ordered_columns
                            if obs[column].dtype.base_type() != pl.Enum]
         if columns_to_cast:
-            obs = obs\
-                .cast({row[0]: pl.Enum(row[1]) for row in
-                       obs.select(
-                           pl.selectors.by_name(columns_to_cast)
-                           .unique()
-                           .sort()
-                           .implode()
-                           .list.drop_nulls())
-                      .unpivot()
-                      .cast({'value': pl.List(pl.String)})
-                      .rows()})
+            # Compute the levels before any dtype change, so that integer
+            # factors keep numeric rather than lexicographic level order
+            # (1, 2, 10 rather than 1, 10, 2), then stringify them.
+            levels = {row[0]: row[1] for row in
+                      obs.select(
+                          pl.selectors.by_name(columns_to_cast)
+                          .unique()
+                          .sort()
+                          .implode()
+                          .list.drop_nulls())
+                     .unpivot()
+                     .cast({'value': pl.List(pl.String)})
+                     .rows()}
+            # Integer factor columns have to become String before the Enum
+            # cast: casting an integer column straight to an Enum whose
+            # categories are strings raises InvalidOperationError, which made
+            # `categorical_columns` unusable for any integer column.
+            integer_factors = [column for column in columns_to_cast
+                               if obs[column].dtype.base_type()
+                               in INTEGER_DTYPES]
+            if integer_factors:
+                obs = obs.cast({column: pl.String
+                                for column in integer_factors})
+            obs = obs.cast({column: pl.Enum(categories)
+                            for column, categories in levels.items()})
+
+        # Cast the integer columns that are staying numeric to Float64. `to_r`
+        # maps polars integers to R's `integer64` (bit64) class, which
+        # `model.matrix()` does not recognize: it reinterprets the 64-bit
+        # payload as a double, so an age of 76 becomes 3.75e-322. Depending on
+        # the data that yields either a rank-deficient design matrix or NaN
+        # coefficients, and neither failure mode points at the dtype.
+        numeric_integer_columns = [
+            column for column in obs.columns
+            if column not in unordered_columns
+            and column not in ordered_columns
+            and obs[column].dtype.base_type() in INTEGER_DTYPES]
+        if numeric_integer_columns:
+            obs = obs.cast({column: pl.Float64
+                            for column in numeric_integer_columns})
 
         # Convert the selected columns of `obs` to R
         obs_name = f'{prefix}.obs'
