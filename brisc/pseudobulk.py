@@ -4746,26 +4746,32 @@ class Pseudobulk:
              column in categorical_columns)]
         ordered_columns = list(ordinal_columns)
 
-        # Convert all factor columns to Enum, so that `to_r` converts them to
+        # Convert all factor columns to Enum, so that `to_r()` converts them to
         # ordered factors; we strip the `'ordered'` class from the unordered
         # ones below. Columns that are already Enum are left untouched, to
         # preserve their existing level order (which matters for ordinal Enum
         # columns); other columns get sorted unique values as their levels.
+        # Integer columns in `categorical_columns` or `ordinal_columns` are
+        # also cast to Enum, with the categories being the integers cast to
+        # strings; this requires `replace_strict()` since polars (as of version
+        # 1.0) does not support Enums with non-string categories and also
+        # disallows the direct cast to Enum in this scenario.
         columns_to_cast = [column for column in
                            unordered_columns + ordered_columns
                            if obs[column].dtype.base_type() != pl.Enum]
         if columns_to_cast:
-            obs = obs\
-                .cast({row[0]: pl.Enum(row[1]) for row in
-                       obs.select(
-                           pl.selectors.by_name(columns_to_cast)
-                           .unique()
-                           .sort()
-                           .implode()
-                           .list.drop_nulls())
-                      .unpivot()
-                      .cast({'value': pl.List(pl.String)})
-                      .rows()})
+             casts = []
+             for column in columns_to_cast:
+                 levels = obs[column].unique().sort().drop_nulls()
+                 labels = levels.cast(pl.String)
+                 casts.append(pl.col(column)
+                              .replace_strict(levels,
+                                              labels.cast(pl.Enum(labels))))
+             obs = obs.with_columns(casts)
+
+        # Cast 64-bit integer columns to Float64, since `to_r()` maps them to
+        # R's integer64 class, which `model.matrix()` does not recognize
+        obs = obs.cast({pl.Int64: pl.Float64, pl.UInt64: pl.Float64})
 
         # Convert the selected columns of `obs` to R
         obs_name = f'{prefix}.obs'
