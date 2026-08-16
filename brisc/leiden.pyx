@@ -3,7 +3,6 @@
 import threading
 from cpython.exc cimport PyErr_CheckSignals
 from cython.parallel cimport prange
-from libc.limits cimport UINT_MAX
 from libcpp.algorithm cimport fill
 from libcpp.vector cimport vector
 from signal import set_wakeup_fd
@@ -44,9 +43,9 @@ def leiden(float[::1] data,
         other, other_community, new_community, num_refined_communities, \
         num_final_communities, community_size, neighbor, future_i, \
         unrefined_community, contiguous_index, original_index, current_sum, \
-        count, num_touched, edges_written
+        num_touched
     cdef unsigned long long num_nodes, word_index, bit_index, num_edges, \
-        num_cells = indptr.shape[0] - 1, \
+        edges_written, num_cells = indptr.shape[0] - 1, \
         queue_size_minus_1 = next_pow2_minus_1(num_cells), \
         queue_size = queue_size_minus_1 + 1, state = srand(seed)
     cdef signed_integer start_index, end_index, j
@@ -178,20 +177,21 @@ def leiden(float[::1] data,
             # Nodes are visited in random order (`node_order`), so hardware
             # prefetchers may not predict it. Instead, manually request
             # `indptr[node_order[k]]` 24 nodes beforehand; by 16 nodes
-            # beforehand it should be available, so request
-            # `indices[indptr[node_order[k]]]`; by 8 nodes beforehand it
-            # should be available, so request
-            # `communities[indices[indptr[node_order[k]]]]`, as well as the
-            # node's own community, weighted degree, and community weight.
+            # beforehand it should be available, so request the node's row of
+            # `indices` and `data`, as well as its own community; by 8 nodes
+            # beforehand those should be available, so request `communities` at
+            # those indices, as well as the node's own weighted degree and
+            # community weight.
             if k + 24 < num_nodes:
                 PREFETCH(&indptr[node_order[k + 24]])
             if k + 16 < num_nodes:
                 PREFETCH(&indices[indptr[node_order[k + 16]]])
+                PREFETCH(&data[indptr[node_order[k + 16]]])
+                PREFETCH(&communities[node_order[k + 16]])
             if k + 8 < num_nodes:
                 PREFETCH(&communities[indices[indptr[node_order[k + 8]]]])
-                PREFETCH(&communities[node_order[k + 8]])
                 PREFETCH(&weighted_degrees[node_order[k + 8]])
-                PREFETCH(&community_weights[node_order[k + 8]])
+                PREFETCH(&community_weights[communities[node_order[k + 8]]])
 
             # Get the next node
             i = node_order[k]
@@ -205,8 +205,17 @@ def leiden(float[::1] data,
             # connecting this node to each community it's connected to. Store
             # the value for the node's own community separately, in
             # `node_to_community_weight`.
+            #
+            # From iteration 1 onwards the graph has self-loops, and the
+            # aggregation phase writes each node's self-loop first in its row,
+            # so it sits at `indptr[i]` whenever it exists; skip it if it does.
+            # Advance `start_index` rather than `j` so the two loops below skip
+            # it too.
             start_index = indptr[i]
             end_index = indptr[i + 1]
+            if leiden_iteration and start_index != end_index and \
+                    <unsigned> indices[start_index] == i:
+                start_index += 1
             j = start_index
             while j < end_index - 16:
                 # `indices` is sequential and will be hardware-prefetched, but
@@ -214,11 +223,17 @@ def leiden(float[::1] data,
                 # prefetching may not predict
                 PREFETCH(&communities[indices[j + 16]])
                 other = indices[j]
-                node_to_community_weights[communities[other]] += data[j]
+                other_community = communities[other]
+                node_to_community_weights[other_community] += data[j]
+                # Prefetch the random read the scan below makes for this
+                # community
+                PREFETCH(&community_weights[other_community])
                 j += 1
             while j < end_index:
                 other = indices[j]
-                node_to_community_weights[communities[other]] += data[j]
+                other_community = communities[other]
+                node_to_community_weights[other_community] += data[j]
+                PREFETCH(&community_weights[other_community])
                 j += 1
             node_to_community_weight = node_to_community_weights[community]
             node_to_community_weights[community] = 0
@@ -236,8 +251,6 @@ def leiden(float[::1] data,
                 scaled_resolution_times_weighted_degree * \
                 (weighted_degree - community_weight)
             best_delta_objective = base_delta
-            start_index = indptr[i]
-            end_index = indptr[i + 1]
             for j in range(start_index, end_index):
                 other = indices[j]
                 other_community = communities[other]
@@ -272,8 +285,6 @@ def leiden(float[::1] data,
                 communities[i] = new_community
                 community_weights[new_community] += weighted_degree
                 community_weights[community] -= weighted_degree
-                start_index = indptr[i]
-                end_index = indptr[i + 1]
                 for j in range(start_index, end_index):
                     other = indices[j]
                     other_community = communities[other]
@@ -378,11 +389,15 @@ def leiden(float[::1] data,
             if queue_head + 16 < queue_tail:
                 PREFETCH(&indices[indptr[queue[
                     (queue_head + 16) & queue_size_minus_1]]])
+                PREFETCH(&data[indptr[queue[
+                    (queue_head + 16) & queue_size_minus_1]]])
+                PREFETCH(&communities[queue[
+                    (queue_head + 16) & queue_size_minus_1]])
             if queue_head + 8 < queue_tail:
                 future_i = queue[(queue_head + 8) & queue_size_minus_1]
                 PREFETCH(&communities[indices[indptr[future_i]]])
-                PREFETCH(&communities[future_i])
                 PREFETCH(&weighted_degrees[future_i])
+                PREFETCH(&community_weights[communities[future_i]])
 
             # Pop a node from the queue
             i = queue[queue_head & queue_size_minus_1]
@@ -400,8 +415,17 @@ def leiden(float[::1] data,
             # connecting this node to each community it's connected to. Store
             # the value for the node's own community separately, in
             # `node_to_community_weight`.
+            #
+            # From iteration 1 onwards the graph has self-loops, and the
+            # aggregation phase writes each node's self-loop first in its row,
+            # so it sits at `indptr[i]` whenever it exists; skip it if it does.
+            # Advance `start_index` rather than `j` so the two loops below skip
+            # it too.
             start_index = indptr[i]
             end_index = indptr[i + 1]
+            if leiden_iteration and start_index != end_index and \
+                    <unsigned> indices[start_index] == i:
+                start_index += 1
             j = start_index
             while j < end_index - 16:
                 # `indices` is sequential and will be hardware-prefetched, but
@@ -409,11 +433,17 @@ def leiden(float[::1] data,
                 # prefetching may not predict
                 PREFETCH(&communities[indices[j + 16]])
                 other = indices[j]
-                node_to_community_weights[communities[other]] += data[j]
+                other_community = communities[other]
+                node_to_community_weights[other_community] += data[j]
+                # Prefetch the random read the scan below makes for this
+                # community
+                PREFETCH(&community_weights[other_community])
                 j += 1
             while j < end_index:
                 other = indices[j]
-                node_to_community_weights[communities[other]] += data[j]
+                other_community = communities[other]
+                node_to_community_weights[other_community] += data[j]
+                PREFETCH(&community_weights[other_community])
                 j += 1
             node_to_community_weight = node_to_community_weights[community]
             node_to_community_weights[community] = 0
@@ -431,8 +461,6 @@ def leiden(float[::1] data,
                 scaled_resolution_times_weighted_degree * \
                 (weighted_degree - community_weight)
             best_delta_objective = base_delta
-            start_index = indptr[i]
-            end_index = indptr[i + 1]
             for j in range(start_index, end_index):
                 other = indices[j]
                 other_community = communities[other]
@@ -466,8 +494,6 @@ def leiden(float[::1] data,
                 communities[i] = new_community
                 community_weights[new_community] += weighted_degree
                 community_weights[community] -= weighted_degree
-                start_index = indptr[i]
-                end_index = indptr[i + 1]
                 for j in range(start_index, end_index):
                     other = indices[j]
                     other_community = communities[other]
@@ -547,11 +573,18 @@ def leiden(float[::1] data,
 
             # Tabulate `node_to_community_weights`, the total edge weight
             # connecting this node to each refined community it's connected to.
-            # Store the value for the node's own community separately, in
-            # `node_to_community_weight`.
+            # We only get here when the node is alone in its refined community,
+            # so its one edge into that community is the self-loop, which sits
+            # at `indptr[i]` from iteration 1 onwards; skip it, as in the move
+            # phase. Its entry in `node_to_community_weights` is then never
+            # written, so unlike the move phase there is nothing to read out or
+            # reset.
             unrefined_community = communities[i]
             start_index = indptr[i]
             end_index = indptr[i + 1]
+            if leiden_iteration and start_index != end_index and \
+                    <unsigned> indices[start_index] == i:
+                start_index += 1
             j = start_index
             while j < end_index - 16:
                 # `indices` is sequential and will be hardware-prefetched, but
@@ -559,33 +592,38 @@ def leiden(float[::1] data,
                 # hardware prefetching may not predict
                 PREFETCH(&refined_communities[indices[j + 16]])
                 other = indices[j]
-                node_to_community_weights[refined_communities[other]] += \
-                    data[j]
+                other_community = refined_communities[other]
+                node_to_community_weights[other_community] += data[j]
+                # Prefetch the two random reads the scan below makes for this
+                # neighbor
+                PREFETCH(&communities[other])
+                PREFETCH(&refined_community_weights[other_community])
                 j += 1
             while j < end_index:
                 other = indices[j]
-                node_to_community_weights[refined_communities[other]] += \
-                    data[j]
+                other_community = refined_communities[other]
+                node_to_community_weights[other_community] += data[j]
+                PREFETCH(&communities[other])
+                PREFETCH(&refined_community_weights[other_community])
                 j += 1
-            node_to_community_weight = node_to_community_weights[community]
-            node_to_community_weights[community] = 0
 
             # Find `new_community`, the community that would lead to the
             # largest positive change in the objective (`delta_objective`) if
             # we moved this node to it. Reset `node_to_community_weights` so it
-            # can be used for the next node. Loop-hoisting optimization:
-            # initialize `best_delta_objective` to `base_delta` instead of 0,
-            # to avoid subtracting `base_delta` from `delta_objective` within
-            # the loop. Only consider refined communities that are in the same
-            # unrefined community as this node.
+            # can be used for the next node. Only consider refined communities
+            # that are in the same unrefined community as this node.
+            #
+            # Unlike in the move phase, `base_delta` (the change in the
+            # objective from leaving the node where it is) is always exactly
+            # zero here, so we don't compute it. The node is alone in its
+            # refined community, so `community_weight` equals `weighted_degree`
+            # and the resolution term cancels out, and its only edge to its own
+            # refined community is the self-loop we skipped above. That also
+            # makes the move phase's loop-hoisting trick moot here: starting
+            # `best_delta_objective` at `base_delta` is just starting it at 0.
             scaled_resolution_times_weighted_degree = \
                 scaled_resolution * weighted_degree
-            base_delta = node_to_community_weight + \
-                scaled_resolution_times_weighted_degree * \
-                (weighted_degree - community_weight)
-            best_delta_objective = base_delta
-            start_index = indptr[i]
-            end_index = indptr[i + 1]
+            best_delta_objective = 0
             for j in range(start_index, end_index):
                 other = indices[j]
                 other_community = refined_communities[other]
@@ -608,14 +646,14 @@ def leiden(float[::1] data,
                             new_community = other_community
 
             # If this node's community assignment is suboptimal (i.e. at least
-            # one community had `delta_objective` larger than `base_delta`),
-            # move it to the community with the largest `delta_objective`.
-            # Update the community weights to account for the move: add the
-            # moved node's weighted degree to its new community's weight.
-            # (Don't bother subtracting it from its old community, which is
-            # now empty and will not be visited again.) If the node's community
-            # assignment is already optimal, do not move it.
-            if best_delta_objective > base_delta:
+            # one community had `delta_objective` larger than 0), move it to
+            # the community with the largest `delta_objective`. Update the
+            # community weights to account for the move: add the moved node's
+            # weighted degree to its new community's weight. (Don't bother
+            # subtracting it from its old community, which is now empty and
+            # will not be visited again.) If the node's community assignment is
+            # already optimal, do not move it.
+            if best_delta_objective > 0:
                 refined_communities[i] = new_community
                 refined_community_weights[new_community] += weighted_degree
             else:
@@ -627,15 +665,29 @@ def leiden(float[::1] data,
             if i % 131072 == 131071:
                 PyErr_CheckSignals()
 
+        # If this is the first Leiden iteration, allocate
+        # `community_node_indptr_buffer`. Zero `community_node_indptr` here so
+        # the relabeling pass below can count into it.
+        if leiden_iteration == 0:
+            community_node_indptr_buffer.resize(num_refined_communities + 1)
+            community_node_indptr = \
+                <unsigned[:num_refined_communities + 1]> \
+                community_node_indptr_buffer.data()
+        for i in range(num_refined_communities):
+            community_node_indptr[i] = 0
+
         # Relabel the refined communities to make them contiguous integers, by
         # mapping them through the `original_to_contiguous` mapping. For
         # instance, if the only non-empty communities after the refinement
         # phase are 2, 7, etc., renumber 2 to 0, 7 to 1, and so on. This makes
         # it easier to create a new CSR graph in the aggregation phase, where
-        # each refined community becomes a single node.
+        # each refined community becomes a single node. Count the nodes in each
+        # refined community in the same pass, for the counting sort in the
+        # aggregation phase.
         for i in range(num_nodes):
-            refined_communities[i] = \
-                original_to_contiguous[refined_communities[i]]
+            community = original_to_contiguous[refined_communities[i]]
+            refined_communities[i] = community
+            community_node_indptr[community] += 1
 
         # Reinitialize `communities` to the unrefined communities from the move
         # phase: if multiple refined communities were part of the same
@@ -656,6 +708,12 @@ def leiden(float[::1] data,
         # community's node in the supergraph to be constructed in the
         # aggregation phase and used in the next Leiden iteration.
         for contiguous_index in range(num_refined_communities):
+            # Prefetch `communities` and `refined_community_weights` at the
+            # original index
+            if contiguous_index + 8 < num_refined_communities:
+                future_i = contiguous_to_original[contiguous_index + 8]
+                PREFETCH(&communities[future_i])
+                PREFETCH(&refined_community_weights[future_i])
             original_index = contiguous_to_original[contiguous_index]
             communities[contiguous_index] = communities[original_index]
             weighted_degrees[contiguous_index] = \
@@ -690,37 +748,24 @@ def leiden(float[::1] data,
             for i in range(num_cells):
                 final_communities[i] = \
                     refined_communities[final_communities[i]]
-        # If this is the first Leiden iteration, allocate
-        # `community_node_indptr_buffer`
-        else:
-            community_node_indptr_buffer.resize(num_refined_communities + 1)
-            community_node_indptr = \
-                <unsigned[:num_refined_communities + 1]> \
-                community_node_indptr_buffer.data()
 
-        # Group nodes by their refined community using counting sort
-        for i in range(num_refined_communities + 1):
-            community_node_indptr[i] = 0
-        for i in range(num_nodes):
-            community_node_indptr[refined_communities[i]] += 1
-
+        # Group nodes by their refined community using counting sort. Take
+        # inclusive prefix sums, so each community's entry holds the end of its
+        # range rather than the start, then place nodes in reverse. By the time
+        # the placement is done, `community_node_indptr` is exactly the indptr
+        # we want.
         current_sum = 0
         for i in range(num_refined_communities):
-            count = community_node_indptr[i]
+            current_sum += community_node_indptr[i]
             community_node_indptr[i] = current_sum
-            current_sum += count
         community_node_indptr[num_refined_communities] = current_sum
 
-        for i in range(num_nodes):
-            community = refined_communities[i]
-            community_nodes[community_node_indptr[community]] = i
-            community_node_indptr[community] += 1
-
-        i = num_refined_communities
+        i = <unsigned> num_nodes
         while i > 0:
-            community_node_indptr[i] = community_node_indptr[i - 1]
             i -= 1
-        community_node_indptr[0] = 0
+            community = refined_communities[i]
+            community_node_indptr[community] -= 1
+            community_nodes[community_node_indptr[community]] = i
 
         # Set up ping-pong pointers for the supergraph. On the first two
         # iterations, allocate the buffers underlying these pointers.
@@ -759,9 +804,29 @@ def leiden(float[::1] data,
             num_touched = 0
             for k in range(community_node_indptr[community],
                            community_node_indptr[community + 1]):
+                # `community_nodes` is sequential, but the row it points at is
+                # not, so prefetch
+                if k + 8 < num_nodes:
+                    PREFETCH(&indptr[community_nodes[k + 8]])
+                if k + 4 < num_nodes:
+                    PREFETCH(&indices[indptr[community_nodes[k + 4]]])
+                    PREFETCH(&data[indptr[community_nodes[k + 4]]])
                 i = community_nodes[k]
                 start_index = indptr[i]
                 end_index = indptr[i + 1]
+                # The self-loop, if there is one, is the first entry of the
+                # row, so handle it here and let the loops below assume there
+                # isn't one. Add it twice to cancel the halving further down,
+                # which is there to undo the double-counting of symmetric
+                # edges and shouldn't apply to a self-loop.
+                if leiden_iteration and start_index != end_index and \
+                        <unsigned> indices[start_index] == i:
+                    if node_to_community_weights[community] == 0:
+                        touched_communities[num_touched] = community
+                        num_touched += 1
+                    node_to_community_weights[community] += \
+                        2 * data[start_index]
+                    start_index += 1
                 j = start_index
                 while j < end_index - 16:
                     PREFETCH(&refined_communities[indices[j + 16]])
@@ -771,8 +836,7 @@ def leiden(float[::1] data,
                     if node_to_community_weights[other_community] == 0:
                         touched_communities[num_touched] = other_community
                         num_touched += 1
-                    node_to_community_weights[other_community] += \
-                        2 * edge_weight if other == i else edge_weight
+                    node_to_community_weights[other_community] += edge_weight
                     j += 1
                 while j < end_index:
                     other = indices[j]
@@ -781,8 +845,7 @@ def leiden(float[::1] data,
                     if node_to_community_weights[other_community] == 0:
                         touched_communities[num_touched] = other_community
                         num_touched += 1
-                    node_to_community_weights[other_community] += \
-                        2 * edge_weight if other == i else edge_weight
+                    node_to_community_weights[other_community] += edge_weight
                     j += 1
 
             # Halve the intra-community edges, which will become self-edges in
@@ -795,18 +858,31 @@ def leiden(float[::1] data,
             # input graph.
             #
             # However, do not halve self-loops if this is the supernode graph.
-            # This is why we do `2 * edge_weight if other == i` above, so it
+            # This is why the self-loop is added twice in the peel above, so it
             # cancels out the halving here.
             node_to_community_weights[community] *= 0.5
 
-            # Write out edges for this community
+            # Write out the self-edge first, if there is one, so that the next
+            # iteration's move and refinement phases find each node's self-loop
+            # at the start of its row without having to search. Every edge
+            # weight is positive, so a nonzero entry here means some node in
+            # this community had an edge to another node in it, or to itself.
+            if node_to_community_weights[community] != 0:
+                next_data[edges_written] = \
+                    node_to_community_weights[community]
+                next_indices[edges_written] = community
+                edges_written += 1
+                node_to_community_weights[community] = 0
+
+            # Write out the remaining edges for this community
             for k in range(num_touched):
                 other_community = touched_communities[k]
-                next_data[edges_written] = \
-                    node_to_community_weights[other_community]
-                next_indices[edges_written] = other_community
-                edges_written += 1
-                node_to_community_weights[other_community] = 0
+                if other_community != community:
+                    next_data[edges_written] = \
+                        node_to_community_weights[other_community]
+                    next_indices[edges_written] = other_community
+                    edges_written += 1
+                    node_to_community_weights[other_community] = 0
 
             next_indptr[community + 1] = edges_written
 
@@ -864,9 +940,9 @@ cdef inline unsigned leiden_nogil(
         other, other_community, new_community, num_refined_communities, \
         num_final_communities, community_size, neighbor, future_i, \
         unrefined_community, contiguous_index, original_index, current_sum, \
-        count, num_touched, edges_written
+        num_touched
     cdef unsigned long long num_nodes, word_index, bit_index, num_edges, \
-        num_cells = indptr_original.shape[0] - 1, \
+        edges_written, num_cells = indptr_original.shape[0] - 1, \
         queue_size_minus_1 = next_pow2_minus_1(num_cells), \
         queue_size = queue_size_minus_1 + 1, state = srand(seed)
     cdef signed_integer start_index, end_index, j
@@ -984,20 +1060,21 @@ cdef inline unsigned leiden_nogil(
             # Nodes are visited in random order (`node_order`), so hardware
             # prefetchers may not predict it. Instead, manually request
             # `indptr[node_order[k]]` 24 nodes beforehand; by 16 nodes
-            # beforehand it should be available, so request
-            # `indices[indptr[node_order[k]]]`; by 8 nodes beforehand it
-            # should be available, so request
-            # `communities[indices[indptr[node_order[k]]]]`, as well as the
-            # node's own community, weighted degree, and community weight.
+            # beforehand it should be available, so request the node's row of
+            # `indices` and `data`, as well as its own community; by 8 nodes
+            # beforehand those should be available, so request `communities` at
+            # those indices, as well as the node's own weighted degree and
+            # community weight.
             if k + 24 < num_nodes:
                 PREFETCH(&indptr[node_order[k + 24]])
             if k + 16 < num_nodes:
                 PREFETCH(&indices[indptr[node_order[k + 16]]])
+                PREFETCH(&data[indptr[node_order[k + 16]]])
+                PREFETCH(&communities[node_order[k + 16]])
             if k + 8 < num_nodes:
                 PREFETCH(&communities[indices[indptr[node_order[k + 8]]]])
-                PREFETCH(&communities[node_order[k + 8]])
                 PREFETCH(&weighted_degrees[node_order[k + 8]])
-                PREFETCH(&community_weights[node_order[k + 8]])
+                PREFETCH(&community_weights[communities[node_order[k + 8]]])
 
             # Get the next node
             i = node_order[k]
@@ -1011,8 +1088,17 @@ cdef inline unsigned leiden_nogil(
             # connecting this node to each community it's connected to. Store
             # the value for the node's own community separately, in
             # `node_to_community_weight`.
+            #
+            # From iteration 1 onwards the graph has self-loops, and the
+            # aggregation phase writes each node's self-loop first in its row,
+            # so it sits at `indptr[i]` whenever it exists; skip it if it does.
+            # Advance `start_index` rather than `j` so the two loops below skip
+            # it too.
             start_index = indptr[i]
             end_index = indptr[i + 1]
+            if leiden_iteration and start_index != end_index and \
+                    <unsigned> indices[start_index] == i:
+                start_index += 1
             j = start_index
             while j < end_index - 16:
                 # `indices` is sequential and will be hardware-prefetched, but
@@ -1020,11 +1106,17 @@ cdef inline unsigned leiden_nogil(
                 # prefetching may not predict
                 PREFETCH(&communities[indices[j + 16]])
                 other = indices[j]
-                node_to_community_weights[communities[other]] += data[j]
+                other_community = communities[other]
+                node_to_community_weights[other_community] += data[j]
+                # Prefetch the random read the scan below makes for this
+                # community
+                PREFETCH(&community_weights[other_community])
                 j += 1
             while j < end_index:
                 other = indices[j]
-                node_to_community_weights[communities[other]] += data[j]
+                other_community = communities[other]
+                node_to_community_weights[other_community] += data[j]
+                PREFETCH(&community_weights[other_community])
                 j += 1
             node_to_community_weight = node_to_community_weights[community]
             node_to_community_weights[community] = 0
@@ -1042,8 +1134,6 @@ cdef inline unsigned leiden_nogil(
                 scaled_resolution_times_weighted_degree * \
                 (weighted_degree - community_weight)
             best_delta_objective = base_delta
-            start_index = indptr[i]
-            end_index = indptr[i + 1]
             for j in range(start_index, end_index):
                 other = indices[j]
                 other_community = communities[other]
@@ -1078,8 +1168,6 @@ cdef inline unsigned leiden_nogil(
                 communities[i] = new_community
                 community_weights[new_community] += weighted_degree
                 community_weights[community] -= weighted_degree
-                start_index = indptr[i]
-                end_index = indptr[i + 1]
                 for j in range(start_index, end_index):
                     other = indices[j]
                     other_community = communities[other]
@@ -1194,11 +1282,15 @@ cdef inline unsigned leiden_nogil(
             if queue_head + 16 < queue_tail:
                 PREFETCH(&indices[indptr[queue[
                     (queue_head + 16) & queue_size_minus_1]]])
+                PREFETCH(&data[indptr[queue[
+                    (queue_head + 16) & queue_size_minus_1]]])
+                PREFETCH(&communities[queue[
+                    (queue_head + 16) & queue_size_minus_1]])
             if queue_head + 8 < queue_tail:
                 future_i = queue[(queue_head + 8) & queue_size_minus_1]
                 PREFETCH(&communities[indices[indptr[future_i]]])
-                PREFETCH(&communities[future_i])
                 PREFETCH(&weighted_degrees[future_i])
+                PREFETCH(&community_weights[communities[future_i]])
 
             # Pop a node from the queue
             i = queue[queue_head & queue_size_minus_1]
@@ -1216,8 +1308,17 @@ cdef inline unsigned leiden_nogil(
             # connecting this node to each community it's connected to. Store
             # the value for the node's own community separately, in
             # `node_to_community_weight`.
+            #
+            # From iteration 1 onwards the graph has self-loops, and the
+            # aggregation phase writes each node's self-loop first in its row,
+            # so it sits at `indptr[i]` whenever it exists; skip it if it does.
+            # Advance `start_index` rather than `j` so the two loops below skip
+            # it too.
             start_index = indptr[i]
             end_index = indptr[i + 1]
+            if leiden_iteration and start_index != end_index and \
+                    <unsigned> indices[start_index] == i:
+                start_index += 1
             j = start_index
             while j < end_index - 16:
                 # `indices` is sequential and will be hardware-prefetched, but
@@ -1225,11 +1326,17 @@ cdef inline unsigned leiden_nogil(
                 # prefetching may not predict
                 PREFETCH(&communities[indices[j + 16]])
                 other = indices[j]
-                node_to_community_weights[communities[other]] += data[j]
+                other_community = communities[other]
+                node_to_community_weights[other_community] += data[j]
+                # Prefetch the random read the scan below makes for this
+                # community
+                PREFETCH(&community_weights[other_community])
                 j += 1
             while j < end_index:
                 other = indices[j]
-                node_to_community_weights[communities[other]] += data[j]
+                other_community = communities[other]
+                node_to_community_weights[other_community] += data[j]
+                PREFETCH(&community_weights[other_community])
                 j += 1
             node_to_community_weight = node_to_community_weights[community]
             node_to_community_weights[community] = 0
@@ -1247,8 +1354,6 @@ cdef inline unsigned leiden_nogil(
                 scaled_resolution_times_weighted_degree * \
                 (weighted_degree - community_weight)
             best_delta_objective = base_delta
-            start_index = indptr[i]
-            end_index = indptr[i + 1]
             for j in range(start_index, end_index):
                 other = indices[j]
                 other_community = communities[other]
@@ -1282,8 +1387,6 @@ cdef inline unsigned leiden_nogil(
                 communities[i] = new_community
                 community_weights[new_community] += weighted_degree
                 community_weights[community] -= weighted_degree
-                start_index = indptr[i]
-                end_index = indptr[i + 1]
                 for j in range(start_index, end_index):
                     other = indices[j]
                     other_community = communities[other]
@@ -1364,11 +1467,18 @@ cdef inline unsigned leiden_nogil(
 
             # Tabulate `node_to_community_weights`, the total edge weight
             # connecting this node to each refined community it's connected to.
-            # Store the value for the node's own community separately, in
-            # `node_to_community_weight`.
+            # We only get here when the node is alone in its refined community,
+            # so its one edge into that community is the self-loop, which sits
+            # at `indptr[i]` from iteration 1 onwards; skip it, as in the move
+            # phase. Its entry in `node_to_community_weights` is then never
+            # written, so unlike the move phase there is nothing to read out or
+            # reset.
             unrefined_community = communities[i]
             start_index = indptr[i]
             end_index = indptr[i + 1]
+            if leiden_iteration and start_index != end_index and \
+                    <unsigned> indices[start_index] == i:
+                start_index += 1
             j = start_index
             while j < end_index - 16:
                 # `indices` is sequential and will be hardware-prefetched, but
@@ -1376,33 +1486,38 @@ cdef inline unsigned leiden_nogil(
                 # hardware prefetching may not predict
                 PREFETCH(&refined_communities[indices[j + 16]])
                 other = indices[j]
-                node_to_community_weights[refined_communities[other]] += \
-                    data[j]
+                other_community = refined_communities[other]
+                node_to_community_weights[other_community] += data[j]
+                # Prefetch the two random reads the scan below makes for this
+                # neighbor
+                PREFETCH(&communities[other])
+                PREFETCH(&refined_community_weights[other_community])
                 j += 1
             while j < end_index:
                 other = indices[j]
-                node_to_community_weights[refined_communities[other]] += \
-                    data[j]
+                other_community = refined_communities[other]
+                node_to_community_weights[other_community] += data[j]
+                PREFETCH(&communities[other])
+                PREFETCH(&refined_community_weights[other_community])
                 j += 1
-            node_to_community_weight = node_to_community_weights[community]
-            node_to_community_weights[community] = 0
 
             # Find `new_community`, the community that would lead to the
             # largest positive change in the objective (`delta_objective`) if
             # we moved this node to it. Reset `node_to_community_weights` so it
-            # can be used for the next node. Loop-hoisting optimization:
-            # initialize `best_delta_objective` to `base_delta` instead of 0,
-            # to avoid subtracting `base_delta` from `delta_objective` within
-            # the loop. Only consider refined communities that are in the same
-            # unrefined community as this node.
+            # can be used for the next node. Only consider refined communities
+            # that are in the same unrefined community as this node.
+            #
+            # Unlike in the move phase, `base_delta` (the change in the
+            # objective from leaving the node where it is) is always exactly
+            # zero here, so we don't compute it. The node is alone in its
+            # refined community, so `community_weight` equals `weighted_degree`
+            # and the resolution term cancels out, and its only edge to its own
+            # refined community is the self-loop we skipped above. That also
+            # makes the move phase's loop-hoisting trick moot here: starting
+            # `best_delta_objective` at `base_delta` is just starting it at 0.
             scaled_resolution_times_weighted_degree = \
                 scaled_resolution * weighted_degree
-            base_delta = node_to_community_weight + \
-                scaled_resolution_times_weighted_degree * \
-                (weighted_degree - community_weight)
-            best_delta_objective = base_delta
-            start_index = indptr[i]
-            end_index = indptr[i + 1]
+            best_delta_objective = 0
             for j in range(start_index, end_index):
                 other = indices[j]
                 other_community = refined_communities[other]
@@ -1425,14 +1540,14 @@ cdef inline unsigned leiden_nogil(
                             new_community = other_community
 
             # If this node's community assignment is suboptimal (i.e. at least
-            # one community had `delta_objective` larger than `base_delta`),
-            # move it to the community with the largest `delta_objective`.
-            # Update the community weights to account for the move: add the
-            # moved node's weighted degree to its new community's weight.
-            # (Don't bother subtracting it from its old community, which is
-            # now empty and will not be visited again.) If the node's community
-            # assignment is already optimal, do not move it.
-            if best_delta_objective > base_delta:
+            # one community had `delta_objective` larger than 0), move it to
+            # the community with the largest `delta_objective`. Update the
+            # community weights to account for the move: add the moved node's
+            # weighted degree to its new community's weight. (Don't bother
+            # subtracting it from its old community, which is now empty and
+            # will not be visited again.) If the node's community assignment is
+            # already optimal, do not move it.
+            if best_delta_objective > 0:
                 refined_communities[i] = new_community
                 refined_community_weights[new_community] += weighted_degree
             else:
@@ -1448,15 +1563,26 @@ cdef inline unsigned leiden_nogil(
                     with gil:
                         raise KeyboardInterrupt
 
+        # If this is the first Leiden iteration, allocate
+        # `community_node_indptr`. Zero it here so the relabeling pass below
+        # can count into it.
+        if leiden_iteration == 0:
+            community_node_indptr.resize(num_refined_communities + 1)
+        for i in range(num_refined_communities):
+            community_node_indptr[i] = 0
+
         # Relabel the refined communities to make them contiguous integers, by
         # mapping them through the `original_to_contiguous` mapping. For
         # instance, if the only non-empty communities after the refinement
         # phase are 2, 7, etc., renumber 2 to 0, 7 to 1, and so on. This makes
         # it easier to create a new CSR graph in the aggregation phase, where
-        # each refined community becomes a single node.
+        # each refined community becomes a single node. Count the nodes in each
+        # refined community in the same pass, for the counting sort in the
+        # aggregation phase.
         for i in range(num_nodes):
-            refined_communities[i] = \
-                original_to_contiguous[refined_communities[i]]
+            community = original_to_contiguous[refined_communities[i]]
+            refined_communities[i] = community
+            community_node_indptr[community] += 1
 
         # Reinitialize `communities` to the unrefined communities from the move
         # phase: if multiple refined communities were part of the same
@@ -1477,6 +1603,12 @@ cdef inline unsigned leiden_nogil(
         # community's node in the supergraph to be constructed in the
         # aggregation phase and used in the next Leiden iteration.
         for contiguous_index in range(num_refined_communities):
+            # Prefetch `communities` and `refined_community_weights` at the
+            # original index
+            if contiguous_index + 8 < num_refined_communities:
+                future_i = contiguous_to_original[contiguous_index + 8]
+                PREFETCH(&communities[future_i])
+                PREFETCH(&refined_community_weights[future_i])
             original_index = contiguous_to_original[contiguous_index]
             communities[contiguous_index] = communities[original_index]
             weighted_degrees[contiguous_index] = \
@@ -1496,34 +1628,24 @@ cdef inline unsigned leiden_nogil(
             for i in range(num_cells):
                 final_communities[i] = \
                     refined_communities[final_communities[i]]
-        # If this is the first Leiden iteration, allocate
-        # `community_node_indptr`
-        else:
-            community_node_indptr.resize(num_refined_communities + 1)
 
-        # Group nodes by their refined community using counting sort
-        for i in range(num_refined_communities + 1):
-            community_node_indptr[i] = 0
-        for i in range(num_nodes):
-            community_node_indptr[refined_communities[i]] += 1
-
+        # Group nodes by their refined community using counting sort. Take
+        # inclusive prefix sums, so each community's entry holds the end of its
+        # range rather than the start, then place nodes in reverse. By the time
+        # the placement is done, `community_node_indptr` is exactly the indptr
+        # we want.
         current_sum = 0
         for i in range(num_refined_communities):
-            count = community_node_indptr[i]
+            current_sum += community_node_indptr[i]
             community_node_indptr[i] = current_sum
-            current_sum += count
         community_node_indptr[num_refined_communities] = current_sum
 
-        for i in range(num_nodes):
-            community = refined_communities[i]
-            community_nodes[community_node_indptr[community]] = i
-            community_node_indptr[community] += 1
-
-        i = num_refined_communities
+        i = <unsigned> num_nodes
         while i > 0:
-            community_node_indptr[i] = community_node_indptr[i - 1]
             i -= 1
-        community_node_indptr[0] = 0
+            community = refined_communities[i]
+            community_node_indptr[community] -= 1
+            community_nodes[community_node_indptr[community]] = i
 
         # Set up ping-pong pointers for the supergraph. On the first two
         # iterations, allocate the buffers underlying these pointers.
@@ -1562,9 +1684,29 @@ cdef inline unsigned leiden_nogil(
             num_touched = 0
             for k in range(community_node_indptr[community],
                            community_node_indptr[community + 1]):
+                # `community_nodes` is sequential, but the row it points at is
+                # not, so prefetch
+                if k + 8 < num_nodes:
+                    PREFETCH(&indptr[community_nodes[k + 8]])
+                if k + 4 < num_nodes:
+                    PREFETCH(&indices[indptr[community_nodes[k + 4]]])
+                    PREFETCH(&data[indptr[community_nodes[k + 4]]])
                 i = community_nodes[k]
                 start_index = indptr[i]
                 end_index = indptr[i + 1]
+                # The self-loop, if there is one, is the first entry of the
+                # row, so handle it here and let the loops below assume there
+                # isn't one. Add it twice to cancel the halving further down,
+                # which is there to undo the double-counting of symmetric
+                # edges and shouldn't apply to a self-loop.
+                if leiden_iteration and start_index != end_index and \
+                        <unsigned> indices[start_index] == i:
+                    if node_to_community_weights[community] == 0:
+                        touched_communities[num_touched] = community
+                        num_touched += 1
+                    node_to_community_weights[community] += \
+                        2 * data[start_index]
+                    start_index += 1
                 j = start_index
                 while j < end_index - 16:
                     PREFETCH(&refined_communities[indices[j + 16]])
@@ -1574,8 +1716,7 @@ cdef inline unsigned leiden_nogil(
                     if node_to_community_weights[other_community] == 0:
                         touched_communities[num_touched] = other_community
                         num_touched += 1
-                    node_to_community_weights[other_community] += \
-                        2 * edge_weight if other == i else edge_weight
+                    node_to_community_weights[other_community] += edge_weight
                     j += 1
                 while j < end_index:
                     other = indices[j]
@@ -1584,8 +1725,7 @@ cdef inline unsigned leiden_nogil(
                     if node_to_community_weights[other_community] == 0:
                         touched_communities[num_touched] = other_community
                         num_touched += 1
-                    node_to_community_weights[other_community] += \
-                        2 * edge_weight if other == i else edge_weight
+                    node_to_community_weights[other_community] += edge_weight
                     j += 1
 
             # Halve the intra-community edges, which will become self-edges in
@@ -1598,18 +1738,31 @@ cdef inline unsigned leiden_nogil(
             # input graph.
             #
             # However, do not halve self-loops if this is the supernode graph.
-            # This is why we do `2 * edge_weight if other == i` above, so it
+            # This is why the self-loop is added twice in the peel above, so it
             # cancels out the halving here.
             node_to_community_weights[community] *= 0.5
 
-            # Write out edges for this community
+            # Write out the self-edge first, if there is one, so that the next
+            # iteration's move and refinement phases find each node's self-loop
+            # at the start of its row without having to search. Every edge
+            # weight is positive, so a nonzero entry here means some node in
+            # this community had an edge to another node in it, or to itself.
+            if node_to_community_weights[community] != 0:
+                next_data[edges_written] = \
+                    node_to_community_weights[community]
+                next_indices[edges_written] = community
+                edges_written += 1
+                node_to_community_weights[community] = 0
+
+            # Write out the remaining edges for this community
             for k in range(num_touched):
                 other_community = touched_communities[k]
-                next_data[edges_written] = \
-                    node_to_community_weights[other_community]
-                next_indices[edges_written] = other_community
-                edges_written += 1
-                node_to_community_weights[other_community] = 0
+                if other_community != community:
+                    next_data[edges_written] = \
+                        node_to_community_weights[other_community]
+                    next_indices[edges_written] = other_community
+                    edges_written += 1
+                    node_to_community_weights[other_community] = 0
 
             next_indptr[community + 1] = edges_written
 
