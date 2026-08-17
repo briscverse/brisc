@@ -4751,26 +4751,35 @@ class Pseudobulk:
         # ones below. Columns that are already Enum are left untouched, to
         # preserve their existing level order (which matters for ordinal Enum
         # columns); other columns get sorted unique values as their levels.
+        #
         # Integer columns in `categorical_columns` or `ordinal_columns` are
         # also cast to Enum, with the categories being the integers cast to
-        # strings; this requires `replace_strict()` since polars (as of version
-        # 1.0) does not support Enums with non-string categories and also
-        # disallows the direct cast to Enum in this scenario.
+        # strings; this requires casting the column to String first, since
+        # polars (as of version 1.0) does not support Enums with non-string
+        # categories and also disallows direct integer-to-Enum casts.
         columns_to_cast = [column for column in
                            unordered_columns + ordered_columns
                            if obs[column].dtype.base_type() != pl.Enum]
         if columns_to_cast:
-             casts = []
-             for column in columns_to_cast:
-                 levels = obs[column].unique().sort().drop_nulls()
-                 labels = levels.cast(pl.String)
-                 casts.append(pl.col(column)
-                              .replace_strict(levels,
-                                              labels.cast(pl.Enum(labels))))
-             obs = obs.with_columns(casts)
+            # Compute the levels before casting, so integer factors keep
+            # numeric rather than lexicographic level order
+            levels = obs.select(
+                pl.selectors.by_name(columns_to_cast)
+                .unique()
+                .sort()
+                .implode()
+                .list.drop_nulls())
+            obs = obs.with_columns(
+                (pl.col(column).cast(pl.String)
+                 if obs[column].dtype.base_type() in INTEGER_DTYPES else
+                 pl.col(column))
+                .cast(pl.Enum(levels[column][0].cast(pl.String)))
+                for column in columns_to_cast)
 
         # Cast 64-bit integer columns to Float64, since `to_r()` maps them to
-        # R's integer64 class, which `model.matrix()` does not recognize
+        # R's integer64 class, which `model.matrix()` does not recognize. This
+        # does not affect integer columns  in `categorical_columns` or
+        # `ordinal_columns`, which have already become Enums by this point.
         obs = obs.cast({pl.Int64: pl.Float64, pl.UInt64: pl.Float64})
 
         # Convert the selected columns of `obs` to R
