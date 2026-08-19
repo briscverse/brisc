@@ -57,7 +57,7 @@ brisc is a high-performance library for analyzing single-cell data at scale. It 
 
 <div class="code-grid">
 <div class="code-card code-card--left">
-<div class="card-tab"><span class="card-tab-title">Basic workflow</span><span class="card-dots"><span class="card-dot card-dot-green"></span><span class="card-dot card-dot-yellow"></span><span class="card-dot card-dot-red"></span></span></div>
+<div class="card-tab"><span class="card-tab-title">Basic workflow</span></div>
 <div class="card-code">
 
 ```python
@@ -77,7 +77,7 @@ sc = SingleCell('data.h5ad')\
 </div>
 </div>
 <div class="code-card code-card--right">
-<div class="card-tab"><span class="card-tab-title">Label transfer</span><span class="card-dots"><span class="card-dot card-dot-green"></span><span class="card-dot card-dot-yellow"></span><span class="card-dot card-dot-red"></span></span></div>
+<div class="card-tab"><span class="card-tab-title">Label transfer</span></div>
 <div class="card-code">
 
 ```python
@@ -97,7 +97,7 @@ sc_query = sc_query.label_transfer_from(
 </div>
 </div>
 <div class="code-card code-card--center">
-<div class="card-tab"><span class="card-tab-title">Pseudobulk differential expression</span><span class="card-dots"><span class="card-dot card-dot-green"></span><span class="card-dot card-dot-yellow"></span><span class="card-dot card-dot-red"></span></span></div>
+<div class="card-tab"><span class="card-tab-title">Pseudobulk differential expression</span></div>
 <div class="card-code">
 
 ```python

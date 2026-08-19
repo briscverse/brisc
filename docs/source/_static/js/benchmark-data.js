@@ -4,7 +4,7 @@ window.BENCHMARK_DATA = {
     "Basic workflow": {
       "hardware": "cpu",
       "bars": {
-        "brisc": 185.97,
+        "brisc": 179.4,
         "scanpy": 18791.91,
         "seurat": 41129.28
       }
@@ -29,7 +29,7 @@ window.BENCHMARK_DATA = {
       "hardware": "gpu",
       "note": "96 CPUs, 4× H100 GPU, 752 GB RAM",
       "bars": {
-        "brisc": 352.04,
+        "brisc": 555.28,
         "rapids": 862.59
       }
     }

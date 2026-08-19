@@ -527,8 +527,7 @@ html:has(.showcase-chart) .code-grid {
 }
 
 /* Tab header integrated into the card (same font size + color as the
-   bar-group titles on the chart). The three mac-style traffic-light dots
-   live at the top-right of the tab via .card-dots. */
+   bar-group titles on the chart). */
 .card-tab {
     display: flex;
     align-items: center;
@@ -552,23 +551,6 @@ html[data-theme="dark"] .card-tab {
     text-overflow: ellipsis;
     white-space: nowrap;
 }
-.card-dots {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.4rem;
-    flex-shrink: 0;
-}
-.card-dot {
-    width: 0.72rem;
-    height: 0.72rem;
-    border-radius: 50%;
-    display: inline-block;
-    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
-}
-.card-dot-red    { background-color: #ff5f57; }
-.card-dot-yellow { background-color: #febc2e; }
-.card-dot-green  { background-color: #28c840; }
-
 /* Strip the Pygments chrome so the card's own border is the only box. */
 .card-code .highlight,
 .card-code div.highlight {
