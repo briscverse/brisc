@@ -50,7 +50,7 @@ brisc is a high-performance library for analyzing single-cell data at scale. It 
 <div class="showcase-chart">
 <div class="showcase-chart-header">
 <div class="showcase-chart-title">Performance · 10M cells · Parse Biosciences PBMC</div>
-<div class="showcase-chart-subtitle">192 CPUs, 755 GB RAM</div>
+<div class="showcase-chart-subtitle">192 CPUs, 749 GB RAM</div>
 </div>
 <div id="benchmark-chart"></div>
 </div>

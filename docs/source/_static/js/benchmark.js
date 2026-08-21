@@ -3,7 +3,7 @@
 // once the width transition ends.
 // Data shape (injected by conf.py at build time):
 //   window.BENCHMARK_DATA = {
-//     subtitle: "192 CPUs, 755 GB RAM",  // chart-level default
+//     subtitle: "192 CPUs, 749 GB RAM",  // chart-level default
 //     groups: {
 //       "Basic workflow": {
 //         hardware: "cpu",

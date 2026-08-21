@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "subtitle": "192 CPUs, 755 GB RAM",
+  "subtitle": "192 CPUs, 749 GB RAM",
   "groups": {
     "Basic workflow": {
       "hardware": "cpu",
