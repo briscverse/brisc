@@ -827,6 +827,19 @@ if sys.platform == 'linux':
         max(1, len(tuple(Path('/sys/devices/system/node').glob('node[0-9]*'))))
     libc = ctypes.CDLL('libc.so.6', use_errno=True)
 
+    # Request huge pages only when the kernel won't compact memory
+    # synchronously to satisfy the request (~10x slowdowns on fragmented
+    # nodes); with enabled=always it uses free huge pages anyway.
+    def _thp_setting(name):
+        try:
+            match = re.search(r'\[([\w+]+)\]', Path(
+                '/sys/kernel/mm/transparent_hugepage', name).read_text())
+            return match.group(1) if match else None
+        except OSError:
+            return None
+    _advise_hugepage = _thp_setting('enabled') == 'madvise' and \
+        _thp_setting('defrag') in ('defer', 'never')
+
 
 def numa_zeros(shape: int | np.integer | tuple[int | np.integer, ...],
                dtype: np._typing.DTypeLike = np.float64) -> np.ndarray:
@@ -886,11 +899,12 @@ def numa_zeros(shape: int | np.integer | tuple[int | np.integer, ...],
     MADV_NOHUGEPAGE = 15
     MADV_HUGEPAGE = 14
     addr = ctypes.addressof(ctypes.c_char.from_buffer(mm))
-    libc.madvise(ctypes.c_void_p(addr),
-                 ctypes.c_size_t(nbytes),
-                 ctypes.c_int(MADV_NOHUGEPAGE if bytes_per_node <
-                              MIN_HUGE_PAGES_PER_NODE * HUGE_PAGE_SIZE else
-                              MADV_HUGEPAGE))
+    if bytes_per_node < MIN_HUGE_PAGES_PER_NODE * HUGE_PAGE_SIZE:
+        libc.madvise(ctypes.c_void_p(addr), ctypes.c_size_t(nbytes),
+                     ctypes.c_int(MADV_NOHUGEPAGE))
+    elif _advise_hugepage:
+        libc.madvise(ctypes.c_void_p(addr), ctypes.c_size_t(nbytes),
+                     ctypes.c_int(MADV_HUGEPAGE))
 
     return np.frombuffer(mm, dtype=dtype).reshape(shape)
 
