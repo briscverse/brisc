@@ -17,7 +17,7 @@ import warnings
 from collections.abc import Iterable
 from functools import reduce
 from pathlib import Path
-from typing import Any, Literal, Sequence, Union
+from typing import Any, Literal, NamedTuple, Sequence, Union
 
 
 FLOAT_DTYPES = pl.Float16, pl.Float32, pl.Float64
@@ -1245,6 +1245,17 @@ def sparse_major_stack(arrays: Sequence['csr_array'] | Sequence['csc_array'],
     return result
 
 
+class _SparseArrays(NamedTuple):
+    """A `data`/`indices`/`indptr` triple, which is all `csr_hstack()` reads.
+
+    Used by `sparse_minor_stack()` to hand it dtype-matched buffers without
+    paying for a full sparse array's validation.
+    """
+    data: np.ndarray
+    indices: np.ndarray
+    indptr: np.ndarray
+
+
 def sparse_minor_stack(arrays: Sequence['csr_array'] | Sequence['csc_array'],
                        *,
                        num_threads: int) -> 'csr_array' | 'csc_array':
@@ -1279,9 +1290,29 @@ def sparse_minor_stack(arrays: Sequence['csr_array'] | Sequence['csc_array'],
 
     # Allocate output arrays
     num_major = first_array.shape[not is_csr]
-    data = np.empty(total_nnz, dtype=first_array.dtype)
+    data_dtype = first_array.dtype
+    data = np.empty(total_nnz, dtype=data_dtype)
     indices = np.empty(total_nnz, dtype=index_dtype)
     indptr = np.empty(num_major + 1, dtype=index_dtype)
+
+    # Cast every input to the output's dtypes first, like sparse_major_stack()
+    # does. `csr_hstack()` reinterpret-casts each input's raw buffer to the
+    # fused types resolved from its own memoryview arguments -- which come from
+    # the OUTPUT arrays -- so an input whose `data`, `indices` or `indptr` has a
+    # different width is read at the wrong stride. That is not a slow path or a
+    # wrong answer, it is an out-of-bounds read and write.
+    #
+    # Mixed widths arise naturally: `indices` is int64 only when an array needs
+    # it, so stacking a small array with a large one, or a subset of a >2^31
+    # non-zero array (subsetting keeps the parent's index dtype) with a freshly
+    # built one, mixes int32 and int64.
+    arrays = [array if array.data.dtype == data_dtype and
+                       array.indices.dtype == index_dtype and
+                       array.indptr.dtype == index_dtype
+              else _SparseArrays(array.data.astype(data_dtype, copy=False),
+                                 array.indices.astype(index_dtype, copy=False),
+                                 array.indptr.astype(index_dtype, copy=False))
+              for array in arrays]
 
     # Perform the concatenation, filling `data`, `indices`, and `indptr`
     csr_hstack(arrays, offsets.astype(index_dtype, copy=False), bitview(data),
