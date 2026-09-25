@@ -98,12 +98,14 @@ try:
             linker_flags = ['-fopenmp', '-s']
         if march:
             compiler_flags.append(march)
-        # On Mac, normalize.pyx gets -fno-associative-math; without it,
-        # -ffast-math leads to floating-point roundoff differences between code
-        # paths. (Only tested on x86.)
-        normalize_compiler_flags = compiler_flags
-        if mac:
-            normalize_compiler_flags += ['-fno-associative-math']
+        # normalize.pyx must be compiled without fast-math semantics or
+        # floating-point contraction to avoid floating-point roundoff
+        # differences between vectorized and non-vectorized code paths.
+        normalize_compiler_flags = [
+            '-O3' if flag == '-Ofast' else '/fp:precise' if flag == '/fp:fast'
+            else flag for flag in compiler_flags if flag != '-ffast-math']
+        if not windows:
+            normalize_compiler_flags.append('-ffp-contract=off')
         if variant_name:
             # Copy each Cython source file to a separate temporary directory
             # for each variant
