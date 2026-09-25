@@ -17,7 +17,7 @@ import warnings
 from collections.abc import Iterable
 from functools import reduce
 from pathlib import Path
-from typing import Any, Literal, Sequence, Union
+from typing import Any, Literal, NamedTuple, Sequence, Union
 
 
 FLOAT_DTYPES = pl.Float16, pl.Float32, pl.Float64
@@ -395,7 +395,9 @@ def check_types(variable: Iterable[Any],
 
 def concatenate(arrays: Sequence[np.ndarray] | Sequence[np.ndarray],
                 *,
-                num_threads: int) -> np.ndarray | np.ndarray:
+                num_threads: int,
+                output_dtype: np.typing.DTypeLike | None = None) -> \
+        np.ndarray | np.ndarray:
     """
     Concatenate 1D or 2D C-contiguous dense arrays.
 
@@ -404,11 +406,16 @@ def concatenate(arrays: Sequence[np.ndarray] | Sequence[np.ndarray],
     Args:
         arrays: the arrays to concatenate
         num_threads: the number of threads to use when concatenating
+        output_dtype: an optional dtype to enforce for the output array. If
+                      not specified, will be inferred via `np.result_type()`
 
     Returns:
         The concatenated array.
     """
-    return concatenate_dense(arrays, num_threads)
+    if output_dtype is None:
+        output_dtype = np.result_type(*(array.dtype for array in arrays))
+    return concatenate_dense([array.astype(output_dtype, copy=False)
+                              for array in arrays], num_threads)
 
 
 def fdr(pvalues: pl.Expr) -> pl.Expr:
@@ -842,7 +849,7 @@ if sys.platform == 'linux':
 
 
 def numa_zeros(shape: int | np.integer | tuple[int | np.integer, ...],
-               dtype: np._typing.DTypeLike = np.float64) -> np.ndarray:
+               dtype: np.typing.DTypeLike = np.float64) -> np.ndarray:
     """
     Drop-in replacement for np.zeros() that guarantees fresh, unmapped virtual
     memory via mmap on Linux. Bypasses glibc's malloc arena to ensure strict
@@ -1220,29 +1227,48 @@ def sparse_major_stack(arrays: Sequence['csr_array'] | Sequence['csc_array'],
         The concatenated sparse array.
     """
     from .sparse import csc_array, csr_array
+    first_array = arrays[0]
+    is_csr = isinstance(first_array, csr_array)
+
+    # Determine whether the output sparse array can get away with using int32
+    # instead of int64 `indices` and `indptr`
+    total_nnz = sum(int(array.indptr[-1]) for array in arrays)
+    num_minor = first_array.shape[is_csr]
+    index_dtype = np.int64 \
+        if num_minor > 2_147_483_647 or total_nnz > 2_147_483_647 else np.int32
+
+    # Concatenate `data`, `indices` and `indptr`
     data = concatenate([array.data for array in arrays],
                        num_threads=num_threads)
-    if sum(int(array.indptr[-1]) for array in arrays) > 2_147_483_647:
-        indices = concatenate([array.indices.astype(np.int64, copy=False)
-                               for array in arrays], num_threads=num_threads)
-        indptr = concatenate_indptrs_int64([
-            array.indptr.astype(np.int64, copy=False)
-            for array in arrays], num_threads)
-    else:
-        indices = concatenate([array.indices.astype(np.int32, copy=False)
-                               for array in arrays], num_threads=num_threads)
-        indptr = concatenate_indptrs_int32([
-            array.indptr.astype(np.int32, copy=False)
-            for array in arrays], num_threads)
-    first_array = arrays[0]
-    if isinstance(first_array, csr_array):
-        shape = len(indptr) - 1, first_array.shape[1]
+    indices = concatenate([array.indices for array in arrays],
+                          num_threads=num_threads, output_dtype=index_dtype)
+    indptrs = [array.indptr.astype(index_dtype, copy=False)
+               for array in arrays]
+    indptr = concatenate_indptrs_int64(indptrs, num_threads) \
+        if index_dtype == np.int64 else \
+        concatenate_indptrs_int32(indptrs, num_threads)
+
+    # Construct the final sparse array
+    num_major = len(indptr) - 1
+    if is_csr:
+        shape = num_major, num_minor
         result = csr_array((data, indices, indptr), shape=shape)
     else:
-        shape = first_array.shape[0], len(indptr) - 1
+        shape = num_minor, num_major
         result = csc_array((data, indices, indptr), shape=shape)
     result._num_threads = first_array._num_threads
     return result
+
+
+class _ArrayContainer(NamedTuple):
+    # A container used in `sparse_minor_stack()` to hold a sparse array's
+    # `data`, `indices` and `indptr` after casting them to the output's dtypes.
+    # We don't construct a sparse array here because scipy chooses its own
+    # index dtype on construction and may downcast int64 indices back to int32,
+    # undoing the cast.
+    data: np.ndarray
+    indices: np.ndarray
+    indptr: np.ndarray
 
 
 def sparse_minor_stack(arrays: Sequence['csr_array'] | Sequence['csc_array'],
@@ -1279,9 +1305,16 @@ def sparse_minor_stack(arrays: Sequence['csr_array'] | Sequence['csc_array'],
 
     # Allocate output arrays
     num_major = first_array.shape[not is_csr]
-    data = np.empty(total_nnz, dtype=first_array.dtype)
+    data_dtype = np.result_type(*(array.dtype for array in arrays))
+    data = np.empty(total_nnz, dtype=data_dtype)
     indices = np.empty(total_nnz, dtype=index_dtype)
     indptr = np.empty(num_major + 1, dtype=index_dtype)
+
+    # Cast every input to the output's data types
+    arrays = [_ArrayContainer(array.data.astype(data_dtype, copy=False),
+                              array.indices.astype(index_dtype, copy=False),
+                              array.indptr.astype(index_dtype, copy=False))
+              for array in arrays]
 
     # Perform the concatenation, filling `data`, `indices`, and `indptr`
     csr_hstack(arrays, offsets.astype(index_dtype, copy=False), bitview(data),

@@ -140,7 +140,7 @@ def concatenate_dense(list arrays, const unsigned num_threads):
         for array_index in range(num_arrays):
             array = arrays[array_index]
 
-            # 1) the pointer to each array's data, after the first 0
+            # 1) the pointer to each array's data
             array_pointers[array_index] = <char*> np.PyArray_DATA(array)
 
             # 2) the number of bytes per array
@@ -686,9 +686,9 @@ def csr_hstack(list arrays,
                const unsigned num_threads):
     # Closely based on SciPy's `csr_hstack()` function from sparsetools/csr.h
 
-    cdef unsigned array_index, i, offset, num_arrays = len(arrays)
+    cdef unsigned array_index, i, num_arrays = len(arrays)
     cdef np.ndarray array_data, array_indices, array_indptr
-    cdef signed_integer total_nnz, start, end, nnz, output_offset, j
+    cdef signed_integer total_nnz, start, end, nnz, offset, output_offset, j
     cdef uninitialized_vector[bit_width*] data_pointers
     cdef uninitialized_vector[signed_integer*] indices_pointers, \
         indptr_pointers

@@ -7907,7 +7907,7 @@ class SingleCell:
                           varp=self._varp, uns=uns,
                           num_threads=self._num_threads)
 
-    def cast_X(self, dtype: np._typing.DTypeLike, /) -> SingleCell:
+    def cast_X(self, dtype: np.typing.DTypeLike, /) -> SingleCell:
         """
         Cast `X` to the specified data type.
 

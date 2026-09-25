@@ -2622,7 +2622,7 @@ class Pseudobulk:
                           num_threads=self._num_threads)
 
     def cast_X(self,
-               dtype: np._typing.DTypeLike,
+               dtype: np.typing.DTypeLike,
                /,
                *,
                cell_types: str | Iterable[str] | None = None,
