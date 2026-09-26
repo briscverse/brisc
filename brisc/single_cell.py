@@ -10980,11 +10980,13 @@ class SingleCell:
                        cells (or when `min_cells` is `None`, if not enough
                        genes are present).
             min_cells: if not `None`, filter to genes detected (with non-zero
-                       count) in ≥ this many cells in every dataset, before
-                       calculating highly variable genes. The default value of
-                       3 matches Seurat and Scanpy's recommended value. Note
-                       that genes with zero variance in any dataset will always
-                       be filtered out, even if `min_cells` is 0.
+                       count) in ≥ this many cells in total, summed across all
+                       datasets and batches, before calculating highly
+                       variable genes. A gene detected in fewer cells than this
+                       within one dataset or batch is not removed everywhere;
+                       it is simply unlikely to rank as highly variable there.
+                       The default value of 3 matches Seurat and Scanpy's
+                       recommended value.
             exclude: one or more optional case-insensitive regular expressions
                      matching genes to exclude from the highly variable gene
                      calculation. For instance, to exclude mitochondrial genes
@@ -11312,6 +11314,12 @@ class SingleCell:
 
         # Get the variance of each gene in each batch across cells passing QC
         norm_gene_vars = []
+        # Detections summed over batches, so that `min_cells` removes a gene
+        # only when it is rare overall. Filtering per batch removed any gene
+        # rare in ANY one batch from every batch: with one composition-skewed
+        # batch (e.g. a sorted population), that drops cell-type markers that
+        # are highly variable everywhere else.
+        total_nonzero_count = None
         for X, cell_mask, gene_indices in batches:
             num_dataset_genes = X.shape[1]
             mean = np.empty(num_dataset_genes, dtype=np.float32)
@@ -11394,18 +11402,21 @@ class SingleCell:
                 ((num_cells * np.square(mean)) + squared_batch_counts_sum -
                  2 * batch_counts_sum * mean))
 
-            # If `min_cells` is non-zero, set variances to `null` for genes
-            # with a non-zero count less than `min_cells`
-            if min_cells:
-                norm_gene_var = norm_gene_var\
-                    .set(pl.Series(nonzero_count < min_cells), None)
-
             # If there are multiple datasets, `norm_gene_var` is currently with
             # respect to the genes in `dataset.var_names`; map back to the
-            # genes in `genes_in_any_dataset`, filling with `null`
-            if others:
+            # genes in `genes_in_all_datasets`
+            if gene_indices is not None:
                 norm_gene_var = norm_gene_var[gene_indices]
+                nonzero_count = nonzero_count[gene_indices.to_numpy()]
             norm_gene_vars.append(norm_gene_var)
+
+            # If `min_cells` is non-zero, accumulate each gene's non-zero
+            # count across batches; genes below `min_cells` in total are
+            # filtered out below
+            if min_cells:
+                total_nonzero_count = nonzero_count.astype(np.uint64) \
+                    if total_nonzero_count is None else \
+                    total_nonzero_count + nonzero_count
 
         rank = pl.exclude('gene').rank('min', descending=True)
         final_rank = pl.struct(
@@ -11415,9 +11426,9 @@ class SingleCell:
         # Note: the expression for `median_rank` can be replaced by
         # `pl.median_horizontal(pl.exclude('gene'))` once polars implements it
         hvgs = pl.DataFrame([genes_in_all_datasets] + norm_gene_vars)\
+            .pipe(lambda df: df.filter(pl.Series(
+                total_nonzero_count >= min_cells)) if min_cells else df)\
             .lazy()\
-            .pipe(lambda df: df.drop_nulls(pl.selectors.exclude('gene'))
-                             if min_cells or others else df)\
             .with_columns(pl.when(rank <= num_genes).then(rank))\
             .with_columns(nbatches=pl.sum_horizontal(pl.exclude('gene')
                                                      .is_not_null()),
