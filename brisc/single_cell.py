@@ -13456,8 +13456,14 @@ class SingleCell:
                    function; must be positive
             chunk_size_Harmony: the chunk size to use for Harmony. Setting this
                                 to a power of 2 is recommended. Defaults to
-                                `min(256, total number of cells)`. Not used
-                                when `original=True`.
+                                256, raised to `ceil(total number of cells /
+                                4096)` when that is larger (so above ~1M
+                                cells) and capped at the total number of
+                                cells. Harmony keeps buffers of size
+                                `number of chunks × number of batches ×
+                                num_clusters`, so bounding the number of
+                                chunks keeps memory bounded when there are
+                                many batches. Not used when `original=True`.
             seed: the random seed to use for the initial k-means clustering
             original: if `True`, use the original Harmony algorithm's blocking
                       strategy, rather than our nested chunks-within-blocks
@@ -13794,11 +13800,16 @@ class SingleCell:
                 f'({num_cells:,})')
             raise ValueError(error_message)
 
-        # If `chunk_size_Harmony` is `None`, set it to `min(256, num_cells)`.
+        # If `chunk_size_Harmony` is `None`, set it to 256, raised so that
+        # there are at most 4096 chunks, and capped at `num_cells`. The
+        # per-chunk buffers scale with chunks x batches x clusters: at 18.4M
+        # cells and 3,867 batches, 256-cell chunks would need 222 GB for
+        # them alone.
         # Otherwise, check that it is less than the total number of cells
         # across all datasets.
         if chunk_size_Harmony is None:
-            chunk_size_Harmony = min(256, num_cells)
+            chunk_size_Harmony = min(max(256, -(-num_cells // 4096)),
+                                     num_cells)
         elif chunk_size_Harmony >= num_cells:
             error_message = (
                 f'chunk_size_Harmony is {chunk_size_Harmony:,}, but must be '
