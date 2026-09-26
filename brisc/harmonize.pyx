@@ -3,7 +3,7 @@
 from cpython.exc cimport PyErr_CheckSignals
 from cython.parallel cimport parallel, prange, threadid
 from libcpp.algorithm cimport fill
-from libcpp.cmath cimport abs, ceil, exp, log, sqrt
+from libcpp.cmath cimport abs, ceil, exp, log, pow, sqrt
 from libcpp.vector cimport vector
 from scipy.linalg.cython_blas cimport sgemm, sgemv
 from .cyutils cimport bin_count_nogil, integer, randint, srand, \
@@ -22,7 +22,7 @@ def label_transfer(const unsigned[:, ::1] neighbors,
         most_common_cell_type, second_most_common_cell_type, \
         max_count, second_max_count, num_neighbors = neighbors.shape[1]
     cdef unsigned long long num_cells = neighbors.shape[0]
-    cdef float inv_num_neighbors = 1.0 / num_neighbors
+    cdef float inv_num_neighbors = <float> 1 / num_neighbors
     cdef uninitialized_vector[unsigned] counts_buffer
     cdef vector[uninitialized_vector[unsigned]] thread_counts
     cdef unsigned[::1] counts
@@ -220,7 +220,7 @@ cdef inline void normalize_rows_inplace(float[:, ::1] arr):
         norm = 0
         for j in range(arr.shape[1]):
             norm += arr[i, j] * arr[i, j]
-        norm = 1 / sqrt(norm)
+        norm = <float> 1 / sqrt(norm)
         for j in range(arr.shape[1]):
             arr[i, j] = arr[i, j] * norm
 
@@ -236,7 +236,7 @@ cdef inline void normalize_rows_inplace_parallel(
         norm = 0
         for j in range(num_columns):
             norm = norm + arr[i, j] * arr[i, j]
-        norm = 1 / sqrt(norm)
+        norm = <float> 1 / sqrt(norm)
         for j in range(num_columns):
             arr[i, j] = arr[i, j] * norm
 
@@ -253,7 +253,7 @@ def normalize_rows(const float[:, ::1] arr,
             norm = 0
             for j in range(num_columns):
                 norm += arr[i, j] * arr[i, j]
-            norm = 1 / sqrt(norm)
+            norm = <float> 1 / sqrt(norm)
             for j in range(num_columns):
                 out[i, j] = arr[i, j] * norm
     else:
@@ -261,7 +261,7 @@ def normalize_rows(const float[:, ::1] arr,
             norm = 0
             for j in range(num_columns):
                 norm = norm + arr[i, j] * arr[i, j]
-            norm = 1 / sqrt(norm)
+            norm = <float> 1 / sqrt(norm)
             for j in range(num_columns):
                 out[i, j] = arr[i, j] * norm
 
@@ -331,7 +331,7 @@ def harmony(const float[:, ::1] PCs,
     cdef float base, kmeans_error, entropy_term, norm, Rij, R_sum, O_sum, \
         diversity_penalty, prev_objective, total, delta_Eij, delta_Oij, \
         Pr_bi, Eij, Oij, Rkj, objective, last_two, old, new, ridge_lambda, \
-        factor, batch_total, two_over_sigma = 2 / sigma, \
+        factor, batch_total, two_over_sigma = <float> 2 / sigma, \
         exp_neg_two_over_sigma = exp(-two_over_sigma)
     cdef float past_clustering_objectives[3]
     cdef str metrics
@@ -410,11 +410,11 @@ def harmony(const float[:, ::1] PCs,
         # Get the number (`N_b`) and fraction (`Pr_b`) of cells in each batch;
         # apply discounting to `theta`, if `tau` is non-zero
         bin_count_nogil(batch_labels, N_b, num_threads)
-        if tau > 0:
+        if tau:
             for i in range(num_batches):
                 Pr_b[i] = <float> N_b[i] / num_cells
-                base = exp(-N_b[i] / (num_clusters * tau))
-                theta_batch[i] = theta * (1 - base * base)
+                base = exp(-(<float> N_b[i]) / (num_clusters * tau))
+                theta_batch[i] = theta * (<float> 1 - base * base)
         else:
             for i in range(num_batches):
                 Pr_b[i] = <float> N_b[i] / num_cells
@@ -440,10 +440,10 @@ def harmony(const float[:, ::1] PCs,
                     norm = 0
                     for j in range(num_clusters):
                         Rij = exp(two_over_sigma * (distances[
-                            thread_index, i - chunk_start, j] - 1))
+                            thread_index, i - chunk_start, j] - <float> 1))
                         R[i, j] = Rij
                         norm += Rij
-                    norm = 1 / norm
+                    norm = <float> 1 / norm
                     for j in range(num_clusters):
                         Rij = R[i, j]
                         Rij = Rij * norm
@@ -451,7 +451,7 @@ def harmony(const float[:, ::1] PCs,
                         R_sums[chunk_index, j] += Rij
                         delta_O[chunk_index, batch_label, j] += Rij
                         kmeans_error = kmeans_error + \
-                            Rij * (1 - distances[
+                            Rij * (<float> 1 - distances[
                                 thread_index, i - chunk_start, j])
                         entropy_term = entropy_term + Rij * log(Rij)
                 kmeans_errors[chunk_index] = kmeans_error
@@ -471,7 +471,7 @@ def harmony(const float[:, ::1] PCs,
         for chunk_index in range(num_chunks):
             kmeans_error += kmeans_errors[chunk_index]
             entropy_term += entropy_terms[chunk_index]
-        kmeans_error *= 2
+        kmeans_error *= <float> 2
         entropy_term *= sigma
 
         # Initialize `O` and compute the initial diversity penalty, the third
@@ -484,7 +484,8 @@ def harmony(const float[:, ::1] PCs,
                     O_sum += delta_O[chunk_index, i, j]
                 O[i, j] = O_sum
                 diversity[i, j] = \
-                    O_sum * log((O_sum + E[i, j] + 1) / (E[i, j] + 1))
+                    O_sum * log((O_sum + E[i, j] + <float> 1) /
+                                (E[i, j] + <float> 1))
         matrix_vector_multiply(diversity, theta_batch,
                                cluster_diversity_penalty,
                                transpose=True, alpha=1, beta=0)
@@ -549,7 +550,7 @@ def harmony(const float[:, ::1] PCs,
                             total = total + Y_chunk[chunk_index, i, j]
                         Y[i, j] = total
                         norm = norm + total * total
-                    norm = 1 / sqrt(norm)
+                    norm = <float> 1 / sqrt(norm)
                     for j in range(num_PCs):
                         Y[i, j] *= norm
 
@@ -604,8 +605,9 @@ def harmony(const float[:, ::1] PCs,
                                     Oij = O[i, j] + delta_Oij
                                     ratio[chunk_index, i, j] = \
                                         exp_neg_two_over_sigma * \
-                                        ((Eij + 1) / (Oij + Eij + 1)) ** \
-                                        theta_batch[i]
+                                        pow((Eij + <float> 1) /
+                                            (Oij + Eij + <float> 1),
+                                            theta_batch[i])
                                     delta_E[chunk_index, i, j] = delta_Eij
 
                             # Compute `distances = 2 / sigma * Z @ Y.T`
@@ -633,7 +635,7 @@ def harmony(const float[:, ::1] PCs,
                                         thread_index, i, j]) * \
                                         ratio[chunk_index, batch_label, j]
                                     norm += R[k, j]
-                                norm = 1 / norm
+                                norm = <float> 1 / norm
                                 for j in range(num_clusters):
                                     Rkj = R[k, j]
                                     Rkj = Rkj * norm
@@ -675,7 +677,7 @@ def harmony(const float[:, ::1] PCs,
                             for i in range(chunk_start, chunk_end):
                                 for j in range(num_clusters):
                                     kmeans_error = kmeans_error + \
-                                        R[i, j] * (1 - distances[
+                                        R[i, j] * (<float> 1 - distances[
                                             thread_index, i - chunk_start, j])
                                     entropy_term = \
                                         entropy_term + R[i, j] * log(R[i, j])
@@ -686,7 +688,7 @@ def harmony(const float[:, ::1] PCs,
                     for chunk_index in range(num_chunks):
                         kmeans_error += kmeans_errors[chunk_index]
                         entropy_term += entropy_terms[chunk_index]
-                    kmeans_error *= 2
+                    kmeans_error *= <float> 2
                     entropy_term *= sigma
 
                     # Compute the diversity penalty, the third component of the
@@ -695,7 +697,8 @@ def harmony(const float[:, ::1] PCs,
                     for i in range(num_batches):
                         for j in range(num_clusters):
                             diversity[i, j] = O[i, j] * log(
-                                (O[i, j] + E[i, j] + 1) / (E[i, j] + 1))
+                                (O[i, j] + E[i, j] + <float> 1) /
+                                (E[i, j] + <float> 1))
                     matrix_vector_multiply(diversity, theta_batch,
                                            cluster_diversity_penalty,
                                            transpose=True, alpha=1, beta=0)
@@ -766,16 +769,16 @@ def harmony(const float[:, ::1] PCs,
                 inv_cov_1[:] = 0
                 norm = 0
                 for i in range(num_batches):
-                    if O[i, k] < 1e-5 * N_b[i]:
+                    if O[i, k] < <float> 1e-5 * N_b[i]:
                         inv_cov_2[num_batches, i] = 0
                     else:
                         ridge_lambda = E[i, k] * alpha
-                        factor = 1 / (O[i, k] + ridge_lambda)
+                        factor = <float> 1 / (O[i, k] + ridge_lambda)
                         inv_cov_1[i, i] = factor
                         factor *= -O[i, k]
                         inv_cov_2[num_batches, i] = factor
-                        norm += O[i, k] * (1 + factor)
-                norm = 1 / norm
+                        norm += O[i, k] * (<float> 1 + factor)
+                norm = <float> 1 / norm
                 inv_cov_1[num_batches, num_batches] = norm
                 for i in range(num_batches):
                     inv_cov_1[num_batches, i] = \
@@ -804,7 +807,7 @@ def harmony(const float[:, ::1] PCs,
                 for j in prange(num_PCs, num_threads=num_threads):
                     total = 0
                     for batch_label in range(num_batches):
-                        if O[batch_label, k] < 1e-5 * N_b[batch_label]:
+                        if O[batch_label, k] < <float> 1e-5 * N_b[batch_label]:
                             R_scaled_PCs[j, batch_label] = 0
                         else:
                             batch_total = 0
@@ -905,7 +908,7 @@ def harmony_original(const float[:, ::1] PCs,
     cdef float base, kmeans_error, entropy_term, norm, Rij, \
         diversity_penalty, prev_objective, Pr_bi, Eij, Oij, Rkj, objective, \
         last_two, old, new, ridge_lambda, factor, total, \
-        two_over_sigma = 2 / sigma, \
+        two_over_sigma = <float> 2 / sigma, \
         exp_neg_two_over_sigma = exp(-two_over_sigma)
     cdef float past_clustering_objectives[3]
     cdef str metrics
@@ -964,11 +967,11 @@ def harmony_original(const float[:, ::1] PCs,
     # Get the number (`N_b`) and fraction (`Pr_b`) of cells in each batch;
     # apply discounting to `theta`, if `tau` is non-zero
     bin_count_nogil(batch_labels, N_b, num_threads=1)
-    if tau > 0:
+    if tau:
         for i in range(num_batches):
             Pr_b[i] = <float> N_b[i] / num_cells
-            base = exp(-N_b[i] / (num_clusters * tau))
-            theta_batch[i] = theta * (1 - base * base)
+            base = exp(-(<float> N_b[i]) / (num_clusters * tau))
+            theta_batch[i] = theta * (<float> 1 - base * base)
     else:
         for i in range(num_batches):
             Pr_b[i] = <float> N_b[i] / num_cells
@@ -990,10 +993,11 @@ def harmony_original(const float[:, ::1] PCs,
         for i in range(chunk_start, chunk_end):
             norm = 0
             for j in range(num_clusters):
-                Rij = exp(two_over_sigma * (distances[i - chunk_start, j] - 1))
+                Rij = exp(two_over_sigma *
+                          (distances[i - chunk_start, j] - <float> 1))
                 R[i, j] = Rij
                 norm += Rij
-            norm = 1 / norm
+            norm = <float> 1 / norm
             for j in range(num_clusters):
                 batch_label = batch_labels[i]
                 Rij = R[i, j]
@@ -1001,9 +1005,10 @@ def harmony_original(const float[:, ::1] PCs,
                 R[i, j] = Rij
                 R_sums[j] += Rij
                 O[batch_label, j] += Rij
-                kmeans_error += Rij * (1 - distances[i - chunk_start, j])
+                kmeans_error += \
+                    Rij * (<float> 1 - distances[i - chunk_start, j])
                 entropy_term += Rij * log(Rij)
-    kmeans_error *= 2
+    kmeans_error *= <float> 2
     entropy_term *= sigma
 
     # Initialize `E`
@@ -1017,7 +1022,8 @@ def harmony_original(const float[:, ::1] PCs,
     for i in range(num_batches):
         for j in range(num_clusters):
             diversity[i, j] = \
-                O[i, j] * log((O[i, j] + E[i, j] + 1) / (E[i, j] + 1))
+                O[i, j] * log((O[i, j] + E[i, j] + <float> 1) /
+                              (E[i, j] + <float> 1))
     matrix_vector_multiply(diversity, theta_batch, cluster_diversity_penalty,
                            transpose=True, alpha=1, beta=0)
     for i in range(num_clusters):
@@ -1057,7 +1063,7 @@ def harmony_original(const float[:, ::1] PCs,
                 norm = 0
                 for j in range(num_PCs):
                     norm += Y[i, j] * Y[i, j]
-                norm = 1 / sqrt(norm)
+                norm = <float> 1 / sqrt(norm)
                 for j in range(num_PCs):
                     Y[i, j] *= norm
 
@@ -1101,7 +1107,8 @@ def harmony_original(const float[:, ::1] PCs,
                         Eij = E[i, j]
                         Oij = O[i, j]
                         ratio[i, j] = exp_neg_two_over_sigma * \
-                            ((Eij + 1) / (Oij + Eij + 1)) ** theta_batch[i]
+                            pow((Eij + <float> 1) / (Oij + Eij + <float> 1),
+                                theta_batch[i])
                 R_sums[:] = 0
                 for i in range(block_end - block_start):
                     k = cell_order[block_start + i]
@@ -1111,7 +1118,7 @@ def harmony_original(const float[:, ::1] PCs,
                         Rkj = exp(distances[i, j]) * ratio[batch_label, j]
                         R[k, j] = Rkj
                         norm += Rkj
-                    norm = 1 / norm
+                    norm = <float> 1 / norm
                     for j in range(num_clusters):
                         Rkj = R[k, j]
                         Rkj *= norm
@@ -1144,9 +1151,9 @@ def harmony_original(const float[:, ::1] PCs,
                     for i in range(chunk_start, chunk_end):
                         for j in range(num_clusters):
                             kmeans_error += R[i, j] * \
-                                (1 - distances[i - chunk_start, j])
+                                (<float> 1 - distances[i - chunk_start, j])
                             entropy_term += R[i, j] * log(R[i, j])
-                kmeans_error *= 2
+                kmeans_error *= <float> 2
                 entropy_term *= sigma
 
                 # Compute the diversity penalty, the third component of the
@@ -1155,7 +1162,8 @@ def harmony_original(const float[:, ::1] PCs,
                 for i in range(num_batches):
                     for j in range(num_clusters):
                         diversity[i, j] = O[i, j] * log(
-                            (O[i, j] + E[i, j] + 1) / (E[i, j] + 1))
+                            (O[i, j] + E[i, j] + <float> 1) /
+                            (E[i, j] + <float> 1))
                 matrix_vector_multiply(diversity, theta_batch,
                                        cluster_diversity_penalty,
                                        transpose=True, alpha=1, beta=0)
@@ -1212,16 +1220,16 @@ def harmony_original(const float[:, ::1] PCs,
                 inv_cov_1[:] = 0
                 norm = 0
                 for i in range(num_batches):
-                    if O[i, k] < 1e-5 * N_b[i]:
+                    if O[i, k] < <float> 1e-5 * N_b[i]:
                         inv_cov_2[num_batches, i] = 0
                     else:
                         ridge_lambda = E[i, k] * alpha
-                        factor = 1 / (O[i, k] + ridge_lambda)
+                        factor = <float> 1 / (O[i, k] + ridge_lambda)
                         inv_cov_1[i, i] = factor
                         factor *= -O[i, k]
                         inv_cov_2[num_batches, i] = factor
-                        norm += O[i, k] * (1 + factor)
-                norm = 1 / norm
+                        norm += O[i, k] * (<float> 1 + factor)
+                norm = <float> 1 / norm
                 inv_cov_1[num_batches, num_batches] = norm
                 for i in range(num_batches):
                     inv_cov_1[num_batches, i] = \
@@ -1244,7 +1252,7 @@ def harmony_original(const float[:, ::1] PCs,
                 for j in range(num_PCs):
                     total = 0
                     for batch_label in range(num_batches):
-                        if O[batch_label, k] < 1e-5 * N_b[batch_label]:
+                        if O[batch_label, k] < <float> 1e-5 * N_b[batch_label]:
                             R_scaled_PCs[j, batch_label] = 0
                         else:
                             total += R_scaled_PCs[j, batch_label]

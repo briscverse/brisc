@@ -3,7 +3,7 @@
 
 from cython.parallel cimport parallel, threadid
 from libcpp.algorithm cimport sort
-from libcpp.cmath cimport abs, exp, isnan, log, log2
+from libcpp.cmath cimport abs, exp, exp2, log, log2
 from libcpp.vector cimport vector
 from .cyutils cimport numeric, uninitialized_vector
 
@@ -64,7 +64,7 @@ cdef inline void rankdata(const float* data,
                     break
 
         # Assign average rank to all tied elements
-        rank = 0.5 * (start_pos + i) + 0.5
+        rank = <float> (start_pos + i + 1) * <float> 0.5
         while start_pos < i:
             ranks[indices[start_pos]] = rank
             start_pos += 1
@@ -115,15 +115,15 @@ def calc_norm_factors(const numeric[:, ::1] X,
     ref_library_size = library_size[ref_sample]
     for i in range(num_samples):
         inverse_relative_library_size[i] = \
-            <float> ref_library_size / library_size[i]
+            <float> ref_library_size / <float> library_size[i]
 
     # Calculate each gene's log normalized expression (to use in the `absE`
     # calculation)
-    inverse_ref_library_size = 1. / ref_library_size
+    inverse_ref_library_size = <float> 1 / <float> ref_library_size
     for j in range(num_genes):
         count = X[ref_sample, j]
         log_normalized_X_ref[j] = \
-            log2(count * inverse_ref_library_size)
+            log2(<float> count * inverse_ref_library_size)
 
     # Calculate the normalization factor for each sample
     num_threads = min(num_threads, num_samples)
@@ -145,7 +145,7 @@ def calc_norm_factors(const numeric[:, ::1] X,
         indices = <unsigned[:num_genes]> indices_buffer.data()
 
         for i in range(num_samples):
-            inverse_library_size = 1. / library_size[i]
+            inverse_library_size = <float> 1 / <float> library_size[i]
             inverse_relative_library_size_i = inverse_relative_library_size[i]
             large_enough_logR = False
             n = 0
@@ -153,22 +153,23 @@ def calc_norm_factors(const numeric[:, ::1] X,
                 # Get the count and reference count for this gene; skip the
                 # gene if either are 0
                 ref_count = X[ref_sample, j]
-                if ref_count == 0:
+                if not ref_count:
                     continue
 
                 count = X[i, j]
-                if count == 0:
+                if not count:
                     continue
 
                 # Calculate the log ratio of expression accounting for library
                 # size
                 logR_ = log2(inverse_relative_library_size_i * (
-                    <float> count / ref_count))
+                    <float> count / <float> ref_count))
 
                 # Calculate "absolute expression": the average log2 expression
                 # of this gene between this sample and the reference sample
-                absE_ = 0.5 * (log2(count * inverse_library_size) +
-                               log_normalized_X_ref[j])
+                absE_ = <float> 0.5 * (
+                    log2(<float> count * inverse_library_size) +
+                    log_normalized_X_ref[j])
 
                 # Cutoff based on `A_cutoff`
                 if absE_ <= A_cutoff:
@@ -184,7 +185,7 @@ def calc_norm_factors(const numeric[:, ::1] X,
 
                 # Keep track of whether any gene's `logR` is above 1e-6 in
                 # magnitude for this sample
-                large_enough_logR |= abs(logR_) >= 1e-6
+                large_enough_logR |= abs(logR_) >= <float> 1e-6
 
             # If every gene's `logR` is below 1e-6 in magnitude for this sample
             # (i.e. expression is extremely low across the board), set the
@@ -214,18 +215,16 @@ def calc_norm_factors(const numeric[:, ::1] X,
             for j in range(n):
                 if loL + 1 <= logR_rank[j] <= hiL and \
                         loS + 1 <= absE_rank[j] <= hiS:
-                    variance = 1. / counts[j] + 1. / ref_counts[j] - \
+                    variance = <float> 1 / <float> counts[j] + \
+                        <float> 1 / <float> ref_counts[j] - \
                         total_inverse_library_size
-                    weight = 1 / variance
+                    weight = <float> 1 / variance
                     norm_factor += weight * logR[j]
                     total_weight += weight
-            norm_factor = 2 ** (norm_factor / total_weight)
-
             # Results will be missing if the two libraries share no
             # features with positive counts; in this case, set to 1
-            if isnan(norm_factor):
-                norm_factor = 1
-
+            norm_factor = \
+                exp2(norm_factor / total_weight) if total_weight else 1
             norm_factors[i] = norm_factor
     else:
         # Same as the single-threaded version, but with per-thread buffers
@@ -251,22 +250,23 @@ def calc_norm_factors(const numeric[:, ::1] X,
             end_sample = ((thread_index + 1) * num_samples) / num_threads \
                 if thread_index != num_threads - 1 else num_samples
             for i in range(start_sample, end_sample):
-                inverse_library_size = 1. / library_size[i]
+                inverse_library_size = <float> 1 / <float> library_size[i]
                 inverse_relative_library_size_i = \
                     inverse_relative_library_size[i]
                 large_enough_logR = False
                 n = 0
                 for j in range(num_genes):
                     ref_count = X[ref_sample, j]
-                    if ref_count == 0:
+                    if not ref_count:
                         continue
                     count = X[i, j]
-                    if count == 0:
+                    if not count:
                         continue
                     logR_ = log2(inverse_relative_library_size_i * (
-                        <float> count / ref_count))
-                    absE_ = 0.5 * (log2(count * inverse_library_size) +
-                                   log_normalized_X_ref[j])
+                        <float> count / <float> ref_count))
+                    absE_ = <float> 0.5 * (
+                        log2(<float> count * inverse_library_size) +
+                        log_normalized_X_ref[j])
                     if absE_ <= A_cutoff:
                         continue
                     thread_logR[thread_index][n] = logR_
@@ -275,7 +275,7 @@ def calc_norm_factors(const numeric[:, ::1] X,
                     thread_ref_counts[thread_index][n] = ref_count
                     n = n + 1
                     large_enough_logR = \
-                        large_enough_logR | (abs(logR_) >= 1e-6)
+                        large_enough_logR | (abs(logR_) >= <float> 1e-6)
                 if not large_enough_logR:
                     norm_factors[i] = 1
                     continue
@@ -297,16 +297,18 @@ def calc_norm_factors(const numeric[:, ::1] X,
                     if loL + 1 <= thread_logR_rank[thread_index][j] <= hiL \
                             and loS + 1 <= thread_absE_rank[thread_index][j] \
                             <= hiS:
-                        variance = 1. / thread_counts[thread_index][j] + \
-                            1. / thread_ref_counts[thread_index][j] - \
+                        variance = \
+                            <float> 1 / \
+                                <float> thread_counts[thread_index][j] + \
+                            <float> 1 / \
+                                <float> thread_ref_counts[thread_index][j] - \
                             total_inverse_library_size
-                        weight = 1 / variance
+                        weight = <float> 1 / variance
                         norm_factor = \
                             norm_factor + weight * thread_logR[thread_index][j]
                         total_weight = total_weight + weight
-                norm_factor = 2 ** (norm_factor / total_weight)
-                if isnan(norm_factor):
-                    norm_factor = 1
+                norm_factor = \
+                    exp2(norm_factor / total_weight) if total_weight else 1
                 norm_factors[i] = norm_factor
 
     # Normalize factors across samples so that they multiply to 1
@@ -319,4 +321,4 @@ def calc_norm_factors(const numeric[:, ::1] X,
 
     # Multiply norm factors by library sizes
     for i in range(num_samples):
-        norm_factors[i] *= library_size[i]
+        norm_factors[i] *= <float> library_size[i]

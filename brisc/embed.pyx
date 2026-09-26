@@ -38,9 +38,9 @@ cdef inline void get_neighbor_pairs(const float[:, ::1] X,
         for i in range(num_cells):
             average_distances[i] = (
                 sqrt(distances[i, 3]) + sqrt(distances[i, 4]) +
-                sqrt(distances[i, 5])) / 3
-            if average_distances[i] < 1e-10:
-                average_distances[i] = 1e-10
+                sqrt(distances[i, 5])) / <float> 3
+            if average_distances[i] < <float> 1e-10:
+                average_distances[i] = <float> 1e-10
 
         # Select the `num_neighbors` of each cell's `num_total_neighbors`
         # nearest neighbors with the lowest scaled distances. We define the
@@ -87,9 +87,9 @@ cdef inline void get_neighbor_pairs(const float[:, ::1] X,
             for i in prange(num_cells, num_threads=num_threads):
                 average_distances[i] = (
                     sqrt(distances[i, 3]) + sqrt(distances[i, 4]) +
-                    sqrt(distances[i, 5])) / 3
-                if average_distances[i] < 1e-10:
-                    average_distances[i] = 1e-10
+                    sqrt(distances[i, 5])) / <float> 3
+                if average_distances[i] < <float> 1e-10:
+                    average_distances[i] = <float> 1e-10
 
             thread_scaled_distances_i.resize(num_threads)
             with parallel(num_threads=num_threads):
@@ -323,9 +323,13 @@ cdef inline void sample_further_pairs_nearby(
                             # ...nor a cell farther than `max_distance` away
                             # (in embedding space)
                             if (embedding[i, 0] -
-                                embedding[further_pair_index, 0]) ** 2 + \
+                                    embedding[further_pair_index, 0]) * \
+                                    (embedding[i, 0] -
+                                     embedding[further_pair_index, 0]) + \
                                     (embedding[i, 1] -
-                                     embedding[further_pair_index, 1]) ** 2 > \
+                                     embedding[further_pair_index, 1]) * \
+                                    (embedding[i, 1] -
+                                     embedding[further_pair_index, 1]) > \
                                     max_distance_squared:
                                 continue
                             else:
@@ -349,9 +353,13 @@ cdef inline void sample_further_pairs_nearby(
                                 break
                         else:
                             if (embedding[i, 0] -
-                                embedding[further_pair_index, 0]) ** 2 + \
+                                    embedding[further_pair_index, 0]) * \
+                                    (embedding[i, 0] -
+                                     embedding[further_pair_index, 0]) + \
                                     (embedding[i, 1] -
-                                     embedding[further_pair_index, 1]) ** 2 > \
+                                     embedding[further_pair_index, 1]) * \
+                                    (embedding[i, 1] -
+                                     embedding[further_pair_index, 1]) > \
                                     max_distance_squared:
                                 continue
                             else:
@@ -433,9 +441,10 @@ cdef inline void get_gradients_fast(const float[:, ::1] embedding,
             j = neighbor_pairs[i, k]
             embedding_ij_0 = embedding_i0 - embedding[j, 0]
             embedding_ij_1 = embedding_i1 - embedding[j, 1]
-            distance_ij = 1 + embedding_ij_0 * embedding_ij_0 + \
+            distance_ij = <float> 1 + embedding_ij_0 * embedding_ij_0 + \
                 embedding_ij_1 * embedding_ij_1
-            w = w_neighbors * (20 / ((10 + distance_ij) * (10 + distance_ij)))
+            w = w_neighbors * (<float> 20 /
+                ((<float> 10 + distance_ij) * (<float> 10 + distance_ij)))
             gradients_i0 += w * embedding_ij_0
             gradients[j, 0] -= w * embedding_ij_0
             gradients_i1 += w * embedding_ij_1
@@ -446,10 +455,10 @@ cdef inline void get_gradients_fast(const float[:, ::1] embedding,
             j = mid_near_pairs[i, k]
             embedding_ij_0 = embedding_i0 - embedding[j, 0]
             embedding_ij_1 = embedding_i1 - embedding[j, 1]
-            distance_ij = 1 + embedding_ij_0 * embedding_ij_0 + \
+            distance_ij = <float> 1 + embedding_ij_0 * embedding_ij_0 + \
                 embedding_ij_1 * embedding_ij_1
-            w = w_mid_near * (20000 / ((10000 + distance_ij) *
-                                       (10000 + distance_ij)))
+            w = w_mid_near * (<float> 20000 / ((<float> 10000 + distance_ij) *
+                                               (<float> 10000 + distance_ij)))
             gradients_i0 += w * embedding_ij_0
             gradients[j, 0] -= w * embedding_ij_0
             gradients_i1 += w * embedding_ij_1
@@ -460,9 +469,10 @@ cdef inline void get_gradients_fast(const float[:, ::1] embedding,
             j = further_pairs[i, k]
             embedding_ij_0 = embedding_i0 - embedding[j, 0]
             embedding_ij_1 = embedding_i1 - embedding[j, 1]
-            distance_ij = 1 + embedding_ij_0 * embedding_ij_0 + \
+            distance_ij = <float> 1 + embedding_ij_0 * embedding_ij_0 + \
                 embedding_ij_1 * embedding_ij_1
-            w = 2 / ((1 + distance_ij) * (1 + distance_ij))
+            w = <float> 2 / \
+                ((<float> 1 + distance_ij) * (<float> 1 + distance_ij))
             gradients_i0 -= w * embedding_ij_0
             gradients[j, 0] += w * embedding_ij_0
             gradients_i1 -= w * embedding_ij_1
@@ -500,9 +510,10 @@ cdef inline void get_scaled_gradients_fast(
             j = neighbor_pairs[i, k]
             embedding_ij_0 = embedding_i0 - embedding[j, 0]
             embedding_ij_1 = embedding_i1 - embedding[j, 1]
-            distance_ij = 1 + embedding_ij_0 * embedding_ij_0 + \
+            distance_ij = <float> 1 + embedding_ij_0 * embedding_ij_0 + \
                 embedding_ij_1 * embedding_ij_1
-            w = w_neighbors * (20 / ((10 + distance_ij) * (10 + distance_ij)))
+            w = w_neighbors * (<float> 20 /
+                ((<float> 10 + distance_ij) * (<float> 10 + distance_ij)))
             # this is the only line that differs from `get_gradients_fast()`
             w *= half_max_distance / sqrt(distance_ij)
             gradients_i0 += w * embedding_ij_0
@@ -515,10 +526,10 @@ cdef inline void get_scaled_gradients_fast(
             j = mid_near_pairs[i, k]
             embedding_ij_0 = embedding_i0 - embedding[j, 0]
             embedding_ij_1 = embedding_i1 - embedding[j, 1]
-            distance_ij = 1 + embedding_ij_0 * embedding_ij_0 + \
+            distance_ij = <float> 1 + embedding_ij_0 * embedding_ij_0 + \
                 embedding_ij_1 * embedding_ij_1
-            w = w_mid_near * (20000 / ((10000 + distance_ij) *
-                                       (10000 + distance_ij)))
+            w = w_mid_near * (<float> 20000 / ((<float> 10000 + distance_ij) *
+                                               (<float> 10000 + distance_ij)))
             gradients_i0 += w * embedding_ij_0
             gradients[j, 0] -= w * embedding_ij_0
             gradients_i1 += w * embedding_ij_1
@@ -529,9 +540,10 @@ cdef inline void get_scaled_gradients_fast(
             j = further_pairs[i, k]
             embedding_ij_0 = embedding_i0 - embedding[j, 0]
             embedding_ij_1 = embedding_i1 - embedding[j, 1]
-            distance_ij = 1 + embedding_ij_0 * embedding_ij_0 + \
+            distance_ij = <float> 1 + embedding_ij_0 * embedding_ij_0 + \
                 embedding_ij_1 * embedding_ij_1
-            w = 2 / ((1 + distance_ij) * (1 + distance_ij))
+            w = <float> 2 / \
+                ((<float> 1 + distance_ij) * (<float> 1 + distance_ij))
             gradients_i0 -= w * embedding_ij_0
             gradients[j, 0] += w * embedding_ij_0
             gradients_i1 -= w * embedding_ij_1
@@ -564,9 +576,10 @@ cdef inline void get_gradient(const float[:, ::1] embedding,
         j = neighbor_pair_indices[k]
         embedding_ij_0 = embedding_i0 - embedding[j, 0]
         embedding_ij_1 = embedding_i1 - embedding[j, 1]
-        distance_ij = 1 + embedding_ij_0 * embedding_ij_0 + \
+        distance_ij = <float> 1 + embedding_ij_0 * embedding_ij_0 + \
             embedding_ij_1 * embedding_ij_1
-        w = w_neighbors * (20 / ((10 + distance_ij) * (10 + distance_ij)))
+        w = w_neighbors * (<float> 20 /
+            ((<float> 10 + distance_ij) * (<float> 10 + distance_ij)))
         gradient_i0 = gradient_i0 + w * embedding_ij_0
         gradient_i1 = gradient_i1 + w * embedding_ij_1
 
@@ -576,10 +589,10 @@ cdef inline void get_gradient(const float[:, ::1] embedding,
         j = mid_near_pair_indices[k]
         embedding_ij_0 = embedding_i0 - embedding[j, 0]
         embedding_ij_1 = embedding_i1 - embedding[j, 1]
-        distance_ij = 1 + embedding_ij_0 * embedding_ij_0 + \
+        distance_ij = <float> 1 + embedding_ij_0 * embedding_ij_0 + \
             embedding_ij_1 * embedding_ij_1
-        w = w_mid_near * (20000 / ((10000 + distance_ij) *
-                                   (10000 + distance_ij)))
+        w = w_mid_near * (<float> 20000 / ((<float> 10000 + distance_ij) *
+                                           (<float> 10000 + distance_ij)))
         gradient_i0 = gradient_i0 + w * embedding_ij_0
         gradient_i1 = gradient_i1 + w * embedding_ij_1
 
@@ -589,9 +602,9 @@ cdef inline void get_gradient(const float[:, ::1] embedding,
         j = further_pair_indices[k]
         embedding_ij_0 = embedding_i0 - embedding[j, 0]
         embedding_ij_1 = embedding_i1 - embedding[j, 1]
-        distance_ij = 1 + embedding_ij_0 * embedding_ij_0 + \
+        distance_ij = <float> 1 + embedding_ij_0 * embedding_ij_0 + \
             embedding_ij_1 * embedding_ij_1
-        w = 2 / ((1 + distance_ij) * (1 + distance_ij))
+        w = <float> 2 / ((<float> 1 + distance_ij) * (<float> 1 + distance_ij))
         gradient_i0 = gradient_i0 - w * embedding_ij_0
         gradient_i1 = gradient_i1 - w * embedding_ij_1
 
@@ -665,9 +678,10 @@ cdef inline void get_scaled_gradient(const float[:, ::1] embedding,
         j = neighbor_pair_indices[k]
         embedding_ij_0 = embedding_i0 - embedding[j, 0]
         embedding_ij_1 = embedding_i1 - embedding[j, 1]
-        distance_ij = 1 + embedding_ij_0 * embedding_ij_0 + \
+        distance_ij = <float> 1 + embedding_ij_0 * embedding_ij_0 + \
             embedding_ij_1 * embedding_ij_1
-        w = w_neighbors * (20 / ((10 + distance_ij) * (10 + distance_ij)))
+        w = w_neighbors * (<float> 20 /
+            ((<float> 10 + distance_ij) * (<float> 10 + distance_ij)))
         # this is the only line that differs from `get_gradient()`
         w *= half_max_distance / sqrt(distance_ij)
         gradient_i0 = gradient_i0 + w * embedding_ij_0
@@ -679,10 +693,10 @@ cdef inline void get_scaled_gradient(const float[:, ::1] embedding,
         j = mid_near_pair_indices[k]
         embedding_ij_0 = embedding_i0 - embedding[j, 0]
         embedding_ij_1 = embedding_i1 - embedding[j, 1]
-        distance_ij = 1 + embedding_ij_0 * embedding_ij_0 + \
+        distance_ij = <float> 1 + embedding_ij_0 * embedding_ij_0 + \
             embedding_ij_1 * embedding_ij_1
-        w = w_mid_near * (20000 / ((10000 + distance_ij) *
-                                   (10000 + distance_ij)))
+        w = w_mid_near * (<float> 20000 / ((<float> 10000 + distance_ij) *
+                                           (<float> 10000 + distance_ij)))
         gradient_i0 = gradient_i0 + w * embedding_ij_0
         gradient_i1 = gradient_i1 + w * embedding_ij_1
 
@@ -692,9 +706,9 @@ cdef inline void get_scaled_gradient(const float[:, ::1] embedding,
         j = further_pair_indices[k]
         embedding_ij_0 = embedding_i0 - embedding[j, 0]
         embedding_ij_1 = embedding_i1 - embedding[j, 1]
-        distance_ij = 1 + embedding_ij_0 * embedding_ij_0 + \
+        distance_ij = <float> 1 + embedding_ij_0 * embedding_ij_0 + \
             embedding_ij_1 * embedding_ij_1
-        w = 2 / ((1 + distance_ij) * (1 + distance_ij))
+        w = <float> 2 / ((<float> 1 + distance_ij) * (<float> 1 + distance_ij))
         gradient_i0 = gradient_i0 - w * embedding_ij_0
         gradient_i1 = gradient_i1 - w * embedding_ij_1
 
@@ -758,9 +772,9 @@ cdef inline void update_cell_embedding_adam(
         const float beta1,
         const float beta2,
         const float learning_rate) noexcept nogil:
-    momentum += (1 - beta1) * (gradient - momentum)
-    velocity += (1 - beta2) * (gradient * gradient - velocity)
-    embedding -= learning_rate * momentum / (sqrt(velocity) + 1e-7)
+    momentum += (<float> 1 - beta1) * (gradient - momentum)
+    velocity += (<float> 1 - beta2) * (gradient * gradient - velocity)
+    embedding -= learning_rate * momentum / (sqrt(velocity) + <float> 1e-7)
 
 
 cdef inline void update_embedding_adam(
@@ -774,8 +788,8 @@ cdef inline void update_embedding_adam(
         float learning_rate,
         const unsigned iteration):
     cdef unsigned i
-    learning_rate = learning_rate * sqrt(1 - beta2 ** (iteration + 1)) / \
-        (1 - beta1 ** (iteration + 1))
+    learning_rate *= sqrt(<float> 1 - pow(beta2, <float> (iteration + 1))) / \
+        (<float> 1 - pow(beta1, <float> (iteration + 1)))
     for i in range(num_cells):
         update_cell_embedding_adam(embedding[i, 0], gradients[i, 0],
                                    momentum[i, 0], velocity[i, 0], num_cells,
@@ -797,8 +811,8 @@ cdef inline void update_embedding_adam_parallel(
         const unsigned iteration,
         const unsigned num_threads) noexcept nogil:
     cdef unsigned i
-    learning_rate = learning_rate * sqrt(1 - beta2 ** (iteration + 1)) / \
-        (1 - beta1 ** (iteration + 1))
+    learning_rate *= sqrt(<float> 1 - pow(beta2, <float> (iteration + 1))) / \
+        (<float> 1 - pow(beta1, <float> (iteration + 1)))
     for i in prange(num_cells, num_threads=num_threads):
         update_cell_embedding_adam(embedding[i, 0], gradients[i, 0],
                                    momentum[i, 0], velocity[i, 0], num_cells,
@@ -825,12 +839,12 @@ cdef inline void pacmap_serial_fast(const float[:, ::1] PCs,
         w_mid_near_init = 1000
     cdef unsigned long long num_cells = PCs.shape[0]
     cdef float iteration_fraction, w_mid_near, w_neighbors, \
-        beta1 = 0.9, beta2 = 0.999
+        beta1 = <float> 0.9, beta2 = <float> 0.999
 
     # Initialize the embedding, momentum and velocity
     for i in range(num_cells):
-        embedding[i, 0] = 0.01 * PCs[i, 0]
-        embedding[i, 1] = 0.01 * PCs[i, 1]
+        embedding[i, 0] = <float> 0.01 * PCs[i, 0]
+        embedding[i, 1] = <float> 0.01 * PCs[i, 1]
     momentum[:] = 0
     velocity[:] = 0
 
@@ -838,8 +852,8 @@ cdef inline void pacmap_serial_fast(const float[:, ::1] PCs,
     for iteration in range(num_iterations):
         if iteration < num_phase_1_iterations:
             iteration_fraction = <float> iteration / num_phase_1_iterations
-            w_mid_near = (1 - iteration_fraction) * w_mid_near_init + \
-                iteration_fraction * 3
+            w_mid_near = (<float> 1 - iteration_fraction) * w_mid_near_init + \
+                iteration_fraction * <float> 3
             w_neighbors = 2
         elif iteration < num_phase_1_iterations + num_phase_2_iterations:
             w_mid_near = 3
@@ -884,12 +898,12 @@ cdef inline void pacmap_serial(const float[:, ::1] PCs,
         w_mid_near_init = 1000
     cdef unsigned long long num_cells = PCs.shape[0]
     cdef float iteration_fraction, w_mid_near, w_neighbors, \
-        beta1 = 0.9, beta2 = 0.999
+        beta1 = <float> 0.9, beta2 = <float> 0.999
 
     # Initialize the embedding, momentum and velocity
     for i in range(num_cells):
-        embedding[i, 0] = 0.01 * PCs[i, 0]
-        embedding[i, 1] = 0.01 * PCs[i, 1]
+        embedding[i, 0] = <float> 0.01 * PCs[i, 0]
+        embedding[i, 1] = <float> 0.01 * PCs[i, 1]
     momentum[:] = 0
     velocity[:] = 0
 
@@ -897,8 +911,8 @@ cdef inline void pacmap_serial(const float[:, ::1] PCs,
     for iteration in range(num_iterations):
         if iteration < num_phase_1_iterations:
             iteration_fraction = <float> iteration / num_phase_1_iterations
-            w_mid_near = (1 - iteration_fraction) * w_mid_near_init + \
-                iteration_fraction * 3
+            w_mid_near = (<float> 1 - iteration_fraction) * w_mid_near_init + \
+                iteration_fraction * <float> 3
             w_neighbors = 2
         elif iteration < num_phase_1_iterations + num_phase_2_iterations:
             w_mid_near = 3
@@ -945,14 +959,14 @@ cdef inline void pacmap_parallel(const float[:, ::1] PCs,
         w_mid_near_init = 1000
     cdef unsigned long long num_cells = PCs.shape[0]
     cdef float iteration_fraction, w_mid_near, w_neighbors, \
-        beta1 = 0.9, beta2 = 0.999
+        beta1 = <float> 0.9, beta2 = <float> 0.999
 
     with nogil:
         # Initialize the embedding, momentum and velocity. Momentum and
         # velocity are initialized in parallel for NUMA first-touch reasons.
         for i in prange(num_cells, num_threads=num_threads):
-            embedding[i, 0] = 0.01 * PCs[i, 0]
-            embedding[i, 1] = 0.01 * PCs[i, 1]
+            embedding[i, 0] = <float> 0.01 * PCs[i, 0]
+            embedding[i, 1] = <float> 0.01 * PCs[i, 1]
             momentum[i, 0] = 0
             momentum[i, 1] = 0
             velocity[i, 0] = 0
@@ -962,8 +976,8 @@ cdef inline void pacmap_parallel(const float[:, ::1] PCs,
         for iteration in range(num_iterations):
             if iteration < num_phase_1_iterations:
                 iteration_fraction = <float> iteration / num_phase_1_iterations
-                w_mid_near = (1 - iteration_fraction) * w_mid_near_init + \
-                    iteration_fraction * 3
+                w_mid_near = (<float> 1 - iteration_fraction) * \
+                    w_mid_near_init + iteration_fraction * <float> 3
                 w_neighbors = 2
             elif iteration < num_phase_1_iterations + num_phase_2_iterations:
                 w_mid_near = 3
@@ -1134,14 +1148,14 @@ cdef inline void localmap_serial_fast(const float[:, ::1] PCs,
         w_mid_near_init = 1000
     cdef unsigned long long num_cells = PCs.shape[0]
     cdef float iteration_fraction, w_mid_near, w_neighbors, \
-        half_max_distance = 0.5 * max_distance, \
-        max_distance_squared = max_distance ** 2, \
-        beta1 = 0.9, beta2 = 0.999
+        half_max_distance = <float> 0.5 * max_distance, \
+        max_distance_squared = max_distance * max_distance, \
+        beta1 = <float> 0.9, beta2 = <float> 0.999
 
     # Initialize the embedding, momentum and velocity
     for i in range(num_cells):
-        embedding[i, 0] = 0.01 * PCs[i, 0]
-        embedding[i, 1] = 0.01 * PCs[i, 1]
+        embedding[i, 0] = <float> 0.01 * PCs[i, 0]
+        embedding[i, 1] = <float> 0.01 * PCs[i, 1]
     momentum[:] = 0
     velocity[:] = 0
 
@@ -1149,8 +1163,8 @@ cdef inline void localmap_serial_fast(const float[:, ::1] PCs,
     for iteration in range(num_iterations):
         if iteration < num_phase_1_iterations:
             iteration_fraction = <float> iteration / num_phase_1_iterations
-            w_mid_near = (1 - iteration_fraction) * w_mid_near_init + \
-                iteration_fraction * 3
+            w_mid_near = (<float> 1 - iteration_fraction) * w_mid_near_init + \
+                iteration_fraction * <float> 3
             w_neighbors = 2
         elif iteration < num_phase_1_iterations + num_phase_2_iterations:
             w_mid_near = 3
@@ -1212,14 +1226,14 @@ cdef inline void localmap_serial(const float[:, ::1] PCs,
         w_mid_near_init = 1000
     cdef unsigned long long num_cells = PCs.shape[0]
     cdef float iteration_fraction, w_mid_near, w_neighbors, \
-        half_max_distance = 0.5 * max_distance, \
-        max_distance_squared = max_distance ** 2, \
-        beta1 = 0.9, beta2 = 0.999
+        half_max_distance = <float> 0.5 * max_distance, \
+        max_distance_squared = max_distance * max_distance, \
+        beta1 = <float> 0.9, beta2 = <float> 0.999
 
     # Initialize the embedding, momentum and velocity
     for i in range(num_cells):
-        embedding[i, 0] = 0.01 * PCs[i, 0]
-        embedding[i, 1] = 0.01 * PCs[i, 1]
+        embedding[i, 0] = <float> 0.01 * PCs[i, 0]
+        embedding[i, 1] = <float> 0.01 * PCs[i, 1]
     momentum[:] = 0
     velocity[:] = 0
 
@@ -1227,8 +1241,8 @@ cdef inline void localmap_serial(const float[:, ::1] PCs,
     for iteration in range(num_iterations):
         if iteration < num_phase_1_iterations:
             iteration_fraction = <float> iteration / num_phase_1_iterations
-            w_mid_near = (1 - iteration_fraction) * w_mid_near_init + \
-                iteration_fraction * 3
+            w_mid_near = (<float> 1 - iteration_fraction) * w_mid_near_init + \
+                iteration_fraction * <float> 3
             w_neighbors = 2
         elif iteration < num_phase_1_iterations + num_phase_2_iterations:
             w_mid_near = 3
@@ -1295,16 +1309,16 @@ cdef inline void localmap_parallel(const float[:, ::1] PCs,
         w_mid_near_init = 1000
     cdef unsigned long long num_cells = PCs.shape[0]
     cdef float iteration_fraction, w_mid_near, w_neighbors, \
-        half_max_distance = 0.5 * max_distance, \
-        max_distance_squared = max_distance ** 2, \
-        beta1 = 0.9, beta2 = 0.999
+        half_max_distance = <float> 0.5 * max_distance, \
+        max_distance_squared = max_distance * max_distance, \
+        beta1 = <float> 0.9, beta2 = <float> 0.999
 
     with nogil:
         # Initialize the embedding, momentum and velocity. Momentum and
         # velocity are initialized in parallel for NUMA first-touch reasons.
         for i in prange(num_cells, num_threads=num_threads):
-            embedding[i, 0] = 0.01 * PCs[i, 0]
-            embedding[i, 1] = 0.01 * PCs[i, 1]
+            embedding[i, 0] = <float> 0.01 * PCs[i, 0]
+            embedding[i, 1] = <float> 0.01 * PCs[i, 1]
             momentum[i, 0] = 0
             momentum[i, 1] = 0
             velocity[i, 0] = 0
@@ -1314,8 +1328,8 @@ cdef inline void localmap_parallel(const float[:, ::1] PCs,
         for iteration in range(num_iterations):
             if iteration < num_phase_1_iterations:
                 iteration_fraction = <float> iteration / num_phase_1_iterations
-                w_mid_near = (1 - iteration_fraction) * w_mid_near_init + \
-                    iteration_fraction * 3
+                w_mid_near = (<float> 1 - iteration_fraction) * \
+                    w_mid_near_init + iteration_fraction * <float> 3
                 w_neighbors = 2
             elif iteration < num_phase_1_iterations + num_phase_2_iterations:
                 w_mid_near = 3
@@ -1511,26 +1525,26 @@ def umap_fuzzy_weights(const float[:, ::1] distances,
                 psum = 0
                 for j in range(K):
                     d = distances[i, j] - rho
-                    if d > 0:
+                    if d > <float> 0:
                         psum += exp(-(d / mid))
                     else:
-                        psum += 1
-                if abs(psum - target) < 1e-5:
+                        psum += <float> 1
+                if abs(psum - target) < <float> 1e-5:
                     break
                 if psum > target:
                     hi = mid
-                    mid = 0.5 * (lo + hi)
+                    mid = <float> 0.5 * (lo + hi)
                 else:
                     lo = mid
                     if hi == FLT_MAX:
-                        mid *= 2
+                        mid *= <float> 2
                     else:
-                        mid = 0.5 * (lo + hi)
-            if mid < 0.001 * mean_ith:
-                mid = 0.001 * mean_ith
+                        mid = <float> 0.5 * (lo + hi)
+            if mid < <float> 0.001 * mean_ith:
+                mid = <float> 0.001 * mean_ith
             for j in range(K):
                 d = distances[i, j] - rho
-                if d <= 0 or mid == 0:
+                if d <= <float> 0 or not mid:
                     val = 1
                 else:
                     val = exp(-(d / mid))
@@ -1549,26 +1563,26 @@ def umap_fuzzy_weights(const float[:, ::1] distances,
                 psum = 0
                 for j in range(K):
                     d = distances[i, j] - rho
-                    if d > 0:
+                    if d > <float> 0:
                         psum = psum + exp(-(d / mid))
                     else:
-                        psum = psum + 1
-                if abs(psum - target) < 1e-5:
+                        psum = psum + <float> 1
+                if abs(psum - target) < <float> 1e-5:
                     break
                 if psum > target:
                     hi = mid
-                    mid = 0.5 * (lo + hi)
+                    mid = <float> 0.5 * (lo + hi)
                 else:
                     lo = mid
                     if hi == FLT_MAX:
-                        mid = mid * 2
+                        mid = mid * <float> 2
                     else:
-                        mid = 0.5 * (lo + hi)
-            if mid < 0.001 * mean_ith:
-                mid = 0.001 * mean_ith
+                        mid = <float> 0.5 * (lo + hi)
+            if mid < <float> 0.001 * mean_ith:
+                mid = <float> 0.001 * mean_ith
             for j in range(K):
                 d = distances[i, j] - rho
-                if d <= 0 or mid == 0:
+                if d <= <float> 0 or not mid:
                     val = 1
                 else:
                     val = exp(-(d / mid))
@@ -1589,14 +1603,14 @@ cdef inline void umap_noisy_scale(float[:, ::1] embedding,
         val = abs(embedding[i, 1])
         if val > max_val:
             max_val = val
-    scale = 10.0 / max_val
+    scale = <float> 10 / max_val
 
     # Scale and add noise
     for i in range(N):
-        embedding[i, 0] = \
-            (embedding[i, 0] * scale) + 0.0001 * random_normal(&rng_state[i])
-        embedding[i, 1] = \
-            (embedding[i, 1] * scale) + 0.0001 * random_normal(&rng_state[i])
+        embedding[i, 0] = (embedding[i, 0] * scale) + \
+            <float> 0.0001 * random_normal(&rng_state[i])
+        embedding[i, 1] = (embedding[i, 1] * scale) + \
+            <float> 0.0001 * random_normal(&rng_state[i])
 
     # Compute min/max for each dimension
     min0 = max0 = embedding[0, 0]
@@ -1610,8 +1624,8 @@ cdef inline void umap_noisy_scale(float[:, ::1] embedding,
         elif val > max1: max1 = val
 
     # Min-max scale to [0, 10]
-    scale0 = 10.0 / (max0 - min0) if max0 > min0 else 0
-    scale1 = 10.0 / (max1 - min1) if max1 > min1 else 0
+    scale0 = <float> 10 / (max0 - min0) if max0 > min0 else 0
+    scale1 = <float> 10 / (max1 - min1) if max1 > min1 else 0
     for i in range(N):
         embedding[i, 0] = (embedding[i, 0] - min0) * scale0
         embedding[i, 1] = (embedding[i, 1] - min1) * scale1
@@ -1650,7 +1664,7 @@ def umap_optimize(float[:, ::1] embedding,
     if num_threads == 1:
         # Perform SGD
         for epoch in range(num_iterations):
-            epoch_modifier = 1 - epoch / <float> num_iterations
+            epoch_modifier = <float> 1 - epoch / <float> num_iterations
             alpha = initial_alpha * epoch_modifier
             for i in range(num_edges):
                 u = head[i]
@@ -1668,7 +1682,7 @@ def umap_optimize(float[:, ::1] embedding,
 
         # Perform SGD in parallel, without locks
         for epoch in range(num_iterations):
-            epoch_modifier = 1 - epoch / <float> num_iterations
+            epoch_modifier = <float> 1 - epoch / <float> num_iterations
             alpha = initial_alpha * epoch_modifier
             for i in prange(num_edges, num_threads=num_threads, nogil=True):
                 u = head[i]
@@ -1704,8 +1718,9 @@ cdef inline void umap_single_edge_gradient_update(
 
     cdef unsigned k, other_v
     cdef float ux, uy, vx, vy, dx, dy, dist_squared, dist_b_minus_1, dist_b, \
-        denom, scale, gradx, grady, attraction_constant = -2 * a * b * alpha, \
-        repulsion_constant = alpha * (2 * gamma * b)
+        denom, scale, gradx, grady, \
+        attraction_constant = <float> -2 * a * b * alpha, \
+        repulsion_constant = alpha * (<float> 2 * gamma * b)
 
     # Randomly drop the edge update with probability `1 - weight`.
     # This is mathematically equivalent to UMAP's fractional epoch updates!
@@ -1716,13 +1731,13 @@ cdef inline void umap_single_edge_gradient_update(
     vx = embedding[v, 0]; vy = embedding[v, 1]
     dx = ux - vx; dy = uy - vy
     dist_squared = dx * dx + dy * dy
-    if dist_squared > 0:
-        dist_b_minus_1 = pow(dist_squared, b - 1)
+    if dist_squared:
+        dist_b_minus_1 = pow(dist_squared, b - <float> 1)
         dist_b = dist_b_minus_1 * dist_squared
-        denom = 1 + a * dist_b
+        denom = <float> 1 + a * dist_b
         scale = attraction_constant * dist_b_minus_1 / denom
-        gradx = min(4, max(-4, scale * dx))
-        grady = min(4, max(-4, scale * dy))
+        gradx = min(<float> 4, max(<float> -4, scale * dx))
+        grady = min(<float> 4, max(<float> -4, scale * dy))
         ux += gradx; uy += grady
         vx -= gradx; vy -= grady
     embedding[v, 0] = vx; embedding[v, 1] = vy
@@ -1734,10 +1749,11 @@ cdef inline void umap_single_edge_gradient_update(
         vx = embedding[other_v, 0]; vy = embedding[other_v, 1]
         dx = ux - vx; dy = uy - vy
         dist_squared = dx * dx + dy * dy
-        if dist_squared > 0:
-            denom = (0.001 + dist_squared) * (1 + a * pow(dist_squared, b))
+        if dist_squared:
+            denom = (<float> 0.001 + dist_squared) * \
+                (<float> 1 + a * pow(dist_squared, b))
             scale = repulsion_constant / denom
-            gradx = min(4, max(-4, scale * dx))
-            grady = min(4, max(-4, scale * dy))
+            gradx = min(<float> 4, max(<float> -4, scale * dx))
+            grady = min(<float> 4, max(<float> -4, scale * dy))
             ux += gradx; uy += grady
     embedding[u, 0] = ux; embedding[u, 1] = uy

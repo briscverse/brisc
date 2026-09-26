@@ -20,8 +20,8 @@ def gene_mean_and_variance_csr(const numeric[::1] data,
     cdef unsigned gene, cell, thread_index
     cdef unsigned long long num_elements, i, j, value, chunk_size, start, \
         end, total_sum, total_sum_of_squares, total_nonzero_count
-    cdef float inv_num_cells = 1.0 / num_cells, \
-        inv_num_pairs_of_cells = 1.0 / (num_cells * (num_cells - 1))
+    cdef float inv_num_cells = <float> 1 / num_cells
+    cdef double inv_num_pairs_of_cells = 1.0 / (num_cells * (num_cells - 1))
     cdef vector[unsigned long long] sum_buffer, sum_of_squares_buffer
     cdef vector[vector[unsigned long long]] thread_sum, thread_sum_of_squares
     cdef vector[vector[unsigned]] thread_nonzero_counts
@@ -65,9 +65,9 @@ def gene_mean_and_variance_csr(const numeric[::1] data,
         # Calculate means and variances from the sums and squared sums
         for gene in range(num_dataset_genes):
             mean[gene] = sum[gene] * inv_num_cells
-            var[gene] = inv_num_pairs_of_cells * (
+            var[gene] = <float> (inv_num_pairs_of_cells * (
                 <double> num_cells * <double> sum_of_squares[gene] -
-                <double> sum[gene] * <double> sum[gene])
+                <double> sum[gene] * <double> sum[gene]))
     else:
         thread_sum.resize(num_threads)
         thread_sum_of_squares.resize(num_threads)
@@ -133,9 +133,9 @@ def gene_mean_and_variance_csr(const numeric[::1] data,
                     total_nonzero_count = total_nonzero_count + \
                         thread_nonzero_counts[thread_index][gene]
                 mean[gene] = total_sum * inv_num_cells
-                var[gene] = inv_num_pairs_of_cells * (
+                var[gene] = <float> (inv_num_pairs_of_cells * (
                     <double> num_cells * <double> total_sum_of_squares -
-                    <double> total_sum * <double> total_sum)
+                    <double> total_sum * <double> total_sum))
                 nonzero_count[gene] = total_nonzero_count
 
 
@@ -152,9 +152,8 @@ def gene_mean_and_variance_csc(const numeric[::1] data,
 
     cdef unsigned thread_index
     cdef unsigned long long i, value, sum, sum_of_squares, nnz, gene
-    cdef float inv_num_cells = 1.0 / num_cells, \
-        inv_num_pairs_of_cells = \
-        1.0 / (num_cells * (num_cells - 1))
+    cdef float inv_num_cells = <float> 1 / num_cells
+    cdef double inv_num_pairs_of_cells = 1.0 / (num_cells * (num_cells - 1))
     cdef pair[unsigned, unsigned] col_range
     cdef vector[unsigned long long] sum_buffer, sum_of_squares_buffer
     sum_buffer.resize(num_dataset_genes)
@@ -247,9 +246,9 @@ def gene_mean_and_variance_csc(const numeric[::1] data,
     # column.
     for gene in range(num_dataset_genes):
         mean[gene] = sum_arr[gene] * inv_num_cells
-        var[gene] = inv_num_pairs_of_cells * (
+        var[gene] = <float> (inv_num_pairs_of_cells * (
             <double> num_cells * <double> sum_of_squares_arr[gene] -
-            <double> sum_arr[gene] * <double> sum_arr[gene])
+            <double> sum_arr[gene] * <double> sum_arr[gene]))
 
 
 def clipped_sum_csr(const numeric[::1] data,

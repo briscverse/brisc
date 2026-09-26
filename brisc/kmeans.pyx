@@ -71,7 +71,7 @@ cdef inline void kmeans_barbar_init(
         centroid_indices
 
     # Reserve 25% more than the expected number to be safe
-    selected_cells.reserve(<unsigned>(1.25 * num_init_iterations * l))
+    selected_cells.reserve(<unsigned>(<float> 1.25 * num_init_iterations * l))
 
     # Sample a random cell from `X`, and add it to our list of selected cells.
     # This will constitute a shortlist from which we will select the final
@@ -101,7 +101,7 @@ cdef inline void kmeans_barbar_init(
     cost = 0
     for i in range(num_cells):
         cost += min_distances[i]
-    if cost == 0:
+    if not cost:
         error_message = \
             f'all cells have the same principal component loadings'
         raise ValueError(error_message)
@@ -254,7 +254,7 @@ cdef inline void kmeans_barbar_init(
         # Check if progress has frozen (i.e. `num_newly_selected_cells == 0`
         # when `cost == 0`), indicating there are fewer distinct cells than
         # clusters requested
-        if num_newly_selected_cells == 0 and cost == 0:
+        if num_newly_selected_cells == 0 and not cost:
             error_message = (
                 f'num_clusters ({num_clusters:,}) is greater than the number '
                 f'of cells with distinct principal component loadings; '
@@ -321,11 +321,11 @@ cdef inline void kmeans_barbar_init(
         # Sample a single cell `i` with probability `min_distances[i] / cost`.
         # Set `min_distances` to 0 for the sampled cell, to avoid sampling it
         # twice.
-        inverse_cost = 1 / cost
+        inverse_cost = <float> 1 / cost
         probability = random_uniform(&state)
         for i in range(num_selected_cells):
             probability -= min_distances[i] * inverse_cost
-            if probability < 0:
+            if probability < <float> 0:
                 break
         min_distances[i] = 0
         centroid_indices[cluster_index] = selected_cells[i]
@@ -396,7 +396,7 @@ cdef inline void kmeans_barbar_init_parallel(
     cdef float* distance_pointer
 
     # Reserve 25% more than the expected number to be safe
-    selected_cells.reserve(<unsigned>(1.25 * num_init_iterations * l))
+    selected_cells.reserve(<unsigned>(<float> 1.25 * num_init_iterations * l))
 
     # Sample a random cell from `X`, and add it to our list of selected cells.
     # This will constitute a shortlist from which we will select the final
@@ -427,7 +427,7 @@ cdef inline void kmeans_barbar_init_parallel(
     cost = 0
     for i in range(num_cells):
         cost += min_distances[i]
-    if cost == 0:
+    if not cost:
         error_message = \
             f'all cells have the same principal component loadings'
         raise ValueError(error_message)
@@ -440,7 +440,7 @@ cdef inline void kmeans_barbar_init_parallel(
     with nogil, parallel(num_threads=num_threads):
         thread_index = threadid()
         thread_selected_cells[thread_index].reserve(
-            <unsigned>(1.25 * l / num_threads))
+            <unsigned>(<float> 1.25 * l / num_threads))
         c0 = num_cells * thread_index / num_threads
         c1 = num_cells * (thread_index + 1) / num_threads
         for i in range(c0, c1):
@@ -615,7 +615,7 @@ cdef inline void kmeans_barbar_init_parallel(
         # Check if progress has frozen (i.e. `num_newly_selected_cells == 0`
         # when `cost == 0`), indicating there are fewer distinct cells than
         # clusters requested
-        if num_newly_selected_cells == 0 and cost == 0:
+        if num_newly_selected_cells == 0 and not cost:
             error_message = (
                 f'num_clusters ({num_clusters:,}) is greater than the number '
                 f'of cells with distinct principal component loadings; '
@@ -704,11 +704,11 @@ cdef inline void kmeans_barbar_init_parallel(
             # Sample a single cell `i` with probability
             # `min_distances[i] / cost`. Set `min_distances` to 0 for the
             # sampled cell, to avoid sampling it twice.
-            inverse_cost = 1 / cost
+            inverse_cost = <float> 1 / cost
             probability = random_uniform(&state)
             for i in range(num_selected_cells):
                 probability -= min_distances[i] * inverse_cost
-                if probability < 0:
+                if probability < <float> 0:
                     break
             min_distances[i] = 0
             centroid_indices[cluster_index] = selected_cells[i]
@@ -796,7 +796,7 @@ cdef inline void relocate_empty_clusters(
     min_heap_sort(&farthest_cells[0], &farthest_distances[0], num_empty)
 
     # Check if any of the farthest distances are 0
-    if farthest_distances[0] == 0:
+    if not farthest_distances[0]:
         error_message = (
             f'num_clusters ({num_clusters:,}) is greater than the number '
             f'of cells with distinct principal component loadings '
@@ -867,7 +867,7 @@ cdef inline unsigned relocate_empty_clusters_parallel(
     min_heap_sort(&farthest_cells[0], &farthest_distances[0], num_empty)
 
     # Check if any of the farthest distances are 0
-    if farthest_distances[0] == 0:
+    if not farthest_distances[0]:
         return num_empty  # error code
 
     # Relocate empty clusters to points
@@ -1067,7 +1067,7 @@ def kmeans(const float[:, ::1] X,
             # to get the mean instead of the sum
             for i in range(num_clusters):
                 if num_cells_per_cluster[i] > 0:
-                    norm = 1.0 / num_cells_per_cluster[i]
+                    norm = <float> 1 / num_cells_per_cluster[i]
                     for j in range(num_dimensions):
                         centroids_new[i, j] *= norm
 
@@ -1318,7 +1318,7 @@ def kmeans(const float[:, ::1] X,
                 # cluster to get the mean instead of the sum
                 for i in prange(num_clusters, num_threads=num_threads):
                     if num_cells_per_cluster[i] > 0:
-                        norm = 1.0 / num_cells_per_cluster[i]
+                        norm = <float> 1 / num_cells_per_cluster[i]
                         for j in range(num_dimensions):
                             centroids_new[i, j] *= norm
 

@@ -219,7 +219,8 @@ def get_hvgs(unsigned[::1] all_detection_counts,
              const unsigned num_total_genes,
              unsigned num_genes):
     cdef unsigned gene, detection_count, i
-    cdef float worst_distance, p, distance, inverse_num_cells = 1.0 / num_cells
+    cdef float worst_distance, p, distance, \
+        inverse_num_cells = <float> 1 / num_cells
 
     # Normalize `detection_count` by `num_cells` to get the detection rate `p`.
     # Get the `num_genes` most variable genes (those with detection rates
@@ -231,7 +232,7 @@ def get_hvgs(unsigned[::1] all_detection_counts,
     for gene in range(num_total_genes):
         detection_count = all_detection_counts[gene]
         p = detection_count * inverse_num_cells
-        distance = abs(p - 0.5)
+        distance = abs(p - <float> 0.5)
         if distance < worst_distance:
             max_heap_replace_top(&hvgs[0], &distances[0], gene, distance,
                                  num_genes)
@@ -338,17 +339,17 @@ def compute_S(const unsigned[:, ::1] obs,
         for i in range(num_genes):
             ps_i = ps[i]
             for j in range(i + 1, num_genes):
-                S[i, j] = 0 if obs[i, j] == 0 else binom_logsf(
+                S[i, j] = <float> 0 if obs[i, j] == 0 else <float> binom_logsf(
                     k=obs[i, j] - 1, n=num_cells,
-                    p=ps_i * (1 - ps[j]) + (1 - ps_i) * ps[j])
+                    p=ps_i * (<float> 1 - ps[j]) + (<float> 1 - ps_i) * ps[j])
     else:
         for i in prange(num_genes, nogil=True,
                         num_threads=num_threads):
             ps_i = ps[i]
             for j in range(i + 1, num_genes):
-                S[i, j] = 0 if obs[i, j] == 0 else binom_logsf(
+                S[i, j] = <float> 0 if obs[i, j] == 0 else <float> binom_logsf(
                     k=obs[i, j] - 1, n=num_cells,
-                    p=ps_i * (1 - ps[j]) + (1 - ps_i) * ps[j])
+                    p=ps_i * (<float> 1 - ps[j]) + (<float> 1 - ps_i) * ps[j])
 
 
 def compute_cxds(
@@ -444,14 +445,14 @@ def simulate_doublets(const numeric[::1] data,
             elif indices[i] < indices[j]:
                 # `rand(&coinflip_state) & 1` gives a random Boolean; only
                 # coin-flip if `data[i] == 1`
-                if data[i] > 1 or rand(&coinflip_state) & 1:
+                if data[i] > <numeric> 1 or rand(&coinflip_state) & 1:
                     sim_indices[nnz] = indices[i]
                     nnz = nnz + 1
                 i = i + 1
                 if i == i_end:
                     break
             else:
-                if data[j] > 1 or rand(&coinflip_state) & 1:
+                if data[j] > <numeric> 1 or rand(&coinflip_state) & 1:
                     sim_indices[nnz] = indices[j]
                     nnz = nnz + 1
                 j = j + 1
@@ -459,12 +460,12 @@ def simulate_doublets(const numeric[::1] data,
                     break
         # Process the tails
         while i < i_end:
-            if data[i] > 1 or rand(&coinflip_state) & 1:
+            if data[i] > <numeric> 1 or rand(&coinflip_state) & 1:
                 sim_indices[nnz] = indices[i]
                 nnz = nnz + 1
             i = i + 1
         while j < j_end:
-            if data[j] > 1 or rand(&coinflip_state) & 1:
+            if data[j] > <numeric> 1 or rand(&coinflip_state) & 1:
                 sim_indices[nnz] = indices[j]
                 nnz = nnz + 1
             j = j + 1
@@ -483,7 +484,7 @@ def call_doublets(const float[::1] cxds_scores,
         parallel_threshold = max(10_000, num_threads)
     cdef unsigned long long num_cells = cxds_scores.shape[0]
 
-    if doublet_fraction == -1:  # `doublet_fraction is None`
+    if doublet_fraction == <float> -1:  # `doublet_fraction is None`
         # Call doublets based on whether their cxds score is above the median
         # cxds score for simulated doublets; `doublet_indices` is unused
 

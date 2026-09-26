@@ -30,8 +30,7 @@ ctypedef fused signed_integer:
 cdef extern from * nogil:
     """
     #if defined(_WIN32)
-        static inline int dummy_recv(int sockfd, void *buf, size_t len,
-                                     int flags) {
+        static inline int dummy_recv(int, void *, size_t, int) {
             return -1;
         }
         #define CYTHON_RECV dummy_recv

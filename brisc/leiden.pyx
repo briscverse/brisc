@@ -224,7 +224,7 @@ def leiden(float[::1] data,
                 PREFETCH(&communities[indices[j + 16]])
                 other = indices[j]
                 other_community = communities[other]
-                node_to_community_weights[other_community] += data[j]
+                node_to_community_weights[other_community] += <double> data[j]
                 # Prefetch the random read the scan below makes for this
                 # community
                 PREFETCH(&community_weights[other_community])
@@ -232,7 +232,7 @@ def leiden(float[::1] data,
             while j < end_index:
                 other = indices[j]
                 other_community = communities[other]
-                node_to_community_weights[other_community] += data[j]
+                node_to_community_weights[other_community] += <double> data[j]
                 PREFETCH(&community_weights[other_community])
                 j += 1
             node_to_community_weight = node_to_community_weights[community]
@@ -307,7 +307,7 @@ def leiden(float[::1] data,
             # up in a cluster by itself. This is rarely what the user wants.
             if leiden_iteration == 0:
                 error_message = 'every cell ended up in a cluster by itself'
-                if resolution > 1:
+                if resolution > <float> 1:
                     error_message += '; consider decreasing resolution'
                 raise ValueError(error_message)
 
@@ -370,7 +370,7 @@ def leiden(float[::1] data,
                             f'min_cluster_size ({min_cluster_size:,}), so it '
                             f'cannot be assigned a cluster label; consider '
                             f'decreasing min_cluster_size')
-                        if resolution > 1:
+                        if resolution > <float> 1:
                             error_message += ' and/or resolution'
                         raise ValueError(error_message)
                 else:
@@ -434,7 +434,7 @@ def leiden(float[::1] data,
                 PREFETCH(&communities[indices[j + 16]])
                 other = indices[j]
                 other_community = communities[other]
-                node_to_community_weights[other_community] += data[j]
+                node_to_community_weights[other_community] += <double> data[j]
                 # Prefetch the random read the scan below makes for this
                 # community
                 PREFETCH(&community_weights[other_community])
@@ -442,7 +442,7 @@ def leiden(float[::1] data,
             while j < end_index:
                 other = indices[j]
                 other_community = communities[other]
-                node_to_community_weights[other_community] += data[j]
+                node_to_community_weights[other_community] += <double> data[j]
                 PREFETCH(&community_weights[other_community])
                 j += 1
             node_to_community_weight = node_to_community_weights[community]
@@ -593,7 +593,7 @@ def leiden(float[::1] data,
                 PREFETCH(&refined_communities[indices[j + 16]])
                 other = indices[j]
                 other_community = refined_communities[other]
-                node_to_community_weights[other_community] += data[j]
+                node_to_community_weights[other_community] += <double> data[j]
                 # Prefetch the two random reads the scan below makes for this
                 # neighbor
                 PREFETCH(&communities[other])
@@ -602,7 +602,7 @@ def leiden(float[::1] data,
             while j < end_index:
                 other = indices[j]
                 other_community = refined_communities[other]
-                node_to_community_weights[other_community] += data[j]
+                node_to_community_weights[other_community] += <double> data[j]
                 PREFETCH(&communities[other])
                 PREFETCH(&refined_community_weights[other_community])
                 j += 1
@@ -825,7 +825,7 @@ def leiden(float[::1] data,
                         touched_communities[num_touched] = community
                         num_touched += 1
                     node_to_community_weights[community] += \
-                        2 * data[start_index]
+                        2 * <double> data[start_index]
                     start_index += 1
                 j = start_index
                 while j < end_index - 16:
@@ -869,7 +869,7 @@ def leiden(float[::1] data,
             # this community had an edge to another node in it, or to itself.
             if node_to_community_weights[community] != 0:
                 next_data[edges_written] = \
-                    node_to_community_weights[community]
+                    <float> node_to_community_weights[community]
                 next_indices[edges_written] = community
                 edges_written += 1
                 node_to_community_weights[community] = 0
@@ -879,7 +879,7 @@ def leiden(float[::1] data,
                 other_community = touched_communities[k]
                 if other_community != community:
                     next_data[edges_written] = \
-                        node_to_community_weights[other_community]
+                        <float> node_to_community_weights[other_community]
                     next_indices[edges_written] = other_community
                     edges_written += 1
                     node_to_community_weights[other_community] = 0
@@ -1107,7 +1107,7 @@ cdef inline unsigned leiden_nogil(
                 PREFETCH(&communities[indices[j + 16]])
                 other = indices[j]
                 other_community = communities[other]
-                node_to_community_weights[other_community] += data[j]
+                node_to_community_weights[other_community] += <double> data[j]
                 # Prefetch the random read the scan below makes for this
                 # community
                 PREFETCH(&community_weights[other_community])
@@ -1115,7 +1115,7 @@ cdef inline unsigned leiden_nogil(
             while j < end_index:
                 other = indices[j]
                 other_community = communities[other]
-                node_to_community_weights[other_community] += data[j]
+                node_to_community_weights[other_community] += <double> data[j]
                 PREFETCH(&community_weights[other_community])
                 j += 1
             node_to_community_weight = node_to_community_weights[community]
@@ -1196,7 +1196,7 @@ cdef inline unsigned leiden_nogil(
                 with gil:
                     error_message = \
                         'every cell ended up in a cluster by itself'
-                    if resolution > 1:
+                    if resolution > <float> 1:
                         error_message += '; consider decreasing resolution'
                     error_message += f' (resolution = {resolution})'
                     raise ValueError(error_message)
@@ -1262,7 +1262,7 @@ cdef inline unsigned leiden_nogil(
                                 f'min_cluster_size ({min_cluster_size:,}), so '
                                 f'it cannot be assigned a cluster label; '
                                 f'consider decreasing min_cluster_size')
-                            if resolution > 1:
+                            if resolution > <float> 1:
                                 error_message += ' and/or resolution'
                             error_message += f' (resolution = {resolution})'
                             raise ValueError(error_message)
@@ -1327,7 +1327,7 @@ cdef inline unsigned leiden_nogil(
                 PREFETCH(&communities[indices[j + 16]])
                 other = indices[j]
                 other_community = communities[other]
-                node_to_community_weights[other_community] += data[j]
+                node_to_community_weights[other_community] += <double> data[j]
                 # Prefetch the random read the scan below makes for this
                 # community
                 PREFETCH(&community_weights[other_community])
@@ -1335,7 +1335,7 @@ cdef inline unsigned leiden_nogil(
             while j < end_index:
                 other = indices[j]
                 other_community = communities[other]
-                node_to_community_weights[other_community] += data[j]
+                node_to_community_weights[other_community] += <double> data[j]
                 PREFETCH(&community_weights[other_community])
                 j += 1
             node_to_community_weight = node_to_community_weights[community]
@@ -1487,7 +1487,7 @@ cdef inline unsigned leiden_nogil(
                 PREFETCH(&refined_communities[indices[j + 16]])
                 other = indices[j]
                 other_community = refined_communities[other]
-                node_to_community_weights[other_community] += data[j]
+                node_to_community_weights[other_community] += <double> data[j]
                 # Prefetch the two random reads the scan below makes for this
                 # neighbor
                 PREFETCH(&communities[other])
@@ -1496,7 +1496,7 @@ cdef inline unsigned leiden_nogil(
             while j < end_index:
                 other = indices[j]
                 other_community = refined_communities[other]
-                node_to_community_weights[other_community] += data[j]
+                node_to_community_weights[other_community] += <double> data[j]
                 PREFETCH(&communities[other])
                 PREFETCH(&refined_community_weights[other_community])
                 j += 1
@@ -1705,7 +1705,7 @@ cdef inline unsigned leiden_nogil(
                         touched_communities[num_touched] = community
                         num_touched += 1
                     node_to_community_weights[community] += \
-                        2 * data[start_index]
+                        2 * <double> data[start_index]
                     start_index += 1
                 j = start_index
                 while j < end_index - 16:
@@ -1749,7 +1749,7 @@ cdef inline unsigned leiden_nogil(
             # this community had an edge to another node in it, or to itself.
             if node_to_community_weights[community] != 0:
                 next_data[edges_written] = \
-                    node_to_community_weights[community]
+                    <float> node_to_community_weights[community]
                 next_indices[edges_written] = community
                 edges_written += 1
                 node_to_community_weights[community] = 0
@@ -1759,7 +1759,7 @@ cdef inline unsigned leiden_nogil(
                 other_community = touched_communities[k]
                 if other_community != community:
                     next_data[edges_written] = \
-                        node_to_community_weights[other_community]
+                        <float> node_to_community_weights[other_community]
                     next_indices[edges_written] = other_community
                     edges_written += 1
                     node_to_community_weights[other_community] = 0

@@ -20,29 +20,28 @@ cdef inline void clipped_stddev_csr(const float[::1] data,
     # Compute `X.std(axis=0)` where `X` is CSR, clipping to a minimum of
     # `clip_val`. Only used when `num_threads=1` and `match_parallel=False`.
 
-    cdef unsigned long long num_elements, i, j, start, end, \
-        chunk_size
-    cdef unsigned gene, cell, thread_index
-    cdef float value, total_sum, total_sum_of_squares, \
+    cdef unsigned long long num_elements, i
+    cdef unsigned gene
+    cdef double value, \
         inv_num_pairs_of_cells = 1.0 / (num_cells * (num_cells - 1))
-    cdef vector[float] sum_buffer, sum_of_squares_buffer
+    cdef vector[double] sum_buffer, sum_of_squares_buffer
     sum_buffer.resize(num_genes)
     sum_of_squares_buffer.resize(num_genes)
-    cdef float[::1] sum = <float[:num_genes]> sum_buffer.data(), \
-        sum_of_squares = <float[:num_genes]> sum_of_squares_buffer.data()
+    cdef double[::1] sum = <double[:num_genes]> sum_buffer.data(), \
+        sum_of_squares = <double[:num_genes]> sum_of_squares_buffer.data()
 
     # Iterate over all elements of the count matrix, ignoring which cell
     # they're from
     num_elements = indices.shape[0]
     for i in range(num_elements):
         gene = indices[i]
-        value = data[i]
+        value = <double> data[i]
         sum[gene] += value
         sum_of_squares[gene] += value * value
 
     # Calculate standard deviations from the sums and squared sums
     for gene in range(num_genes):
-        clipped_stddev[gene] = sqrt(inv_num_pairs_of_cells * (
+        clipped_stddev[gene] = <float> sqrt(inv_num_pairs_of_cells * (
             num_cells * sum_of_squares[gene] - sum[gene] * sum[gene]))
         if clipped_stddev[gene] < clip_val:
             clipped_stddev[gene] = clip_val
@@ -63,7 +62,7 @@ cdef inline void clipped_stddev_csc(const float[::1] data,
 
     cdef unsigned gene, thread_index, start_col, end_col
     cdef unsigned long long i
-    cdef float value, sum, sum_of_squares, \
+    cdef double value, sum, sum_of_squares, \
         inv_num_pairs_of_cells = 1.0 / (num_cells * (num_cells - 1))
 
     num_threads = min(num_threads, num_genes)
@@ -75,12 +74,12 @@ cdef inline void clipped_stddev_csc(const float[::1] data,
             sum_of_squares = 0
             for i in range(<unsigned long long> indptr[gene],
                            <unsigned long long> indptr[gene + 1]):
-                value = data[i]
+                value = <double> data[i]
                 sum += value
                 sum_of_squares += value * value
 
             # Calculate the scaled variance from the sum and squared sum
-            clipped_stddev[gene] = sqrt(inv_num_pairs_of_cells * (
+            clipped_stddev[gene] = <float> sqrt(inv_num_pairs_of_cells * (
                 num_cells * sum_of_squares - sum * sum))
             if clipped_stddev[gene] < clip_val:
                 clipped_stddev[gene] = clip_val
@@ -94,10 +93,10 @@ cdef inline void clipped_stddev_csc(const float[::1] data,
                 sum_of_squares = 0
                 for i in range(<unsigned long long> indptr[gene],
                                <unsigned long long> indptr[gene + 1]):
-                    value = data[i]
+                    value = <double> data[i]
                     sum = sum + value
                     sum_of_squares = sum_of_squares + value * value
-                clipped_stddev[gene] = sqrt(inv_num_pairs_of_cells * (
+                clipped_stddev[gene] = <float> sqrt(inv_num_pairs_of_cells * (
                     num_cells * sum_of_squares - sum * sum))
                 if clipped_stddev[gene] < clip_val:
                     clipped_stddev[gene] = clip_val
@@ -684,8 +683,8 @@ def irlba(const float[::1] data_matvec,
         block_end, num_blocks_cells = (num_cells + chunk_size - 1) / chunk_size
     cdef float inverse_norm, dot_product, alpha, inverse_alpha, beta, \
         inverse_beta, remainder_norm, residual, Sbj, block_partial, \
-        squared_norm, mean, clip_val = 1e-8, \
-        Smax = 2.4221817809573368e-05  # (float32 eps) ** (2 / 3)
+        squared_norm, mean, clip_val = <float> 1e-8, \
+        Smax = <float> 2.4221817809573368e-05  # (float32 eps) ** (2 / 3)
     cdef int lwork
     cdef bint converged = False
     cdef uninitialized_vector[float] clipped_stddev_buffer, U_buffer, \
@@ -801,7 +800,7 @@ def irlba(const float[::1] data_matvec,
     # Initialize the first column of `V` with a random normal vector
     for i in range(num_genes):
         V[i, 0] = random_normal(&state)
-    inverse_norm = 1 / norm(V[:, 0])
+    inverse_norm = <float> 1 / norm(V[:, 0])
     for i in range(num_genes):
         V[i, 0] *= inverse_norm
 
@@ -844,7 +843,7 @@ def irlba(const float[::1] data_matvec,
                 alpha = norm(U[:, j])
                 if alpha < clip_val:
                     alpha = clip_val
-                inverse_alpha = 1 / alpha
+                inverse_alpha = <float> 1 / alpha
                 for i in range(num_cells):
                     U[i, j] *= inverse_alpha
                 B[j, j] = alpha
@@ -905,7 +904,7 @@ def irlba(const float[::1] data_matvec,
                 beta = norm(V[:, j + 1])
                 if beta < clip_val:
                     beta = clip_val
-                inverse_beta = 1 / beta
+                inverse_beta = <float> 1 / beta
                 for i in range(num_genes):
                     V[i, j + 1] *= inverse_beta
                 B[j, j + 1] = beta
@@ -1083,7 +1082,7 @@ def irlba(const float[::1] data_matvec,
                     alpha = sqrt(squared_norm)
                     if alpha < clip_val:
                         alpha = clip_val
-                    inverse_alpha = 1 / alpha
+                    inverse_alpha = <float> 1 / alpha
                     for i in prange(num_cells,
                                     num_threads=num_threads_or_cells):
                         U[i, j] *= inverse_alpha
@@ -1164,7 +1163,7 @@ def irlba(const float[::1] data_matvec,
                     beta = norm(V[:, j + 1])
                     if beta < clip_val:
                         beta = clip_val
-                    inverse_beta = 1 / beta
+                    inverse_beta = <float> 1 / beta
                     for i in range(num_genes):
                         V[i, j + 1] *= inverse_beta
                     B[j, j + 1] = beta

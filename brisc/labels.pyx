@@ -35,9 +35,9 @@ cdef extern from *:
 # push instead of dividing by zero (0.0004 = 0.02**2 in data-normalized units).
 # The two decays anneal the forces a little each iteration, so the system cools
 # and settles.
-cdef float MIN_SEP2 = 0.0004
-cdef float REPULSION_DECAY = 0.99999
-cdef float ATTRACTION_DECAY = 0.9999
+cdef float MIN_SEP2 = <float> 0.0004
+cdef float REPULSION_DECAY = <float> 0.99999
+cdef float ATTRACTION_DECAY = <float> 0.9999
 
 
 cdef inline float clip(float v, const float lo, const float hi) noexcept nogil:
@@ -62,11 +62,11 @@ cdef inline bint cross(float ax, float ay, float bx, float by,
     # Whether segments a,b and c,d cross (shared endpoints don't)
     cdef float s1 = (ay - cy) * (dx - cx) - (dy - cy) * (ax - cx)  # side c,d,a
     cdef float s2 = (by - cy) * (dx - cx) - (dy - cy) * (bx - cx)  # side c,d,b
-    if s1 * s2 >= 0:
+    if s1 * s2 >= <float> 0:
         return False
     cdef float s3 = (cy - ay) * (bx - ax) - (by - ay) * (cx - ax)  # side a,b,c
     cdef float s4 = (dy - ay) * (bx - ax) - (by - ay) * (dx - ax)  # side a,b,d
-    return s3 * s4 < 0
+    return s3 * s4 < <float> 0
 
 
 cdef inline bint clip_edge(float p, float q, float& enter, float& leave) \
@@ -78,10 +78,10 @@ cdef inline bint clip_edge(float p, float q, float& enter, float& leave) \
     segment is wholly outside this edge and so cannot hit the box.
     """
     cdef float t
-    if abs(p) < 1e-12:
-        return q >= 0
+    if abs(p) < <float> 1e-12:
+        return q >= <float> 0
     t = q / p
-    if p < 0:
+    if p < <float> 0:
         if t > leave:
             return False
         if t > enter:
@@ -125,9 +125,9 @@ cdef inline void repel(const float dx, const float dy, const float repulsion,
     gy = dy * scale
     if abs(dx) > abs(dy):
         fx += gx
-        fy += gy * 2
+        fy += gy * <float> 2
     else:
-        fx += gx * 2
+        fx += gx * <float> 2
         fy += gy
 
 
@@ -167,7 +167,7 @@ cdef void repel_boxes(float[:, ::1] centers,
         overlaps = 0
         attraction *= ATTRACTION_DECAY
         repulsion *= REPULSION_DECAY
-        point_coeff = padding * 100 * repulsion
+        point_coeff = <float> 100 * padding * repulsion
         for i in range(n):
             cx = centers[i, 0]
             cy = centers[i, 1]
@@ -194,9 +194,9 @@ cdef void repel_boxes(float[:, ::1] centers,
                     continue
                 gapx = abs(dx) - half_width[i]
                 gapy = abs(dy) - half_height[i]
-                if gapx < 0:
+                if gapx < <float> 0:
                     gapx = 0
-                if gapy < 0:
+                if gapy < <float> 0:
                     gapy = 0
                 if gapx * gapx + gapy * gapy <= padding2:
                     repel(dx, dy, point_coeff, min_sep2, fx, fy)
@@ -218,9 +218,9 @@ cdef void repel_boxes(float[:, ::1] centers,
                         continue
                     gapx = abs(dx) - half_width[i]
                     gapy = abs(dy) - half_height[i]
-                    if gapx < 0:
+                    if gapx < <float> 0:
                         gapx = 0
-                    if gapy < 0:
+                    if gapy < <float> 0:
                         gapy = 0
                     if gapx * gapx + gapy * gapy <= padding2:
                         repel(dx, dy, point_coeff, min_sep2, fx, fy)
@@ -230,8 +230,9 @@ cdef void repel_boxes(float[:, ::1] centers,
                 # Spring back to own point
                 fx += attraction * (anchors[i, 0] - cx)
                 fy += attraction * (anchors[i, 1] - cy)
-            momentum = (1 + (0.5 if hits > 10 else 0.05 * hits)) * \
-                (width[i] + 1e-6) * 0.7
+            momentum = (<float> 1 + (<float> 0.5 if hits > 10 else
+                                     <float> 0.05 * hits)) * \
+                (width[i] + <float> 1e-6) * <float> 0.7
             velocity[i, 0] = velocity[i, 0] * momentum + fx
             velocity[i, 1] = velocity[i, 1] * momentum + fy
             cx = clip(cx + velocity[i, 0], x0 + half_width[i],
@@ -244,7 +245,7 @@ cdef void repel_boxes(float[:, ::1] centers,
             dx = cx - anchors[i, 0]
             dy = cy - anchors[i, 1]
             d = sqrt(dx * dx + dy * dy)
-            max_line = 2 * half_width[i]
+            max_line = <float> 2 * half_width[i]
             if d > max_line:
                 cx = anchors[i, 0] + dx / d * max_line
                 cy = anchors[i, 1] + dy / d * max_line
@@ -287,16 +288,16 @@ cdef bint separate(float[:, ::1] centers,
                 dy = centers[i, 1] - centers[j, 1]
                 ox = half_width[i] + half_width[j] - abs(dx)
                 oy = half_height[i] + half_height[j] - abs(dy)
-                if ox > 0 and oy > 0:
+                if ox > <float> 0 and oy > <float> 0:
                     if ox <= oy:
-                        s = ox * 0.5
-                        if dx < 0:
+                        s = ox * <float> 0.5
+                        if dx < <float> 0:
                             s = -s
                         centers[i, 0] += s
                         centers[j, 0] -= s
                     else:
-                        s = oy * 0.5
-                        if dy < 0:
+                        s = oy * <float> 0.5
+                        if dy < <float> 0:
                             s = -s
                         centers[i, 1] += s
                         centers[j, 1] -= s
@@ -372,7 +373,7 @@ cdef void declutter(float[:, ::1] centers,
             sx = ex_px[i] - anchors[i, 0]
             sy = ey_px[i] - anchors[i, 1]
             length = sqrt(sx * sx + sy * sy)
-            if length < 1e-6:
+            if length < <float> 1e-6:
                 continue
             perpx = -sy / length
             perpy = sx / length
@@ -383,11 +384,11 @@ cdef void declutter(float[:, ::1] centers,
             for j in range(n):
                 if i == j:
                     continue
-                if max_x < centers[j, 0] - half_width[j] - 0.5 or \
-                        min_x > centers[j, 0] + half_width[j] + 0.5:
+                if max_x < centers[j, 0] - half_width[j] - <float> 0.5 or \
+                        min_x > centers[j, 0] + half_width[j] + <float> 0.5:
                     continue
-                if max_y < centers[j, 1] - half_height[j] - 0.5 or \
-                        min_y > centers[j, 1] + half_height[j] + 0.5:
+                if max_y < centers[j, 1] - half_height[j] - <float> 0.5 or \
+                        min_y > centers[j, 1] + half_height[j] + <float> 0.5:
                     continue
                 if not segment_hits_box(anchors[i, 0], anchors[i, 1],
                                         ex_px[i], ey_px[i],
@@ -399,9 +400,9 @@ cdef void declutter(float[:, ::1] centers,
                 side = (centers[j, 0] - anchors[i, 0]) * perpx + \
                        (centers[j, 1] - anchors[i, 1]) * perpy
                 repulsion = abs(half_width[j] * perpx) + \
-                    abs(half_height[j] * perpy) + 1.5 - abs(side)
-                if repulsion > 0:
-                    if side < 0:
+                    abs(half_height[j] * perpy) + <float> 1.5 - abs(side)
+                if repulsion > <float> 0:
+                    if side < <float> 0:
                         repulsion = -repulsion
                     centers[j, 0] += perpx * repulsion
                     centers[j, 1] += perpy * repulsion
@@ -423,9 +424,9 @@ cdef void declutter(float[:, ::1] centers,
                     ox = hw - abs(dx)
                     oy = hh - abs(dy)
                     if ox <= oy:
-                        centers[i, 0] += ox if dx >= 0 else -ox
+                        centers[i, 0] += ox if dx >= <float> 0 else -ox
                     else:
-                        centers[i, 1] += oy if dy >= 0 else -oy
+                        centers[i, 1] += oy if dy >= <float> 0 else -oy
                     changed = True
 
             if m > 0:
@@ -444,9 +445,9 @@ cdef void declutter(float[:, ::1] centers,
                         ox = hw - abs(dx)
                         oy = hh - abs(dy)
                         if ox <= oy:
-                            centers[i, 0] += ox if dx >= 0 else -ox
+                            centers[i, 0] += ox if dx >= <float> 0 else -ox
                         else:
-                            centers[i, 1] += oy if dy >= 0 else -oy
+                            centers[i, 1] += oy if dy >= <float> 0 else -oy
                         changed = True
 
             # Keep the box `min_line` off its own point, moving the smallest
@@ -615,7 +616,7 @@ def label(ax,
     # ggrepel scales momentum by box width; normalize widths to ~[0, 1]
     width = 2 * half_width
     ptp = np.ptp(width)
-    if ptp > 0:
+    if ptp > <float> 0:
         width -= width.min()
         width /= ptp
     else:
@@ -632,19 +633,19 @@ def label(ax,
     S = sqrt(bw * bh)
 
     # Dynamically scale ggrepel parameters to the current pixel space
-    repulsion *= S ** 3
-    min_sep2 = MIN_SEP2 * S ** 2
+    repulsion *= <double> (S * S * S)
+    min_sep2 = MIN_SEP2 * S * S
 
     # Perform the label repulsion
     repel_boxes(centers_px, half_width, half_height, xy_px, scatter_px,
-                padding, width, velocity, bx0, by0, bx0 + bw, by0 + bh,
-                attraction, repulsion, min_sep2, max_iter)
+                <float> padding, width, velocity, bx0, by0, bx0 + bw, by0 + bh,
+                <float> attraction, <float> repulsion, min_sep2, max_iter)
 
     PyErr_CheckSignals()
 
     # Clean up, still in pixels
     declutter(centers_px, xy_px, half_width, half_height, bx0, by0,
-              bx0 + bw, by0 + bh, scatter_px, padding, ex_px, ey_px)
+              bx0 + bw, by0 + bh, scatter_px, <float> padding, ex_px, ey_px)
 
     PyErr_CheckSignals()
 

@@ -17,11 +17,14 @@ cdef inline float log1p(const float x) noexcept nogil:
     # matters when x is small. To calculate log(u), u is split into m * 2^k
     # with m in [sqrt(1/2), sqrt(2)), so that log(u) = k * log(2) + log(m), and
     # log(m) is approximated with fdlibm's polynomial in s = (m - 1) / (m + 1).
-    cdef float coefficient_1 = 0.66666662693, coefficient_2 = 0.40000972152, \
-        coefficient_3 = 0.28498786688, coefficient_4 = 0.24279078841
+    cdef float coefficient_1 = <float> 0.66666662693, \
+        coefficient_2 = <float> 0.40000972152, \
+        coefficient_3 = <float> 0.28498786688, \
+        coefficient_4 = <float> 0.24279078841
     # log(2), split into a high part with trailing zero bits, so that
     # k * log2_high is exact, and a low part with the remainder
-    cdef float log2_high = 0.69313812256, log2_low = 9.0580006145e-06
+    cdef float log2_high = <float> 0.69313812256, \
+        log2_low = <float> 9.0580006145e-06
     cdef float u, c, m, f, s, z, w, polynomial, half_f_squared
     cdef unsigned bits
     cdef int k  # int since x86 can't vectorize unsigned-to-float pre-AVX-512
@@ -90,7 +93,8 @@ def normalize_csr(const numeric[::1] data,
                 inverse_size_factor = normalization_factor / row_sum
                 for j in range(<unsigned long long> indptr[i],
                                <unsigned long long> indptr[i + 1]):
-                    normalized_data[j] = log1p(data[j] * inverse_size_factor)
+                    normalized_data[j] = \
+                        log1p(<float> data[j] * inverse_size_factor)
         else:
             # Step 1a and 1b: calculate row sums, and take their mean (across
             # cells passing QC, if `QC_column` was specified) as the
@@ -124,7 +128,8 @@ def normalize_csr(const numeric[::1] data,
                 inverse_size_factor = normalization_factor / row_sums[i]
                 for j in range(<unsigned long long> indptr[i],
                                <unsigned long long> indptr[i + 1]):
-                    normalized_data[j] = log1p(data[j] * inverse_size_factor)
+                    normalized_data[j] = \
+                        log1p(<float> data[j] * inverse_size_factor)
         elif method_number == 2:  # 'PFlog1pPF'
             # Step 1c, 2, and 3a: in addition to calculating each cell's
             # size factor and multiplying the counts by it, also calculate
@@ -140,7 +145,8 @@ def normalize_csr(const numeric[::1] data,
                 inverse_size_factor = normalization_factor / row_sums[i]
                 for j in range(<unsigned long long> indptr[i],
                                <unsigned long long> indptr[i + 1]):
-                    normalized_data[j] = log1p(data[j] * inverse_size_factor)
+                    normalized_data[j] = \
+                        log1p(<float> data[j] * inverse_size_factor)
                 for j in range(<unsigned long long> indptr[i],
                                <unsigned long long> indptr[i + 1]):
                     new_row_sum += normalized_data[j]
@@ -182,7 +188,7 @@ def normalize_csr(const numeric[::1] data,
                         for j in range(<unsigned long long> indptr[i],
                                        <unsigned long long> indptr[i + 1]):
                             normalized_data[j] = \
-                                log1p(data[j] * inverse_size_factor)
+                                log1p(<float> data[j] * inverse_size_factor)
             else:
                 # Step 1a and 1b: calculate row sums, and take their mean
                 # (across cells passing QC, if `QC_column` was specified) as
@@ -246,7 +252,7 @@ def normalize_csr(const numeric[::1] data,
                         for j in range(<unsigned long long> indptr[i],
                                        <unsigned long long> indptr[i + 1]):
                             normalized_data[j] = \
-                                log1p(data[j] * inverse_size_factor)
+                                log1p(<float> data[j] * inverse_size_factor)
             elif method_number == 2:  # 'PFlog1pPF'
                 # Step 1c, 2, and 3a: in addition to calculating each cell's
                 # size factor and multiplying the counts by it, also calculate
@@ -269,7 +275,7 @@ def normalize_csr(const numeric[::1] data,
                         for j in range(<unsigned long long> indptr[i],
                                        <unsigned long long> indptr[i + 1]):
                             normalized_data[j] = \
-                                log1p(data[j] * inverse_size_factor)
+                                log1p(<float> data[j] * inverse_size_factor)
                         for j in range(<unsigned long long> indptr[i],
                                        <unsigned long long> indptr[i + 1]):
                             new_row_sum = new_row_sum + normalized_data[j]
@@ -346,7 +352,7 @@ def normalize_csc(const numeric[::1] data,
         # factor, then log1p-transform
         for j in range(num_elements):
             inverse_size_factor = normalization_factor / row_sums[indices[j]]
-            normalized_data[j] = log1p(data[j] * inverse_size_factor)
+            normalized_data[j] = log1p(<float> data[j] * inverse_size_factor)
 
         if method_number == 2:  # 'PFlog1pPF'
             # Step 3a: calculate the new row sums and total sum for a second
@@ -419,7 +425,8 @@ def normalize_csc(const numeric[::1] data,
             for j in prange(num_elements, num_threads=num_threads):
                 inverse_size_factor = \
                     normalization_factor / row_sums[indices[j]]
-                normalized_data[j] = log1p(data[j] * inverse_size_factor)
+                normalized_data[j] = \
+                    log1p(<float> data[j] * inverse_size_factor)
 
             if method_number == 2:  # 'PFlog1pPF'
                 # Step 3a: calculate the new row sums and total sum for a

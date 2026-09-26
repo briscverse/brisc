@@ -941,7 +941,7 @@ def has_all_zero_columns(const numeric[:, ::1] X):
     cdef unsigned i, j
     for j in range(X.shape[1]):
         for i in range(X.shape[0]):
-            if X[i, j] != 0:
+            if X[i, j]:
                 break
         else:
             return True
@@ -1183,11 +1183,11 @@ cdef inline float random_normal(unsigned long long* state) noexcept nogil:
     cdef float u1, u2, r, theta
     while True:
         u1 = random_uniform(state)
-        if u1 != 0:
+        if u1:
             break
     u2 = random_uniform(state)
-    r = sqrt(-2 * log(u1))
-    theta = 2 * M_PI * u2
+    r = sqrt(<float> -2 * log(u1))
+    theta = <float> 2 * <float> M_PI * u2
     return r * cos(theta)
 
 

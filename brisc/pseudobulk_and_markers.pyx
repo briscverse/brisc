@@ -265,7 +265,7 @@ def groupby_getnnz_and_total_csc_for_gene_subset(
                     nnz[group, column] += 1
 
                     # Add the data value to the total for this group and gene
-                    total[group, column] += data[cell]
+                    total[group, column] += <double> data[cell]
         else:
             for column in range(num_columns):
                 gene = gene_map[column]
@@ -273,7 +273,7 @@ def groupby_getnnz_and_total_csc_for_gene_subset(
                                   <unsigned long long> indptr[gene + 1]):
                     group = group_map[indices[cell]]
                     nnz[group, column] += 1
-                    total[group, column] += data[cell]
+                    total[group, column] += <double> data[cell]
     else:
         if has_missing:
             with nogil, parallel(num_threads=num_threads):
@@ -289,7 +289,7 @@ def groupby_getnnz_and_total_csc_for_gene_subset(
                         if group == -1:
                             continue
                         nnz[group, column] += 1
-                        total[group, column] += data[cell]
+                        total[group, column] += <double> data[cell]
         else:
             with nogil, parallel(num_threads=num_threads):
                 thread_index = threadid()
@@ -302,7 +302,7 @@ def groupby_getnnz_and_total_csc_for_gene_subset(
                                       <unsigned long long> indptr[gene + 1]):
                         group = group_map[indices[cell]]
                         nnz[group, column] += 1
-                        total[group, column] += data[cell]
+                        total[group, column] += <double> data[cell]
 
 
 def groupby_getnnz_csr(const signed_integer[::1] indices,
@@ -527,7 +527,7 @@ def groupby_getnnz_and_total_csr_for_gene_subset(
                     nnz[group, column] += 1
 
                     # Add the data value to the total for this group and gene
-                    total[group, column] += data[gene]
+                    total[group, column] += <double> data[gene]
     elif num_threads <= num_groups:
         # Enough groups to keep all threads busy: parallelize over groups
         for group in prange(num_groups, nogil=True, num_threads=num_threads):
@@ -542,7 +542,7 @@ def groupby_getnnz_and_total_csr_for_gene_subset(
                     if column == -1:
                         continue
                     nnz[group, column] += 1
-                    total[group, column] += data[gene]
+                    total[group, column] += <double> data[gene]
     else:
         # Fewer groups than threads: process each group with all threads, using
         # per-thread scratch buffers to avoid write races, then reduce across
@@ -580,7 +580,8 @@ def groupby_getnnz_and_total_csr_for_gene_subset(
                         if column == -1:
                             continue
                         thread_nnz[thread_index, column] += 1
-                        thread_total[thread_index, column] += data[gene]
+                        thread_total[thread_index, column] += \
+                            <double> data[gene]
 
             for gene_index in prange(num_genes, nogil=True,
                                      num_threads=num_threads):

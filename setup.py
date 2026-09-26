@@ -4,8 +4,38 @@ import site
 import sys
 import platform
 from setuptools import setup, Extension
+from setuptools.command.build_ext import build_ext
 from Cython.Build import cythonize
 import numpy as np
+
+
+class BuildExt(build_ext):
+    def build_extensions(self):
+        # Avoid "cl : Command line warning D9025 : overriding '/W3' with '/W4'"
+        # on Windows
+        if self.compiler.compiler_type == 'msvc':
+            if not self.compiler.initialized:
+                self.compiler.initialize()
+            self.compiler.compile_options = [
+                opt for opt in self.compiler.compile_options
+                if opt != '/W3']
+
+        # Avoid "ld: warning: duplicate -rpath '<path>' ignored" on Mac
+        for attr in ('linker_so', 'linker_so_cxx'):
+            linker = getattr(self.compiler, attr, None)
+            if linker is None:
+                continue
+            seen = set()
+            deduplicated = []
+            for arg in linker:
+                if arg.startswith('-Wl,-rpath,'):
+                    if arg in seen:
+                        continue
+                    seen.add(arg)
+                deduplicated.append(arg)
+            setattr(self.compiler, attr, deduplicated)
+        super().build_extensions()
+
 
 windows = sys.platform == 'win32'
 mac = sys.platform == 'darwin'
@@ -53,23 +83,28 @@ pxd_files = [f for f in source_files if f.endswith('.pxd')]
 try:
     for variant_name, march in variants:
         if windows:
+            import sysconfig
             compiler_flags = [
-                '/O2',
-                '/fp:fast',
-                '/std:c++17', '/openmp:llvm', '/W3', '/WX',
-                # Suppress MSVC-specific warnings commonly triggered by
-                # Cython's generated C++ code
-                '/wd4018',             # signed/unsigned mismatch
-                '/wd4060',             # switch statement lacks case/default
-                '/wd4127',             # conditional expression is constant
-                '/wd4146',             # unary minus applied to unsigned type
-                '/wd4244',             # conversion with possible loss of data
-                '/wd4267',             # conversion from size_t to int
-                '/wd4305',             # truncation from double to float
-                '/wd4551',             # function call missing argument list
-                '/wd4700', '/wd4701',  # uninitialized variable
-                '/wd4723',             # potential divide by 0 (ARM64 pedantry)
-                '/wd4996']             # deprecated POSIX names
+                '/O2', '/fp:fast', '/std:c++17', '/openmp:llvm',
+                '/Zc:__cplusplus',
+                # Baseline warnings
+                '/W4', '/WX',
+                # Don't warn inside Python and NumPy headers
+                '/external:W0',
+                f'/external:I{sysconfig.get_paths()["include"]}',
+                f'/external:I{np.get_include()}',
+                # Suppress specific warnings
+                '/wd4018',  # signed/unsigned mismatch
+                '/wd4060',  # switch statement contains no case/default labels
+                '/wd4146',  # unary minus applied to unsigned type
+                '/wd4244',  # conversion with possible loss of data
+                '/wd4245',  # signed/unsigned mismatch
+                '/wd4267',  # conversion from size_t to int
+                '/wd4310',  # cast truncates constant value
+                '/wd4456',  # declaration hides previous local declaration
+                '/wd4551',  # function call missing argument list
+                '/wd4701',  # potentially uninitialized local variable used
+                '/wd4703']  # potentially uninitialized local pointer used
             linker_flags = ['/OPT:REF', '/OPT:ICF']
         elif mac:
             omp_base = os.environ.get('PREFIX')  # set by conda-build
@@ -83,18 +118,33 @@ try:
                     else 'openmp')
             compiler_flags = [
                 '-O3', '-ffast-math', '-std=c++17', '-g0', '-Xpreprocessor',
-                '-fopenmp', '-Wall', '-Wextra', '-Werror',
-                '-Wno-uninitialized', '-Wno-ignored-qualifiers',
-                '-Wno-unreachable-code', '-fvisibility=hidden',
-                '-fvisibility-inlines-hidden', f'-I{omp_base}/include']
+                '-fopenmp', '-fvisibility=hidden',
+                '-fvisibility-inlines-hidden', '-fstrict-overflow',
+                f'-I{omp_base}/include',
+                # Baseline warnings
+                '-Wall', '-Wextra', '-Werror', '-Wno-uninitialized',
+                '-Wno-ignored-qualifiers', '-Wno-unreachable-code',
+                # Floating-point warnings
+                '-Wfloat-conversion', '-Wimplicit-float-conversion',
+                '-Wno-implicit-int-float-conversion']
             linker_flags = ['-lomp', f'-L{omp_base}/lib',
                             f'-Wl,-rpath,{omp_base}/lib', '-Wl,-S']
         else:
             compiler_flags = [
                 '-Ofast', '-funroll-loops', '-std=c++17', '-g0', '-fopenmp',
+                '-fvisibility=hidden', '-fvisibility-inlines-hidden',
+                '-fstrict-overflow',
+                # Baseline warnings
                 '-Wall', '-Wextra', '-Werror', '-Wno-uninitialized',
-                '-Wno-ignored-qualifiers', '-Wno-maybe-uninitialized',
-                '-fvisibility=hidden', '-fvisibility-inlines-hidden']
+                '-Wno-maybe-uninitialized', '-Wno-ignored-qualifiers',
+                # Floating-point warnings
+                '-Wdouble-promotion', '-Wfloat-conversion',
+                # Typo/copy-paste warnings
+                '-Wduplicated-cond', '-Wduplicated-branches', '-Wlogical-op',
+                # Out-of-bounds warnings
+                '-Warray-bounds=2', '-Wstringop-overflow=4',
+                # C++ and optimizer warnings
+                '-Wsign-promo', '-Wdisabled-optimization']
             linker_flags = ['-fopenmp', '-s']
         if march:
             compiler_flags.append(march)
@@ -157,7 +207,7 @@ try:
         # relative"
         for ext in ext_modules:
             ext.depends = [d for d in ext.depends if not os.path.isabs(d)]
-    setup(ext_modules=ext_modules)
+    setup(ext_modules=ext_modules, cmdclass={'build_ext': BuildExt})
 finally:
     # Remove the temporary directories
     for variant_name, _ in variants:

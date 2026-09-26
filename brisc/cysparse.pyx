@@ -1309,7 +1309,7 @@ def csr_eliminate_zeros(const unsigned n_row,
         while jj < row_end:
             j = Aj[jj]
             x = Ax[jj]
-            if x != 0:
+            if x:
                 Aj[nnz] = j
                 Ax[nnz] = x
                 nnz += 1
