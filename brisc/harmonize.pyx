@@ -314,8 +314,8 @@ def harmony(const float[:, ::1] PCs,
     #
     # Allocate per-thread storage for `Z_chunk` and `distance = Z_chunk @ Y.T`.
     # Allocate a single buffer for all threads without worrying about false
-    # sharing, since the default `chunk_size` (512) is a multiple of the cache
-    # line size.
+    # sharing, since the default `chunk_size` is a multiple of 16, so each
+    # thread's slice spans whole 64-byte cache lines.
 
     cdef unsigned long long num_cells = Z.shape[0], state = srand(seed)
     cdef unsigned i, j, k, thread_index, chunk_index, chunk_start, chunk_end, \
@@ -370,7 +370,7 @@ def harmony(const float[:, ::1] PCs,
     delta_O_buffer.resize(
         <unsigned long long> num_chunks * num_batches * num_clusters)
     delta_E_buffer.resize(
-        <unsigned long long> num_chunks * num_batches * num_clusters)
+        <unsigned long long> max_chunks_per_block * num_batches * num_clusters)
     ratio_buffer.resize(
         <unsigned long long> max_chunks_per_block * num_batches * num_clusters)
     kmeans_errors.resize(num_chunks)
@@ -408,7 +408,7 @@ def harmony(const float[:, ::1] PCs,
             distance_buffer.data(), \
         delta_O = <float[:num_chunks, :num_batches, :num_clusters]> \
             delta_O_buffer.data(), \
-        delta_E = <float[:num_chunks, :num_batches, :num_clusters]> \
+        delta_E = <float[:max_chunks_per_block, :num_batches, :num_clusters]> \
             delta_E_buffer.data(), \
         ratio = <float[:max_chunks_per_block, :num_batches, :num_clusters]> \
             ratio_buffer.data(), \
@@ -525,19 +525,18 @@ def harmony(const float[:, ::1] PCs,
     # Check for KeyboardInterrupts
     PyErr_CheckSignals()
 
-    # Shrink `R_sums`, `delta_O`, and `delta_E` from `num_chunks` to
-    # `max_chunks_per_block` along their first dimension
+    # Shrink `R_sums` and `delta_O` from `num_chunks` to `max_chunks_per_block`
+    # along their first dimension. `shrink_to_fit()` reallocates, so rebuild
+    # the memoryviews afterwards.
     R_sums_buffer.resize(
         <unsigned long long> max_chunks_per_block * num_clusters)
     delta_O_buffer.resize(
         <unsigned long long> max_chunks_per_block * num_batches * num_clusters)
-    delta_E_buffer.resize(
-        <unsigned long long> max_chunks_per_block * num_batches * num_clusters)
+    R_sums_buffer.shrink_to_fit()
+    delta_O_buffer.shrink_to_fit()
     R_sums = <float[:max_chunks_per_block, :num_clusters]> R_sums_buffer.data()
     delta_O = <float[:max_chunks_per_block, :num_batches, :num_clusters]> \
         delta_O_buffer.data()
-    delta_E = <float[:max_chunks_per_block, :num_batches, :num_clusters]> \
-        delta_E_buffer.data()
 
     # Now that initialization is done, start the Harmony iterations
     with nogil:

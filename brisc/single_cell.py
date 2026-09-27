@@ -13468,9 +13468,10 @@ class SingleCell:
             sigma: the weight of the entropy term in the Harmony objective
                    function; must be positive
             chunk_size_Harmony: the chunk size to use for Harmony. Setting this
-                                to a power of 2 is recommended. Defaults to
-                                `min(256, total number of cells)`. Not used
-                                when `original=True`.
+                                to a multiple of 16 is recommended. Defaults to
+                                `min(256, total number of cells)`, capped to a
+                                maximum of 4096 chunks. Not used when
+                                `original=True`.
             seed: the random seed to use for the initial k-means clustering
             original: if `True`, use the original Harmony algorithm's blocking
                       strategy, rather than our nested chunks-within-blocks
@@ -13807,11 +13808,15 @@ class SingleCell:
                 f'({num_cells:,})')
             raise ValueError(error_message)
 
-        # If `chunk_size_Harmony` is `None`, set it to `min(256, num_cells)`.
-        # Otherwise, check that it is less than the total number of cells
-        # across all datasets.
+        # If `chunk_size_Harmony` is `None`, set it to `min(256, num_cells)`,
+        # capped to a maximum of 4096 chunks. Otherwise, check that it is less
+        # than the total number of cells across all datasets.
         if chunk_size_Harmony is None:
-            chunk_size_Harmony = min(256, num_cells)
+            # Smallest chunk size giving at most 4096 chunks, rounded up to a
+            # multiple of 16 so each thread's buffer slice is 64-byte aligned
+            min_chunk_size = (num_cells + 4095) // 4096
+            min_chunk_size = (min_chunk_size + 15) // 16 * 16
+            chunk_size_Harmony = min(max(256, min_chunk_size), num_cells)
         elif chunk_size_Harmony >= num_cells:
             error_message = (
                 f'chunk_size_Harmony is {chunk_size_Harmony:,}, but must be '
