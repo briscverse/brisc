@@ -96,11 +96,13 @@ try:
                 # Suppress specific warnings
                 '/wd4018',  # signed/unsigned mismatch
                 '/wd4060',  # switch statement contains no case/default labels
+                '/wd4125',  # decimal digit terminates octal escape sequence
                 '/wd4146',  # unary minus applied to unsigned type
                 '/wd4244',  # conversion with possible loss of data
                 '/wd4245',  # signed/unsigned mismatch
                 '/wd4267',  # conversion from size_t to int
                 '/wd4310',  # cast truncates constant value
+                '/wd4389',  # signed/unsigned mismatch
                 '/wd4456',  # declaration hides previous local declaration
                 '/wd4551',  # function call missing argument list
                 '/wd4701',  # potentially uninitialized local variable used
