@@ -347,25 +347,36 @@ def harmony(const float[:, ::1] PCs,
     Pr_b_buffer.resize(num_batches)
     theta_batch_buffer.resize(num_batches)
     cluster_diversity_penalty_buffer.resize(num_clusters)
-    E_buffer.resize(num_batches * num_clusters)
-    O_buffer.resize(num_batches * num_clusters)
-    diversity_buffer.resize(num_batches * num_clusters)
-    R_sums_buffer.resize(num_chunks * num_clusters)
-    inv_cov_2_buffer.resize((num_batches + 1) * (num_batches + 1))
-    inv_cov_1_buffer.resize((num_batches + 1) * (num_batches + 1))
-    inv_cov_buffer.resize((num_batches + 1) * (num_batches + 1))
-    R_scaled_PCs_buffer.resize(num_PCs * (num_batches + 1))
-    W_buffer.resize(num_clusters * (num_batches + 1) * num_PCs)
-    Y_chunk_buffer.resize(num_chunks * num_clusters * num_PCs)
-    Z_chunk_buffer.resize(num_threads * chunk_size * num_PCs)
-    distance_buffer.resize(num_threads * chunk_size * num_clusters)
-    delta_O_buffer.resize(num_chunks * num_batches * num_clusters)
-    delta_E_buffer.resize(num_chunks * num_batches * num_clusters)
-    ratio_buffer.resize(max_chunks_per_block * num_batches * num_clusters)
+    E_buffer.resize(<unsigned long long> num_batches * num_clusters)
+    O_buffer.resize(<unsigned long long> num_batches * num_clusters)
+    diversity_buffer.resize(<unsigned long long> num_batches * num_clusters)
+    R_sums_buffer.resize(<unsigned long long> num_chunks * num_clusters)
+    inv_cov_2_buffer.resize(
+        <unsigned long long> (num_batches + 1) * (num_batches + 1))
+    inv_cov_1_buffer.resize(
+        <unsigned long long> (num_batches + 1) * (num_batches + 1))
+    inv_cov_buffer.resize(
+        <unsigned long long> (num_batches + 1) * (num_batches + 1))
+    R_scaled_PCs_buffer.resize(
+        <unsigned long long> num_PCs * (num_batches + 1))
+    W_buffer.resize(
+        <unsigned long long> num_clusters * (num_batches + 1) * num_PCs)
+    Y_chunk_buffer.resize(
+        <unsigned long long> num_chunks * num_clusters * num_PCs)
+    Z_chunk_buffer.resize(
+        <unsigned long long> num_threads * chunk_size * num_PCs)
+    distance_buffer.resize(
+        <unsigned long long> num_threads * chunk_size * num_clusters)
+    delta_O_buffer.resize(
+        <unsigned long long> num_chunks * num_batches * num_clusters)
+    delta_E_buffer.resize(
+        <unsigned long long> num_chunks * num_batches * num_clusters)
+    ratio_buffer.resize(
+        <unsigned long long> max_chunks_per_block * num_batches * num_clusters)
     kmeans_errors.resize(num_chunks)
     entropy_terms.resize(num_chunks)
     R_scaled_PCs_chunk_buffer.resize(
-        num_chunks * num_PCs * (num_batches + 1))
+        <unsigned long long> num_chunks * num_PCs * (num_batches + 1))
     cdef unsigned[::1] \
         N_b = <unsigned[:num_batches]> N_b_buffer.data(), \
         cell_order = <unsigned[:num_cells]> cell_order_buffer.data()
@@ -516,9 +527,12 @@ def harmony(const float[:, ::1] PCs,
 
     # Shrink `R_sums`, `delta_O`, and `delta_E` from `num_chunks` to
     # `max_chunks_per_block` along their first dimension
-    R_sums_buffer.resize(max_chunks_per_block * num_clusters)
-    delta_O_buffer.resize(max_chunks_per_block * num_batches * num_clusters)
-    delta_E_buffer.resize(max_chunks_per_block * num_batches * num_clusters)
+    R_sums_buffer.resize(
+        <unsigned long long> max_chunks_per_block * num_clusters)
+    delta_O_buffer.resize(
+        <unsigned long long> max_chunks_per_block * num_batches * num_clusters)
+    delta_E_buffer.resize(
+        <unsigned long long> max_chunks_per_block * num_batches * num_clusters)
     R_sums = <float[:max_chunks_per_block, :num_clusters]> R_sums_buffer.data()
     delta_O = <float[:max_chunks_per_block, :num_batches, :num_clusters]> \
         delta_O_buffer.data()
@@ -924,17 +938,22 @@ def harmony_original(const float[:, ::1] PCs,
     theta_batch_buffer.resize(num_batches)
     cluster_diversity_penalty_buffer.resize(num_clusters)
     R_sums_buffer.resize(num_clusters)
-    distance_buffer.resize(num_cells * num_clusters)
-    E_buffer.resize(num_batches * num_clusters)
-    O_buffer.resize(num_batches * num_clusters)
-    diversity_buffer.resize(num_batches * num_clusters)
-    Z_block_buffer.resize(block_size * num_PCs)
-    ratio_buffer.resize(num_batches * num_clusters)
-    inv_cov_2_buffer.resize((num_batches + 1) * (num_batches + 1))
-    inv_cov_1_buffer.resize((num_batches + 1) * (num_batches + 1))
-    inv_cov_buffer.resize((num_batches + 1) * (num_batches + 1))
-    R_scaled_PCs_buffer.resize(num_PCs * (num_batches + 1))
-    W_buffer.resize(num_clusters * (num_batches + 1) * num_PCs)
+    distance_buffer.resize(<unsigned long long> num_cells * num_clusters)
+    E_buffer.resize(<unsigned long long> num_batches * num_clusters)
+    O_buffer.resize(<unsigned long long> num_batches * num_clusters)
+    diversity_buffer.resize(<unsigned long long> num_batches * num_clusters)
+    Z_block_buffer.resize(<unsigned long long> block_size * num_PCs)
+    ratio_buffer.resize(<unsigned long long> num_batches * num_clusters)
+    inv_cov_2_buffer.resize(
+        <unsigned long long> (num_batches + 1) * (num_batches + 1))
+    inv_cov_1_buffer.resize(
+        <unsigned long long> (num_batches + 1) * (num_batches + 1))
+    inv_cov_buffer.resize(
+        <unsigned long long> (num_batches + 1) * (num_batches + 1))
+    R_scaled_PCs_buffer.resize(
+        <unsigned long long> num_PCs * (num_batches + 1))
+    W_buffer.resize(
+        <unsigned long long> num_clusters * (num_batches + 1) * num_PCs)
     cdef unsigned[::1] \
         N_b = <unsigned[:num_batches]> N_b_buffer.data(), \
         cell_order = <unsigned[:num_cells]> cell_order_buffer.data()

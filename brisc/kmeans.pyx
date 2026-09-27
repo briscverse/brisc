@@ -973,7 +973,7 @@ def kmeans(const float[:, ::1] X,
         centroid_norms_buffer.resize(num_clusters)
         centroid_norms = <float[:num_clusters]> centroid_norms_buffer.data()
         chunk_centroids_new_buffer.resize(
-            (<unsigned long long> num_chunks) * num_clusters * num_dimensions)
+            <unsigned long long> num_chunks * num_clusters * num_dimensions)
         chunk_centroids_new = \
             <float[:num_chunks, :num_clusters, :num_dimensions]> \
             chunk_centroids_new_buffer.data()
@@ -1197,7 +1197,7 @@ def kmeans(const float[:, ::1] X,
         centroid_norms_buffer.resize(num_clusters)
         centroid_norms = <float[:num_clusters]> centroid_norms_buffer.data()
         chunk_centroids_new_buffer.resize(
-            (<unsigned long long> num_chunks) * num_clusters * num_dimensions)
+            <unsigned long long> num_chunks * num_clusters * num_dimensions)
         chunk_centroids_new = \
             <float[:num_chunks, :num_clusters, :num_dimensions]> \
             chunk_centroids_new_buffer.data()
