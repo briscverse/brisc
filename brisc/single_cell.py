@@ -11190,15 +11190,16 @@ class SingleCell:
             # The use of `align_frames` here is a bit wasteful memory-wise,
             # because it creates an identical `'gene'` column for every
             # DataFrame in `genes_and_indices`. Fortunately, it's only one
-            # small string column per dataset.
+            # small string column per dataset. Make sure to number each gene
+            # by its column in X before applying `exclude`.
             genes_and_indices = pl.align_frames(
                 (dataset.var[:, 0]
                  .to_frame('gene')
+                 .with_columns(_SingleCell_index=pl.int_range(pl.len(),
+                                                              dtype=pl.UInt32))
                  .pipe(lambda df: df.filter(~pl.col.gene.str.contains(
                      '(?i)' + '|'.join(exclude)))  # case-insensitive
                      if exclude is not None else df)
-                 .with_columns(_SingleCell_index=pl.int_range(pl.len(),
-                                                              dtype=pl.UInt32))
                  for dataset in datasets), on='gene', how='inner')
             genes_in_all_datasets = genes_and_indices[0]['gene']
             num_genes_in_all_datasets = len(genes_in_all_datasets)
@@ -11218,13 +11219,21 @@ class SingleCell:
                                     for df in genes_and_indices]
             del genes_and_indices
         else:
-            genes_in_all_datasets = self.var_names\
+            genes_and_indices = self.var_names\
                 .rename('gene')\
                 .to_frame()\
+                .with_columns(_SingleCell_index=pl.int_range(pl.len(),
+                                                             dtype=pl.UInt32))\
                 .pipe(lambda df: df.filter(~pl.col.gene.str.contains(
                     '(?i)' + '|'.join(exclude)))  # case-insensitive
-                    if exclude is not None else df)\
-                .to_series()
+                    if exclude is not None else df)
+            genes_in_all_datasets = genes_and_indices['gene']
+            # Without `exclude`, every column is kept in order, so no
+            # re-indexing is needed
+            single_dataset_gene_indices = \
+                genes_and_indices['_SingleCell_index'] \
+                if exclude is not None else None
+            del genes_and_indices
 
         # Get the batches to calculate variance across (datasets + batches
         # within each dataset). For CSR matrices with `batch_column`,
@@ -11285,11 +11294,13 @@ class SingleCell:
                 if QC_column is not None and QC_columns[0] is not None:
                     if isinstance(X, csr_array):
                         batches = (X, np.flatnonzero(
-                            QC_columns[0].to_numpy()), None),
+                            QC_columns[0].to_numpy()),
+                            single_dataset_gene_indices),
                     else:
-                        batches = (X, QC_columns[0].to_numpy(), None),
+                        batches = (X, QC_columns[0].to_numpy(),
+                                   single_dataset_gene_indices),
                 else:
-                    batches = (X, None, None),
+                    batches = (X, None, single_dataset_gene_indices),
             elif isinstance(X, csr_array):
                 df = batch_column\
                     .to_frame('_SingleCell_batch')\
@@ -11297,17 +11308,19 @@ class SingleCell:
                 if QC_column is not None and QC_columns[0] is not None:
                     df = df.filter(QC_columns[0])
                 batches = [
-                    (X, partition['_SingleCell_idx'].to_numpy(), None)
+                    (X, partition['_SingleCell_idx'].to_numpy(),
+                     single_dataset_gene_indices)
                     for partition in df.partition_by(
                         '_SingleCell_batch')]
             else:
                 if QC_column is not None and QC_columns[0] is not None:
                     batches = ((X, (batch_column.eq_missing(batch) &
-                                    QC_columns[0]).to_numpy(), None)
+                                    QC_columns[0]).to_numpy(),
+                                single_dataset_gene_indices)
                                for batch in batch_column.unique())
                 else:
                     batches = ((X, batch_column.eq_missing(batch).to_numpy(),
-                                None)
+                                single_dataset_gene_indices)
                                for batch in batch_column.unique())
 
         # Get the variance of each gene in each batch across cells passing QC
@@ -11403,7 +11416,7 @@ class SingleCell:
             # If there are multiple datasets, `norm_gene_var` is currently with
             # respect to the genes in `dataset.var_names`; map back to the
             # genes in `genes_in_any_dataset`, filling with `null`
-            if others:
+            if gene_indices is not None:
                 norm_gene_var = norm_gene_var[gene_indices]
             norm_gene_vars.append(norm_gene_var)
 
