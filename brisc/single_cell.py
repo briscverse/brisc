@@ -11190,10 +11190,8 @@ class SingleCell:
             # The use of `align_frames` here is a bit wasteful memory-wise,
             # because it creates an identical `'gene'` column for every
             # DataFrame in `genes_and_indices`. Fortunately, it's only one
-            # small string column per dataset.
-            # Number each gene by its column in X BEFORE applying `exclude`:
-            # these indices select columns of the per-gene statistics, which
-            # are computed over every column of X
+            # small string column per dataset. Make sure to number each gene
+            # by its column in X before applying `exclude`.
             genes_and_indices = pl.align_frames(
                 (dataset.var[:, 0]
                  .to_frame('gene')
