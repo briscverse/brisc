@@ -772,6 +772,28 @@ def getnnz_at_least_threshold(
     return output
 
 
+def is_in(series: pl.Series, other: pl.Series) -> pl.Series:
+    """
+    Check which elements of `series` are present in `other`. Unlike
+    `series.is_in(other.implode())`, this also works when the two have
+    different data types (e.g. Enums with different categories, or an Enum
+    and a String), by comparing them as strings.
+
+    Args:
+        series: the Series to check the elements of
+        other: the Series to check for the elements in
+
+    Returns:
+        A Boolean Series of the same length as `series`.
+    """
+    if series.dtype != other.dtype:
+        if series.dtype != pl.String:
+            series = series.cast(pl.String)
+        if other.dtype != pl.String:
+            other = other.cast(pl.String)
+    return series.is_in(other.implode())
+
+
 def is_iterable(variable: Any) -> bool:
     """
     Check if a variable is iterable, excluding strings and bytes.

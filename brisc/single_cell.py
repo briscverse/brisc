@@ -25,8 +25,8 @@ from .type_aliases import Color, Indexer, Scalar, UnsDict, UnsItem, \
 from .utils import array_equal, cast_to_Enum, check_bounds, check_dtype, \
     check_R_variable_name, check_type, check_types, concatenate, \
     filter_columns, generate_palette, get_count_at_least_threshold, getnnz, \
-    getnnz_at_least_threshold, import_cython, ix_symmetric, numa_zeros, \
-    parallel_subset_1d, parallel_subset_2d, plural, \
+    getnnz_at_least_threshold, import_cython, is_in, ix_symmetric, \
+    numa_zeros, parallel_subset_1d, parallel_subset_2d, plural, \
     read_parallel_multiprocessing, sparse_equal, sparse_major_stack, \
     sparse_minor_stack, to_tuple, to_tuple_checked, INTEGER_DTYPES, \
     NUMERIC_DTYPES
@@ -6003,7 +6003,7 @@ class SingleCell:
             genes_in_common = self.var_names\
                 .to_frame()\
                 .filter(pl.all_horizontal(
-                    self.var_names.is_in(dataset.var_names)
+                    is_in(self.var_names, dataset.var_names)
                     for dataset in datasets))\
                 .to_series()
             if len(genes_in_common) == 0:
@@ -6378,7 +6378,7 @@ class SingleCell:
             cells_in_common = self.obs_names\
                 .to_frame()\
                 .filter(pl.all_horizontal(
-                    self.obs_names.is_in(dataset.obs_names)
+                    is_in(self.obs_names, dataset.obs_names)
                     for dataset in datasets))\
                 .to_series()
             if len(cells_in_common) == 0:
@@ -16261,7 +16261,7 @@ class SingleCell:
         genes = to_tuple_checked(genes, 'genes', str, 'strings')
         genes = pl.Series(genes).unique(maintain_order=True)
         var_names = self._var[:, 0]
-        found = genes.is_in(var_names.cast(pl.String).implode())
+        found = is_in(genes, var_names)
         if not found.all():
             if not found.any():
                 error_message = \

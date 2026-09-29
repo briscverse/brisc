@@ -16,7 +16,7 @@ from .de import DE
 from .type_aliases import Indexer, Scalar, SingleCellColumn, PseudobulkColumn
 from .utils import array_equal, bonferroni, cast_to_Enum, check_bounds, \
     check_dtype, check_type, check_types, concatenate, fdr, import_cython, \
-    plural, to_tuple, to_tuple_checked, FLOAT_DTYPES, INTEGER_DTYPES, \
+    is_in, plural, to_tuple, to_tuple_checked, FLOAT_DTYPES, INTEGER_DTYPES, \
     NUMERIC_DTYPES
 from .validated_dict import Obs, Var, X_
 import_cython({'cyutils': 'has_all_zero_columns',
@@ -1384,8 +1384,8 @@ class Pseudobulk:
                 genes_in_common = self._var[cell_type][:, 0]\
                     .to_frame()\
                     .filter(pl.all_horizontal(
-                        self._var[cell_type][:, 0].is_in(
-                            dataset._var[cell_type][:, 0])
+                        is_in(self._var[cell_type][:, 0],
+                              dataset._var[cell_type][:, 0])
                         for dataset in datasets[1:]))\
                     .to_series()
                 if len(genes_in_common) == 0:
@@ -1648,8 +1648,8 @@ class Pseudobulk:
                 samples_in_common = self._obs[cell_type][:, 0]\
                     .to_frame()\
                     .filter(pl.all_horizontal(
-                        self._obs[cell_type][:, 0].is_in(
-                            dataset._obs[cell_type][:, 0])
+                        is_in(self._obs[cell_type][:, 0],
+                              dataset._obs[cell_type][:, 0])
                         for dataset in datasets[1:]))\
                     .to_series()
                 if len(samples_in_common) == 0:
