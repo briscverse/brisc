@@ -1055,7 +1055,10 @@ class DE:
             x_column: the name of a numeric column of `self.table` to plot on
                       the x-axis
             y_column: the name of a numeric column of `self.table` to plot the
-                      negative log10 of on the y-axis
+                      negative log10 of on the y-axis. Values of exactly 0
+                      (e.g. p-values too small to represent) are plotted as the
+                      smallest positive 64-bit float (about 5e-324, i.e.
+                      about 323.3 on the y-axis).
             significance_column: the name of a numeric column of `self.table`
                                  to determine significance from
             threshold: the significance threshold corresponding to
@@ -1301,11 +1304,16 @@ class DE:
 
         # Subset `self.table` to the selected cell type, and log-transform
         # `y_column`. (This cannot be done in-place, since `y_column` may be
-        # the same column as `significance_column`.) Reassign `y_column` to be
-        # this log10-transformed column.
+        # the same column as `significance_column`.) Replace values of exactly
+        # 0 with the smallest positive float64 so Matplotlib doesn't silently
+        # drop them.
+        y = pl.col(y_column).cast(pl.Float64)
         table = self.table\
             .filter(cell_type=cell_type)\
-            .with_columns(_DE_log10_y_column=-pl.col(y_column).log10())
+            .with_columns(_DE_log10_y_column=-pl.when(y == 0)
+                          .then(5e-324)
+                          .otherwise(y)
+                          .log10())
         y_column = '_DE_log10_y_column'
 
         # Check that `genes_to_label` is a non-negative integer, a sequence of
