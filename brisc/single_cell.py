@@ -15059,31 +15059,33 @@ class SingleCell:
             y: the second column; must be String, Enum, Categorical, or integer
             filename: the file to save to. If `None`, generate the plot but do
                       not save it, which allows it to be shown interactively or
-                      modified further before saving.
+                      modified further before saving. Mutually exclusive with
+                      `ax`.
             cells_to_plot_column: an optional Boolean column of `obs`
                                   indicating which cells to plot. Can be a
                                   column name, a polars expression, a polars
                                   Series, a 1D NumPy array, or a function that
                                   takes in this SingleCell dataset and returns
                                   a polars Series or 1D NumPy array. Set to
-                                  `None` to plot all cells passing QC.
+                                  `None` to plot all cells.
             normalize_rows: whether to plot percentages instead of counts, so
                             that each row sums to 100%. Mutually exclusive with
                             `normalize_columns`.
             normalize_columns: whether to plot percentages instead of counts,
                                so that each column sums to 100%. Mutually
                                exclusive with `normalize_rows`.
-            ax: the Matplotlib axes to save the plot onto; if `None`, create a
-                new figure with Matpotlib's constrained layout and plot onto it
+            ax: the Matplotlib axes to plot onto; if `None`, create a new
+                figure with Matplotlib's constrained layout and plot onto it.
+                Mutually exclusive with `filename`.
             figure_kwargs: a dictionary of keyword arguments to be passed to
                            [`plt.figure()`](https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.figure.html)
                            when `ax` is `None`, such as:
 
                            - `figsize`: a two-element sequence of the width and
                              height of the figure in inches. The default is a
-                             complicated formula based on the number of genes
-                             and cell types being plotted, unlike Matplotlib's
-                             default of `[6.4, 4.8]`.
+                             complicated formula based on the number of
+                             distinct values of `x` and `y`, unlike
+                             Matplotlib's default of `[6.4, 4.8]`.
                            - `layout`: the layout mechanism used by Matplotlib
                              to avoid overlapping plot elements. Defaults to
                              `'constrained'`, instead of Matplotlib's default
@@ -15109,9 +15111,9 @@ class SingleCell:
                               `vmax` default to 0 and 1 (i.e. 0% and 100%).
                             - `edgecolors`: the border color of each heatmap
                               cell; defaults to `'none'`, meaning no borders.
-                              Specifying `cmap` will raise an error, since it
-                              conflicts with the `colormap` argument.
 
+                            Specifying `cmap` will raise an error, since it
+                            conflicts with the `colormap` argument.
             label: whether to label each cell of the heatmap with its count
                    (or percentage, if `normalize_rows=True` or
                    `normalize_columns=True`)
@@ -15216,7 +15218,8 @@ class SingleCell:
                 pl.Boolean,
                 allow_missing=isinstance(cells_to_plot_column, str) and
                               cells_to_plot_column == 'passed_QC')
-            if not cells_to_plot_column.any():
+            if cells_to_plot_column is not None and \
+                    not cells_to_plot_column.any():
                 error_message = (
                     'no cells were selected to be plotted: '
                     'cells_to_plot_column is all-False')
@@ -15234,10 +15237,17 @@ class SingleCell:
             x = x.filter(cells_to_plot_column)
             y = y.filter(cells_to_plot_column)
 
-        # If `filename` was specified, check that it is a string or
-        # `pathlib.Path` and that its base directory exists; if `filename` is
-        # `None`, make sure `savefig_kwargs` is also `None`
+        # If `filename` was specified, check that `ax` is `None`, that
+        # `filename` is a string or `pathlib.Path`, and that its base directory
+        # exists; if `filename` is `None`, make sure `savefig_kwargs` is also
+        # `None`
         if filename is not None:
+            if ax is not None:
+                error_message = (
+                    'filename and ax are mutually exclusive; if you specified '
+                    'ax in order to create multiple subplots, make a separate '
+                    'savefig() call once all subplots are created')
+                raise ValueError(error_message)
             check_type(filename, 'filename', (str, Path),
                        'a string or pathlib.Path')
             directory = os.path.dirname(filename)
@@ -15394,13 +15404,14 @@ class SingleCell:
             heatmap_kwargs = default_heatmap_kwargs | heatmap_kwargs
 
         # Get the heatmap data, ensuring both x and y values will appear in
-        # sorted order
-        count = pl.DataFrame((x, y))\
-            .group_by(pl.all(), maintain_order=True)\
+        # sorted order. Use internal column names, since `x` and `y` may have
+        # the same name.
+        count = pl.DataFrame({'_SingleCell_x': x, '_SingleCell_y': y})\
+            .group_by('_SingleCell_x', '_SingleCell_y')\
             .len(name='_SingleCell_count')\
-            .pivot(index=y.name, columns=x.name, values='_SingleCell_count',
-                   sort_columns=True)\
-            .sort(y.name)\
+            .pivot(on='_SingleCell_x', index='_SingleCell_y',
+                   values='_SingleCell_count', sort_columns=True)\
+            .sort('_SingleCell_y')\
             .fill_null(0)
         heatmap_data = count[:, 1:].to_numpy()
 
@@ -15414,10 +15425,10 @@ class SingleCell:
 
         # If `ax` is `None`, create a new figure; otherwise, check that it is a
         # Matplotlib axis
-        make_new_figure = ax is None
+        fig = None
         try:
             num_rows, num_columns = heatmap_data.shape
-            if make_new_figure:
+            if ax is None:
                 default_figure_kwargs = dict(layout='constrained')
                 if figure_kwargs is None or 'figsize' not in figure_kwargs:
                     if colorbar:
@@ -15431,8 +15442,8 @@ class SingleCell:
                     default_figure_kwargs['figsize'] = width, height
                 figure_kwargs = default_figure_kwargs | figure_kwargs \
                     if figure_kwargs is not None else default_figure_kwargs
-                plt.figure(**figure_kwargs)
-                ax = plt.gca()
+                fig = plt.figure(**figure_kwargs)
+                ax = fig.gca()
             else:
                 check_type(ax, 'ax', plt.Axes, 'a Matplotlib axis')
 
@@ -15452,19 +15463,20 @@ class SingleCell:
                 default_colorbar_kwargs = dict(shrink=0.5, pad=0.01)
                 colorbar_kwargs = default_colorbar_kwargs | colorbar_kwargs \
                     if colorbar_kwargs is not None else default_colorbar_kwargs
-                cbar = plt.colorbar(heatmap, ax=ax, **colorbar_kwargs)
+                cbar = ax.figure.colorbar(heatmap, ax=ax, **colorbar_kwargs)
                 cbar.outline.set_visible(False)
                 if normalize_rows or normalize_columns:
-                    cbar.ax.yaxis.set_major_formatter(plt.FuncFormatter(
-                        lambda x, pos: f'{100 * x:.0f}%'))
+                    cbar.formatter = plt.FuncFormatter(
+                        lambda value, pos: f'{100 * value:.0f}%')
+                    cbar.update_ticks()
 
             # Add labels; this code is edited from `_annotate_heatmap()` at
             # github.com/mwaskom/seaborn/blob/master/seaborn/matrix.py
             if label:
                 heatmap.update_scalarmappable()
                 xpos, ypos = np.meshgrid(xticks, yticks)
-                if label_kwargs is None:
-                    label_kwargs = {}
+                label_kwargs = {} if label_kwargs is None else \
+                    dict(label_kwargs)
                 label_kwargs = label_kwargs | dict(
                     horizontalalignment=label_kwargs.pop(
                         'horizontalalignment',
@@ -15525,16 +15537,15 @@ class SingleCell:
                     if savefig_kwargs is not None else default_savefig_kwargs
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore', UserWarning)
-                    plt.savefig(filename, **savefig_kwargs)
-                if make_new_figure:
-                    plt.close()
+                    fig.savefig(filename, **savefig_kwargs)
+                plt.close(fig)
         except:
             # If we made a new figure, make sure to close it if there's an
             # exception (but not if there was no error and `filename` is
             # `None`, in case the user wants to modify it further before
             # saving)
-            if make_new_figure:
-                plt.close()
+            if fig is not None:
+                plt.close(fig)
             raise
 
     @staticmethod
@@ -16000,7 +16011,7 @@ class SingleCell:
         normalization.
 
         Unlike the other plotting functions, this is a figure-level rather than
-        an axis-level function, and does not take an `axis` argument.
+        an axis-level function, and does not take an `ax` argument.
 
         Args:
             genes: a list of genes to plot: for instance, marker genes found by
@@ -16020,7 +16031,7 @@ class SingleCell:
                                   Series, a 1D NumPy array, or a function that
                                   takes in this SingleCell dataset and returns
                                   a polars Series or 1D NumPy array. Set to
-                                  `None` to plot all cells passing QC.
+                                  `None` to plot all cells.
             color: whether the color of a gene's dot represents its expression
                    (`color='expression'`, the default) or its fold change in
                    detection rate between cells of that cell type and cells of
@@ -16090,25 +16101,19 @@ class SingleCell:
                        grayscale.
             colorbar: whether to add a colorbar
             colorbar_kwargs: a dictionary of keyword arguments to be passed to
-                             [`plt.colorbar()`](https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.colorbar.html),
+                             [`fig.colorbar()`](https://matplotlib.org/stable/api/_as_gen/matplotlib.figure.Figure.colorbar.html),
                              such as:
 
-                             - `location`: `'left'`, `'right'`, `'top'`, or
-                               `'bottom'`
-                             - `orientation`: `'vertical'` or `'horizontal'`
-                             - `fraction`: the fraction of the axes to
-                               allocate to the colorbar. Defaults to 0.15.
-                             - `shrink`: the fraction to multiply the size of
-                               the colorbar by. Defaults to 0.5, instead of
-                               Matplotlib's default of 1.
-                             - `aspect`: the ratio of the colorbar's long to
-                               short dimensions. Defaults to 20.
-                             - `pad`: the fraction of the axes between the
-                               colorbar and the rest of the figure. Defaults to
-                               0.01, instead of Matplotlib's default of 0.05 if
-                               vertical and 0.15 if horizontal.
+                             - `extend`: whether to add pointed ends for
+                               out-of-range values: `'neither'` (the default),
+                               `'both'`, `'min'`, or `'max'`
+                             - `label`: a label for the colorbar's long axis
 
-                             Can only be specified when `colorbar=True`.
+                             The colorbar is drawn in its own axis, so the
+                             options that control how much space it takes from
+                             the main plot (`fraction`, `shrink`, `aspect`, and
+                             `pad`) have no effect. Can only be specified when
+                             `colorbar=True`.
             swap_axes: if `True`, plot genes on the y-axis and cell types on
                        the x-axis, instead of the other way around
             scatter_kwargs: a dictionary of keyword arguments to be passed to
@@ -16118,19 +16123,18 @@ class SingleCell:
                             - `rasterized`: whether to convert the scatter plot
                               points to a raster (bitmap) image when saving to
                               a vector format like PDF. Defaults to `False`.
-                            - `marker`: the shape to use for plotting each cell
+                            - `marker`: the shape to use for plotting each dot
                             - `norm`, `vmin`, and `vmax`: control how the
-                              `colormap` maps the numbers in `color_column` to
-                              colors, if `color_column` is numeric. If neither
-                              `vmin` nor `vmax` are specified, the default
-                              behavior depends on what is being plotted. When
-                              `color='expression'` and all expression values
-                              are positive, `vmin` will be set to 0 so that the
-                              color scale includes 0. When
-                              `color='fold_change'`, `vmin` will be set to `-M`
-                              and `vmax` to `M` where `M` is the magnitude of
-                              the largest fold change, so that that the colors
-                              for positive and negative fold changes are
+                              `colormap` maps expression values or fold changes
+                              to colors. If neither `vmin` nor `vmax` are
+                              specified, the default behavior depends on what
+                              is being plotted. When `color='expression'` and
+                              all expression values are positive, `vmin` will
+                              be set to 0 so that the color scale includes 0.
+                              When `color='fold_change'`, `vmin` will be set to
+                              `-M` and `vmax` to `M` where `M` is the magnitude
+                              of the largest log fold change, so that the
+                              colors for positive and negative fold changes are
                               symmetrical.
                             - `alpha`: the transparency of each point
                             - `linewidths` and `edgecolors`: the width and
@@ -16139,7 +16143,7 @@ class SingleCell:
                               `edgecolors=(0, 0, 0, 0)`), unlike Matplotlib's
                               default. Both arguments can be either single
                               values or sequences.
-                            - `zorder`: the order in which the cells are
+                            - `zorder`: the order in which the dots are
                               plotted, with higher values appearing on top of
                               lower ones.
 
@@ -16199,9 +16203,8 @@ class SingleCell:
                             - `pad_inches`: the number of inches of padding to
                               add on each of the four sides of the figure when
                               saving. Defaults to `'layout'` (use the padding
-                              from the constrained layout engine, when `ax` is
-                              not `None`), instead of Matplotlib's default of
-                              0.1.
+                              from the constrained layout engine), instead of
+                              Matplotlib's default of 0.1.
                             - `transparent`: whether to save with a transparent
                               background; defaults to `True` if saving to a PDF
                               (i.e. when `filename` ends with `'.pdf'`) and
@@ -16251,22 +16254,24 @@ class SingleCell:
             raise ValueError(error_message)
 
         # Get `genes` as a polars Series of the same dtype as `var_names`;
-        # uniquify; make sure all its entries are present in `var_names`
+        # uniquify; make sure all its entries are present in `var_names`.
+        # Compare as strings, since `genes` is a String Series and `var_names`
+        # may be Enum or Categorical.
         genes = to_tuple_checked(genes, 'genes', str, 'strings')
         genes = pl.Series(genes).unique(maintain_order=True)
         var_names = self._var[:, 0]
-        if not genes.is_in(var_names).all():
-            if not genes.is_in(var_names).any():
+        found = genes.is_in(var_names.cast(pl.String).implode())
+        if not found.all():
+            if not found.any():
                 error_message = \
                     'none of the specified genes were found in var_names'
                 raise ValueError(error_message)
             else:
-                for gene in genes:
-                    if gene not in var_names:
-                        error_message = (
-                            f'one of the specified genes, {gene!r}, was not '
-                            f'found in var_names')
-                        raise ValueError(error_message)
+                missing_gene = genes.filter(~found)[0]
+                error_message = (
+                    f'one of the specified genes, {missing_gene!r}, was not '
+                    f'found in var_names')
+                raise ValueError(error_message)
         if var_names.dtype != pl.String:
             genes = genes.cast(var_names.dtype)
 
@@ -16277,7 +16282,8 @@ class SingleCell:
                 pl.Boolean,
                 allow_missing=isinstance(cells_to_plot_column, str) and
                               cells_to_plot_column == 'passed_QC')
-            if not cells_to_plot_column.any():
+            if cells_to_plot_column is not None and \
+                    not cells_to_plot_column.any():
                 error_message = (
                     'no cells were selected to be plotted: '
                     'cells_to_plot_column is all-False')
@@ -16450,11 +16456,21 @@ class SingleCell:
                 f'value')
             raise ValueError(error_message)
 
-        # If `cell_types` is not `None`, reorder `groups` to be in the same
-        # order as `cell_types`. Otherwise, get the list of cell types from
-        # `groups`, sorting alphabetically if `alphabetical_cell_types` and
-        # `cell_type_column` is Enum or Categorical.
+        # If `cell_types` is not `None`, check that each cell type in it has at
+        # least one cell selected by `cells_to_plot_column`, and reorder
+        # `groups` to be in the same order as `cell_types`. Otherwise, get the
+        # list of cell types from `groups`, sorting alphabetically if
+        # `alphabetical_cell_types` and `cell_type_column` is Enum or
+        # Categorical. Keep the `null` background cell type (if any) last.
         if cell_types is not None:
+            present_cell_types = groups[cell_type_column_name]
+            for cell_type in cell_types:
+                if cell_type not in present_cell_types:
+                    error_message = (
+                        f'cell_types contains {cell_type!r}, but none of the '
+                        f'cells of that type are selected by '
+                        f'cells_to_plot_column')
+                    raise ValueError(error_message)
             groups = groups.sort(
                 pl.first().replace_strict(cell_types, range(len(cell_types)),
                                           default=None,
@@ -16466,7 +16482,7 @@ class SingleCell:
                     cell_type_column.dtype == pl.Categorical):
                 groups = groups\
                     .cast({cell_type_column_name: pl.String})\
-                    .sort(cell_type_column_name)
+                    .sort(cell_type_column_name, nulls_last=True)
             cell_types = groups[cell_type_column_name]
 
         # Get a cell-type-by-gene matrix of the number of cells of each type
@@ -16615,6 +16631,7 @@ class SingleCell:
             np.arange(interval, max_detection_rate + interval / 2, interval)
         point_size_multiplier = 180 / max_detection_rate
 
+        fig = None
         try:
             # Make the figure, including separate portions on the left for the
             # legend and colorbar (if `colorbar=True`)
@@ -16739,26 +16756,24 @@ class SingleCell:
                 ax_legend.legend(handles=legend_elements, **legend_kwargs)
 
             # Add a colorbar for expression, or if `color='fold_change'`, fold
-            # change with labels at powers of 2.
+            # change with labels at powers of 2. The colorbar is drawn in its
+            # own axis (`cax`), so it doesn't take space from `ax_main`.
             if colorbar:
-                default_colorbar_kwargs = dict(shrink=0.5, pad=0.01)
-                colorbar_kwargs = default_colorbar_kwargs | colorbar_kwargs \
-                    if colorbar_kwargs is not None else \
-                    default_colorbar_kwargs
                 ax_colorbar = fig.add_subplot(gs[1, 1])
-                cbar = plt.colorbar(scatter, cax=ax_colorbar,
-                                    **colorbar_kwargs)
+                cbar = fig.colorbar(scatter, cax=ax_colorbar,
+                                    **(colorbar_kwargs or {}))
                 cbar.outline.set_visible(False)
-                cbar.ax.set_box_aspect(12)
+                cbar.ax.set_box_aspect(
+                    12 if cbar.orientation == 'vertical' else 1 / 12)
                 cbar.ax.set_title('Fold change of\ndetection rate'
                                   if color == 'fold_change' else
                                   'Mean\nexpression', size='medium')
                 if color == 'fold_change':
-                    cbar.ax.yaxis.set_major_locator(
-                        plt.MaxNLocator(integer=True))
-                    cbar.ax.yaxis.set_major_formatter(plt.FuncFormatter(
-                        lambda x, pos: f'{2 ** x:.4f}'.rstrip(
-                            '0').rstrip('.')))
+                    cbar.locator = plt.MaxNLocator(integer=True)
+                    cbar.formatter = plt.FuncFormatter(
+                        lambda value, pos: f'{2 ** value:.4f}'.rstrip(
+                            '0').rstrip('.'))
+                    cbar.update_ticks()
 
             # Add the title
             if title is not None:
@@ -16783,14 +16798,15 @@ class SingleCell:
                     if savefig_kwargs is not None else default_savefig_kwargs
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore', UserWarning)
-                    plt.savefig(filename, **savefig_kwargs)
-                plt.close()
+                    fig.savefig(filename, **savefig_kwargs)
+                plt.close(fig)
         except:
-            # Since we made a new figure, make sure to close it if there's an
+            # If we made a new figure, make sure to close it if there's an
             # exception (but not if there was no error and `filename` is
             # `None`, in case the user wants to modify it further before
             # saving)
-            plt.close()
+            if fig is not None:
+                plt.close(fig)
             raise
 
     def pacmap(self,
@@ -19097,16 +19113,18 @@ class SingleCell:
                           to `None` to use `default_color` for all cells.
             filename: the file to save to. If `None`, generate the plot but do
                       not save it, which allows it to be shown interactively or
-                      modified further before saving.
+                      modified further before saving. Mutually exclusive with
+                      `ax`.
             cells_to_plot_column: an optional Boolean column of `obs`
                                   indicating which cells to plot. Can be a
                                   column name, a polars expression, a polars
                                   Series, a 1D NumPy array, or a function that
                                   takes in this SingleCell dataset and returns
                                   a polars Series or 1D NumPy array. Set to
-                                  `None` to plot all cells passing QC.
-            ax: the Matplotlib axes to save the plot onto; if `None`, create a
-                new figure with Matpotlib's constrained layout and plot onto it
+                                  `None` to plot all cells.
+            ax: the Matplotlib axes to plot onto; if `None`, create a new
+                figure with Matplotlib's constrained layout and plot onto it.
+                Mutually exclusive with `filename`.
             figure_kwargs: a dictionary of keyword arguments to be passed to
                            [`plt.figure()`](https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.figure.html)
                            when `ax` is `None`, such as:
@@ -19134,16 +19152,18 @@ class SingleCell:
                                order of the keys in `colormap`.
             colormap: a string or
                       [`Colormap`](https://matplotlib.org/stable/api/_as_gen/matplotlib.colors.Colormap.html)
-                      object indicating the Matplotlib colormap to use; or, if
-                      `color_column` is discrete, a dictionary mapping values
-                      in `color_column` to Matplotlib colors (cells with values
-                      of `color_column` that are not in the dictionary will be
-                      plotted in the color `default_color`). Defaults to
+                      object indicating the Matplotlib colormap to use, if
+                      `color_column` is continuous; or, if `color_column` is
+                      discrete, a dictionary mapping values in `color_column`
+                      to Matplotlib colors (cells with values of `color_column`
+                      that are not in the dictionary will be plotted in the
+                      color `default_color`). Defaults to
                       `plt.rcParams['image.cmap']` (`'viridis'` by default) if
-                      `color_column` is continous, or the colors from a
+                      `color_column` is continuous, or the colors from a
                       maximally perceptually distinct colormap if
                       `color_column` is discrete (with colors assigned in
-                      decreasing order of frequency). Cannot be specified if
+                      natural sort order, or in decreasing order of frequency
+                      if `sort_by_frequency=True`). Cannot be specified if
                       `color_column` is `None`.
             lightness_range: a two-element tuple with the lightness range of
                              colors to generate, or `None` to take the full
@@ -19243,10 +19263,9 @@ class SingleCell:
                              `'center left'` and `bbox_to_anchor` to `(1, 0.5)`
                              to put the legend to the right of the plot,
                              anchored at the middle.
-                           - `ncols` to set its number of columns. By
-                             default, set to
-                             `ceil(obs[color_column].n_unique() / 24)` to have
-                             at most 24 items per column.
+                           - `ncols` to set its number of columns. By default,
+                             set to the number of legend entries divided by 24
+                             (rounded up) to have at most 24 items per column.
                            - `prop`, `fontsize`, and `labelcolor` to set its
                              font properties
                            - `facecolor` and `framealpha` to set its background
@@ -19345,7 +19364,8 @@ class SingleCell:
                 pl.Boolean,
                 allow_missing=isinstance(cells_to_plot_column, str) and
                               cells_to_plot_column == 'passed_QC')
-            if not cells_to_plot_column.any():
+            if cells_to_plot_column is not None and \
+                    not cells_to_plot_column.any():
                 error_message = (
                     'no cells were selected to be plotted: '
                     'cells_to_plot_column is all-False')
@@ -19375,10 +19395,17 @@ class SingleCell:
                     f'type is {dtype.base_type()!r}')
                 raise ValueError(error_message)
 
-        # If `filename` was specified, check that it is a string or
-        # `pathlib.Path` and that its base directory exists; if `filename` is
-        # `None`, make sure `savefig_kwargs` is also `None`
+        # If `filename` was specified, check that `ax` is `None`, that
+        # `filename` is a string or `pathlib.Path`, and that its base directory
+        # exists; if `filename` is `None`, make sure `savefig_kwargs` is also
+        # `None`
         if filename is not None:
+            if ax is not None:
+                error_message = (
+                    'filename and ax are mutually exclusive; if you specified '
+                    'ax in order to create multiple subplots, make a separate '
+                    'savefig() call once all subplots are created')
+                raise ValueError(error_message)
             check_type(filename, 'filename', (str, Path),
                        'a string or pathlib.Path')
             directory = os.path.dirname(filename)
@@ -19761,15 +19788,15 @@ class SingleCell:
 
         # If `ax` is `None`, create a new figure; otherwise, check that it is a
         # Matplotlib axis
-        make_new_figure = ax is None
+        fig = None
         try:
-            if make_new_figure:
+            if ax is None:
                 default_figure_kwargs = \
                     dict(figsize=(8, 6), layout='constrained')
                 figure_kwargs = default_figure_kwargs | figure_kwargs \
                     if figure_kwargs is not None else default_figure_kwargs
-                plt.figure(**figure_kwargs)
-                ax = plt.gca()
+                fig = plt.figure(**figure_kwargs)
+                ax = fig.gca()
             else:
                 check_type(ax, 'ax', plt.Axes, 'a Matplotlib axis')
 
@@ -19854,15 +19881,15 @@ class SingleCell:
                 default_colorbar_kwargs = dict(shrink=0.5, pad=0.01)
                 colorbar_kwargs = default_colorbar_kwargs | colorbar_kwargs \
                     if colorbar_kwargs is not None else default_colorbar_kwargs
-                cbar = plt.colorbar(scatter, ax=ax, **colorbar_kwargs)
+                cbar = ax.figure.colorbar(scatter, ax=ax, **colorbar_kwargs)
                 cbar.outline.set_visible(False)
 
             # Label cells; override the defaults for certain keys of
             # `label_kwargs`
             if label:
                 from matplotlib.patheffects import withStroke
-                if label_kwargs is None:
-                    label_kwargs = {}
+                label_kwargs = {} if label_kwargs is None else \
+                    dict(label_kwargs)
                 label_kwargs = label_kwargs | dict(
                     horizontalalignment=label_kwargs.pop(
                         'horizontalalignment',
@@ -19900,14 +19927,13 @@ class SingleCell:
                     if savefig_kwargs is not None else default_savefig_kwargs
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore', UserWarning)
-                    plt.savefig(filename, **savefig_kwargs)
-                if make_new_figure:
-                    plt.close()
+                    fig.savefig(filename, **savefig_kwargs)
+                plt.close(fig)
         except:
             # If we made a new figure, make sure to close it if there's an
             # exception (but not if there was no error and `filename` is
             # `None`, in case the user wants to modify it further before
             # saving)
-            if make_new_figure:
-                plt.close()
+            if fig is not None:
+                plt.close(fig)
             raise

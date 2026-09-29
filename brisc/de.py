@@ -6,7 +6,7 @@ import signal
 import warnings
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from .utils import bonferroni, check_bounds, check_dtype, check_type, \
     import_cython, fdr, plural, to_tuple_checked
 
@@ -371,16 +371,19 @@ class DE:
         group shown in distinct colors.
 
         Many arguments to this function can be either a single value or a
-        dictionary mapping group names to values. The group names can be viewed
-        with `self.groups[cell_type]`.
+        dictionary mapping group names to values. Dictionaries can only be
+        used with voomByGroup, and must contain every group. The group names
+        can be viewed with `self.groups[cell_type]`.
 
         Args:
             cell_type: the cell type to generate the voom plot for
             filename: the file to save to. If `None`, generate the plot but do
                       not save it, which allows it to be shown interactively or
-                      modified further before saving.
-            ax: the Matplotlib axes to save the plot onto; if `None`, create a
-                new figure with Matpotlib's constrained layout and plot onto it
+                      modified further before saving. Mutually exclusive with
+                      `ax`.
+            ax: the Matplotlib axes to plot onto; if `None`, create a new
+                figure with Matplotlib's constrained layout and plot onto it.
+                Mutually exclusive with `filename`.
             figure_kwargs: a dictionary of keyword arguments to be passed to
                            [`plt.figure()`](https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.figure.html)
                            when `ax` is `None`, such as:
@@ -414,7 +417,7 @@ class DE:
                         `self.groups[cell_type]` to colors. When not using
                         voomByGroup, defaults to `'#000000'` (black). When
                         using voomByGroup with two groups, defaults to
-                        `'#000000'` for the first group and `'#FF0000'` (red).
+                        `'#000000'` for the first group and `'#FF0000'` (red)
                         for the second. When using voomByGroup with more than
                         two groups, must be specified manually. Can be any
                         valid Matplotlib color, like a hex string (e.g.
@@ -434,10 +437,7 @@ class DE:
                               points to a raster (bitmap) image when saving to
                               a vector format like PDF. Defaults to `True`,
                               instead of Matplotlib's default of `False`.
-                            - `marker`: the shape to use for plotting each cell
-                            - `norm`, `vmin`, and `vmax`: control how the
-                              numbers in `color_column` are converted to
-                              colors, if `color_column` is numeric
+                            - `marker`: the shape to use for plotting each gene
                             - `alpha`: the transparency of each point
                             - `linewidths` and `edgecolors`: the width and
                               color of the borders around each marker. These
@@ -445,7 +445,7 @@ class DE:
                               `edgecolors=(0, 0, 0, 0)`), unlike Matplotlib's
                               default. Both arguments can be either single
                               values or sequences.
-                            - `zorder`: the order in which the cells are
+                            - `zorder`: the order in which the genes are
                               plotted, with higher values appearing on top of
                               lower ones.
 
@@ -490,15 +490,13 @@ class DE:
                           to control text properties, such as `color` and
                           `size`. Can only be specified when `title` is not
                           `None`.
-            xlabel: the x-axis label, `True` to use the name of `x` as the
-                    x-axis label, or `None` to not label the x-axis
+            xlabel: the x-axis label, or `None` to not label the x-axis
             xlabel_kwargs: a dictionary of keyword arguments to be passed to
                            [`ax.set_xlabel()`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.set_xlabel.html)
                            to control text properties, such as `color` and
                            `size`. Can only be specified when `xlabel` is not
                            `None`.
-            ylabel: the y-axis label, `True` to use the name of `y` as the
-                    y-axis label, or `None` to not label the y-axis
+            ylabel: the y-axis label, or `None` to not label the y-axis
             ylabel_kwargs: a dictionary of keyword arguments to be passed to
                            [`ax.set_ylabel()`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.set_ylabel.html)
                            to control text properties, such as `color` and
@@ -523,9 +521,9 @@ class DE:
                               Matplotlib's default of 0.1.
                             - `transparent`: whether to save with a transparent
                               background; defaults to `True` if saving to a PDF
-                              (i.e. when `PNG=False`) and `False` if saving to
-                              a PNG, instead of Matplotlib's default of always
-                              being `False`.
+                              (i.e. when `filename` ends with `'.pdf'`) and
+                              `False` otherwise, instead of Matplotlib's
+                              default of always being `False`.
 
                             Can only be specified when `filename` is specified.
         """
@@ -563,10 +561,17 @@ class DE:
             tuple(column[5:] for column in voom_plot_data.columns
                   if column[:4] == 'xy_x')
 
-        # If `filename` was specified, check that it is a string or
-        # `pathlib.Path` and that its base directory exists; if `filename` is
-        # `None`, make sure `savefig_kwargs` is also `None`
+        # If `filename` was specified, check that `ax` is `None`, that
+        # `filename` is a string or `pathlib.Path`, and that its base directory
+        # exists; if `filename` is `None`, make sure `savefig_kwargs` is also
+        # `None`
         if filename is not None:
+            if ax is not None:
+                error_message = (
+                    'filename and ax are mutually exclusive; if you specified '
+                    'ax in order to create multiple subplots, make a separate '
+                    'savefig() call once all subplots are created')
+                raise ValueError(error_message)
             check_type(filename, 'filename', (str, Path),
                        'a string or pathlib.Path')
             directory = os.path.dirname(filename)
@@ -587,6 +592,26 @@ class DE:
                 'figure does not need to be generated when plotting onto an '
                 'existing axis')
             raise ValueError(error_message)
+
+        # Check that `point_color`, `point_size`, `line_color`, and
+        # `line_width` are only dictionaries when using voomByGroup, and that
+        # their keys are exactly the group names (in any order)
+        for arg, arg_name in ((point_color, 'point_color'),
+                              (point_size, 'point_size'),
+                              (line_color, 'line_color'),
+                              (line_width, 'line_width')):
+            if isinstance(arg, dict):
+                if groups is None:
+                    error_message = (
+                        f'{arg_name} can only be a dictionary when using '
+                        f'voomByGroup')
+                    raise ValueError(error_message)
+                if set(arg) != set(groups):
+                    error_message = (
+                        f'{arg_name} is a dictionary, but its keys differ '
+                        f'from the groups in self.groups[{cell_type!r}]: '
+                        f'{", ".join(map(repr, groups))}')
+                    raise ValueError(error_message)
 
         # Check that `point_color` and `line_color` are valid Matplotlib colors
         # or dictionaries thereof, and convert them to hex. Or, if `None`, set
@@ -676,7 +701,8 @@ class DE:
                                     (legend_kwargs, 'legend_kwargs'),
                                     (xlabel_kwargs, 'xlabel_kwargs'),
                                     (ylabel_kwargs, 'ylabel_kwargs'),
-                                    (title_kwargs, 'title_kwargs')):
+                                    (title_kwargs, 'title_kwargs'),
+                                    (savefig_kwargs, 'savefig_kwargs')):
             if kwargs is not None:
                 check_type(kwargs, kwargs_name, dict, 'a dictionary')
                 for key in kwargs:
@@ -741,9 +767,11 @@ class DE:
         default_scatter_kwargs = dict(rasterized=True, linewidths=0,
                                       edgecolors=(0, 0, 0, 0))
         if scatter_kwargs_is_nested_dict:
-            for key, value in scatter_kwargs.items():
-                scatter_kwargs[key] = default_scatter_kwargs | value \
-                    if value is not None else default_scatter_kwargs
+            scatter_kwargs = {
+                group: default_scatter_kwargs | group_scatter_kwargs
+                       if group_scatter_kwargs is not None else
+                       default_scatter_kwargs
+                for group, group_scatter_kwargs in scatter_kwargs.items()}
         else:
             scatter_kwargs = default_scatter_kwargs | scatter_kwargs \
                 if scatter_kwargs is not None else default_scatter_kwargs
@@ -753,19 +781,19 @@ class DE:
         if plot_kwargs is None:
             plot_kwargs = {}
         elif plot_kwargs_is_nested_dict:
-            for key, value in plot_kwargs.items():
-                if value is None:
-                    plot_kwargs[key] = {}
+            plot_kwargs = {
+                group: group_plot_kwargs
+                       if group_plot_kwargs is not None else {}
+                for group, group_plot_kwargs in plot_kwargs.items()}
 
         # Check that `scatter_kwargs` does not contain the `s` or
         # `c`/`color`/`norm`/`vmin`/`vmax` keys and that `plot_kwargs` does
         # not contain the `c`/`color`/`norm`/`vmin`/`vmax` or `linewidth` keys,
-        # or that their non-`None` values do not contain these keys if a nested
-        # dict
+        # or that their values do not contain these keys if a nested dict
         for kwargs, kwargs_name, alternate_color, is_nested_dict in (
-                (scatter_kwargs, 'scatter_kwargs', 'line_color',
+                (scatter_kwargs, 'scatter_kwargs', 'point_color',
                  scatter_kwargs_is_nested_dict),
-                (plot_kwargs, 'plot_kwargs', 'point_color',
+                (plot_kwargs, 'plot_kwargs', 'line_color',
                  plot_kwargs_is_nested_dict)):
             bad_keys = (('linewidth', 'line_width')
                         if kwargs is plot_kwargs else ('s', 'point_size'),
@@ -776,16 +804,14 @@ class DE:
                         ('vmax', alternate_color))
             if is_nested_dict:
                 for key, value in kwargs.items():
-                    if value is not None:
-                        for bad_key, alternate_argument in bad_keys:
-                            if bad_key in value:
-                                error_message = (
-                                    f'{bad_key!r} cannot be specified as a '
-                                    f'key in {kwargs_name}[{key!r}]; specify '
-                                    f'the {alternate_argument} argument '
-                                    f'instead')
-                                raise ValueError(error_message)
-            elif kwargs is not None:
+                    for bad_key, alternate_argument in bad_keys:
+                        if bad_key in value:
+                            error_message = (
+                                f'{bad_key!r} cannot be specified as a key in '
+                                f'{kwargs_name}[{key!r}]; specify the '
+                                f'{alternate_argument} argument instead')
+                            raise ValueError(error_message)
+            else:
                 for bad_key, alternate_argument in bad_keys:
                     if bad_key in kwargs:
                         error_message = (
@@ -846,25 +872,17 @@ class DE:
         # Check that `despine` is Boolean
         check_type(despine, 'despine', bool, 'Boolean')
 
-        # Override the defaults for certain values of `savefig_kwargs`
-        default_savefig_kwargs = \
-            dict(dpi=300, bbox_inches='tight', pad_inches='layout',
-                 transparent=filename is not None and
-                             filename.endswith('.pdf'))
-        savefig_kwargs = default_savefig_kwargs | savefig_kwargs \
-            if savefig_kwargs is not None else default_savefig_kwargs
-
         # If `ax` is `None`, create a new figure with
         # `constrained_layout=True`; otherwise, check that it is a Matplotlib
         # axis
-        make_new_figure = ax is None
+        fig = None
         try:
-            if make_new_figure:
+            if ax is None:
                 default_figure_kwargs = dict(layout='constrained')
                 figure_kwargs = default_figure_kwargs | figure_kwargs \
                     if figure_kwargs is not None else default_figure_kwargs
-                plt.figure(**figure_kwargs)
-                ax = plt.gca()
+                fig = plt.figure(**figure_kwargs)
+                ax = fig.gca()
             else:
                 check_type(ax, 'ax', plt.Axes, 'a Matplotlib axis')
             if groups is not None:
@@ -917,7 +935,7 @@ class DE:
 
                 # Plot the LOESS trendline
                 ax.plot(voom_plot_data['line_x'], voom_plot_data['line_y'],
-                         c=line_color, linewidth=line_width, **plot_kwargs)
+                        c=line_color, linewidth=line_width, **plot_kwargs)
 
             # Add the title and axis labels
             if xlabel is not None:
@@ -931,10 +949,7 @@ class DE:
             if title is not None:
                 if title_kwargs is None:
                     title_kwargs = {}
-                ax.set_title(title[cell_type] if isinstance(title, dict)
-                             else title if isinstance(title, str) else
-                             title(cell_type) if isinstance(title, Callable)
-                             else cell_type, **title_kwargs)
+                ax.set_title(title, **title_kwargs)
 
             # Despine, if specified
             if despine:
@@ -946,22 +961,20 @@ class DE:
             if filename is not None:
                 default_savefig_kwargs = \
                     dict(dpi=300, bbox_inches='tight', pad_inches='layout',
-                         transparent=filename is not None and
-                                     filename.endswith('.pdf'))
+                         transparent=filename.endswith('.pdf'))
                 savefig_kwargs = default_savefig_kwargs | savefig_kwargs \
                     if savefig_kwargs is not None else default_savefig_kwargs
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore', UserWarning)
-                    plt.savefig(filename, **savefig_kwargs)
-                if make_new_figure:
-                    plt.close()
+                    fig.savefig(filename, **savefig_kwargs)
+                plt.close(fig)
         except:
             # If we made a new figure, make sure to close it if there's an
             # exception (but not if there was no error and `filename` is
             # `None`, in case the user wants to modify it further before
             # saving)
-            if make_new_figure:
-                plt.close()
+            if fig is not None:
+                plt.close(fig)
             raise
 
     def plot_volcano(self,
@@ -1022,9 +1035,11 @@ class DE:
             cell_type: the cell type to generate the volcano plot for
             filename: the file to save to. If `None`, generate the plot but do
                       not save it, which allows it to be shown interactively or
-                      modified further before saving.
-            ax: the Matplotlib axes to save the plot onto; if `None`, create a
-                new figure with Matpotlib's constrained layout and plot onto it
+                      modified further before saving. Mutually exclusive with
+                      `ax`.
+            ax: the Matplotlib axes to plot onto; if `None`, create a new
+                figure with Matplotlib's constrained layout and plot onto it.
+                Mutually exclusive with `filename`.
             figure_kwargs: a dictionary of keyword arguments to be passed to
                            [`plt.figure()`](https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.figure.html)
                            when `ax` is `None`, such as:
@@ -1045,10 +1060,11 @@ class DE:
                                  to determine significance from
             threshold: the significance threshold corresponding to
                        `significance_column`
-            genes_to_label: an integer number of top DE genes (according to
-                            `y_column`) to label, a name or sequence of names
-                            of genes to label, or `None` to not add labels. If
-                            an integer, only significant DE genes (according to
+            genes_to_label: a non-negative integer number of top DE genes
+                            (according to `y_column`) to label, a name or
+                            sequence of names of genes to label, or `None` (or
+                            0) to not add labels. If an integer, only
+                            significant DE genes (according to
                             `significance_column`) will be labeled, even if
                             `genes_to_label` is larger than the number of DE
                             genes.
@@ -1206,9 +1222,9 @@ class DE:
                               Matplotlib's default of 0.1.
                             - `transparent`: whether to save with a transparent
                               background; defaults to `True` if saving to a PDF
-                              (i.e. when `PNG=False`) and `False` if saving to
-                              a PNG, instead of Matplotlib's default of always
-                              being `False`.
+                              (i.e. when `filename` ends with `'.pdf'`) and
+                              `False` otherwise, instead of Matplotlib's
+                              default of always being `False`.
 
                             Can only be specified when `filename` is specified.
         """
@@ -1226,10 +1242,17 @@ class DE:
                 f'cell_type {cell_type!r} is not a cell type in this DE object'
             raise ValueError(error_message)
 
-        # If `filename` was specified, check that it is a string or
-        # `pathlib.Path` and that its base directory exists; if `filename` is
-        # `None`, make sure `savefig_kwargs` is also `None`
+        # If `filename` was specified, check that `ax` is `None`, that
+        # `filename` is a string or `pathlib.Path`, and that its base directory
+        # exists; if `filename` is `None`, make sure `savefig_kwargs` is also
+        # `None`
         if filename is not None:
+            if ax is not None:
+                error_message = (
+                    'filename and ax are mutually exclusive; if you specified '
+                    'ax in order to create multiple subplots, make a separate '
+                    'savefig() call once all subplots are created')
+                raise ValueError(error_message)
             check_type(filename, 'filename', (str, Path),
                        'a string or pathlib.Path')
             directory = os.path.dirname(filename)
@@ -1285,12 +1308,13 @@ class DE:
             .with_columns(_DE_log10_y_column=-pl.col(y_column).log10())
         y_column = '_DE_log10_y_column'
 
-        # Check that `genes_to_label` is an integer, a sequence of strings, or
-        # `None`. If an integer, take that many gene names (up to the number of
-        # significant DE genes) with the highest (in log space) `y_column`
-        # values.
+        # Check that `genes_to_label` is a non-negative integer, a sequence of
+        # strings, or `None`. If an integer, take that many gene names (up to
+        # the number of significant DE genes) with the highest (in log space)
+        # `y_column` values.
         if isinstance(genes_to_label, (int, np.integer)):
-            label_genes = genes_to_label != 0
+            check_bounds(genes_to_label, 'genes_to_label', 0)
+            label_genes = genes_to_label > 0
             if label_genes:
                 top_DE_genes = table\
                     .filter(pl.col(significance_column) < threshold)\
@@ -1298,6 +1322,8 @@ class DE:
                 x_to_label = top_DE_genes[x_column]
                 y_to_label = top_DE_genes[y_column]
                 genes_to_label = top_DE_genes['gene']
+                # There may be no significant genes to label
+                label_genes = len(genes_to_label) > 0
         else:
             label_genes = genes_to_label is not None
             if label_genes:
@@ -1323,7 +1349,6 @@ class DE:
                 x_to_label = genes_to_label[x_column]
                 y_to_label = genes_to_label[y_column]
                 genes_to_label = genes_to_label['gene']
-        label_genes = len(genes_to_label) != 0
 
         # Check that `upregulated_size`, `downregulated_size`, and
         # `non_significant_size` are positive numbers
@@ -1352,6 +1377,30 @@ class DE:
         non_significant_color = \
             plt.matplotlib.colors.to_hex(non_significant_color)
 
+        # For each of the kwargs arguments, if the argument was specified,
+        # check that it is a dictionary and that all its keys are strings.
+        for kwargs, kwargs_name in ((figure_kwargs, 'figure_kwargs'),
+                                    (upregulated_scatter_kwargs,
+                                     'upregulated_scatter_kwargs'),
+                                    (downregulated_scatter_kwargs,
+                                     'downregulated_scatter_kwargs'),
+                                    (non_significant_scatter_kwargs,
+                                     'non_significant_scatter_kwargs'),
+                                    (legend_kwargs, 'legend_kwargs'),
+                                    (title_kwargs, 'title_kwargs'),
+                                    (xlabel_kwargs, 'xlabel_kwargs'),
+                                    (ylabel_kwargs, 'ylabel_kwargs'),
+                                    (savefig_kwargs, 'savefig_kwargs')):
+            if kwargs is not None:
+                check_type(kwargs, kwargs_name, dict, 'a dictionary')
+                for key in kwargs:
+                    if not isinstance(key, str):
+                        error_message = (
+                            f'all keys of {kwargs_name} must be strings, but '
+                            f'it contains a key of type '
+                            f'{type(key).__name__!r}')
+                        raise TypeError(error_message)
+
         # Check that the three `scatter_kwargs` arguments do not contain
         # the `s` or `c`/`color`/`cmap`/`norm`/`vmin`/`vmax` keys
         for kwargs, kwargs_prefix in (
@@ -1370,8 +1419,8 @@ class DE:
                 if key in kwargs:
                     error_message = (
                         f'{key!r} cannot be specified as a key in '
-                        f'scatter_kwargs; specify the {kwargs_prefix}_color '
-                        f'argument instead')
+                        f'{kwargs_prefix}_scatter_kwargs; specify the '
+                        f'{kwargs_prefix}_color argument instead')
                     raise ValueError(error_message)
 
         # Override the defaults for certain values of the three
@@ -1404,33 +1453,13 @@ class DE:
                     f'{arg_name}_kwargs must be None when {arg_name} is None'
                 raise ValueError(error_message)
 
-        # For each of the kwargs arguments, if the argument was specified,
-        # check that it is a dictionary and that all its keys are strings.
-        for kwargs, kwargs_name in ((figure_kwargs, 'figure_kwargs'),
-                                    (upregulated_scatter_kwargs,
-                                     'upregulated_scatter_kwargs'),
-                                    (downregulated_scatter_kwargs,
-                                     'downregulated_scatter_kwargs'),
-                                    (non_significant_scatter_kwargs,
-                                     'non_significant_scatter_kwargs'),
-                                    (legend_kwargs, 'legend_kwargs'),
-                                    (title_kwargs, 'title_kwargs'),
-                                    (xlabel_kwargs, 'xlabel_kwargs'),
-                                    (ylabel_kwargs, 'ylabel_kwargs'),
-                                    (savefig_kwargs, 'savefig_kwargs')):
-            if kwargs is not None:
-                check_type(kwargs, kwargs_name, dict, 'a dictionary')
-                for key in kwargs:
-                    if not isinstance(key, str):
-                        error_message = (
-                            f'all keys of {kwargs_name} must be strings, but '
-                            f'it contains a key of type '
-                            f'{type(key).__name__!r}')
-                        raise TypeError(error_message)
-
-        # Check that `legend` and `despine` are Boolean
+        # Check that `legend` and `despine` are Boolean, and that
+        # `legend_kwargs` is `None` when `legend=False`
         check_type(legend, 'legend', bool, 'Boolean')
         check_type(despine, 'despine', bool, 'Boolean')
+        if not legend and legend_kwargs is not None:
+            error_message = 'legend_kwargs must be None when legend=False'
+            raise ValueError(error_message)
 
         # Check the label-layout parameters. `attraction`, `repulsion`,
         # `padding`, `box_padding`, `fontsize`, and `linewidth` are positive
@@ -1468,19 +1497,20 @@ class DE:
                 if value != default:
                     error_message = (
                         f'{name} can only be specified when genes are being '
-                        f'labeled, but genes_to_label is 0 or None')
+                        f'labeled, but genes_to_label is 0 or None, or there '
+                        f'are no significant genes to label')
                     raise ValueError(error_message)
 
         # If `ax` is `None`, create a new figure; otherwise, check that it is a
         # Matplotlib axis
-        make_new_figure = ax is None
+        fig = None
         try:
-            if make_new_figure:
+            if ax is None:
                 default_figure_kwargs = dict(layout='constrained')
                 figure_kwargs = default_figure_kwargs | figure_kwargs \
                     if figure_kwargs is not None else default_figure_kwargs
-                plt.figure(**figure_kwargs)
-                ax = plt.gca()
+                fig = plt.figure(**figure_kwargs)
+                ax = fig.gca()
             else:
                 check_type(ax, 'ax', plt.Axes, 'a Matplotlib axis')
 
@@ -1552,20 +1582,18 @@ class DE:
             if filename is not None:
                 default_savefig_kwargs = \
                     dict(dpi=300, bbox_inches='tight', pad_inches='layout',
-                         transparent=filename is not None and
-                                     filename.endswith('.pdf'))
+                         transparent=filename.endswith('.pdf'))
                 savefig_kwargs = default_savefig_kwargs | savefig_kwargs \
                     if savefig_kwargs is not None else default_savefig_kwargs
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore', UserWarning)
-                    plt.savefig(filename, **savefig_kwargs)
-                if make_new_figure:
-                    plt.close()
+                    fig.savefig(filename, **savefig_kwargs)
+                plt.close(fig)
         except:
             # If we made a new figure, make sure to close it if there's an
             # exception (but not if there was no error and `filename` is
             # `None`, in case the user wants to modify it further before
             # saving)
-            if make_new_figure:
-                plt.close()
+            if fig is not None:
+                plt.close(fig)
             raise
