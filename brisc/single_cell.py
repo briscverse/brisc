@@ -15454,6 +15454,7 @@ class SingleCell:
                 ax.pcolormesh(heatmap_data, cmap=colormap, **heatmap_kwargs)
             ax.set_xticks(xticks, count.columns[1:], rotation=90)
             ax.set_yticks(yticks, count[:, 0].to_numpy())
+            ax.invert_yaxis()
             ax.set_aspect('equal')
 
             # Add the colorbar; override the defaults for certain keys of
