@@ -18,6 +18,7 @@ from collections.abc import Iterable
 from functools import reduce
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, Sequence, Union
+from .type_aliases import Color
 
 
 FLOAT_DTYPES = pl.Float16, pl.Float32, pl.Float64
@@ -458,7 +459,7 @@ def generate_palette(num_colors: int | np.integer,
                      hue_range: tuple[
                         int | float | np.integer | np.floating,
                         int | float | np.integer | np.floating] | None = None,
-                     first_color: str = '#008cb9',
+                     first_color: Color = '#008cb9',
                      stride: int | np.integer = 5) -> \
         np.ndarray[np.dtype[np.float32]]:
     """
@@ -518,15 +519,16 @@ def generate_palette(num_colors: int | np.integer,
                     f'{len(argument):,} elements')
                 raise ValueError(error_message)
             for i in range(2):
-                check_type(argument[i], f'{argument_name}[i]', (int, float),
+                check_type(argument[i], f'{argument_name}[{i}]', (int, float),
                            f'a number between 0 and {max_value}, inclusive')
-            if argument[0] < 0:
-                error_message = f'{argument_name}[0] must be ≥ 0'
-                raise ValueError(error_message)
-            if argument[1] > max_value:
-                error_message = f'{argument_name}[1] must be ≤ {max_value}'
-                raise ValueError(error_message)
-            if argument is not hue_range and argument[0] > argument[1]:
+                if argument[i] < 0:
+                    error_message = f'{argument_name}[{i}] must be ≥ 0'
+                    raise ValueError(error_message)
+                if argument[i] > max_value:
+                    error_message = \
+                        f'{argument_name}[{i}] must be ≤ {max_value}'
+                    raise ValueError(error_message)
+            if argument_name != 'hue_range' and argument[0] > argument[1]:
                 error_message = \
                     f'{argument_name}[0] must be ≤ {argument_name}[1]'
                 raise ValueError(error_message)
@@ -599,6 +601,10 @@ def generate_palette(num_colors: int | np.integer,
                 mask &= (jch[:, 2] >= hue_range[0]) | \
                         (jch[:, 2] <= hue_range[1])
         colors = colors[mask]
+    if len(colors) == 0:
+        error_message = \
+            'no colors exist within the specified lightness/chroma/hue ranges'
+        raise ValueError(error_message)
 
     # Initialize the palette to `first_color`, then iteratively add the color
     # that's farthest away from all other colors (i.e. with the maximum min

@@ -15520,8 +15520,7 @@ class SingleCell:
             if filename is not None:
                 default_savefig_kwargs = \
                     dict(dpi=300, bbox_inches='tight', pad_inches='layout',
-                         transparent=filename is not None and
-                                     filename.endswith('.pdf'))
+                         transparent=filename.endswith('.pdf'))
                 savefig_kwargs = default_savefig_kwargs | savefig_kwargs \
                     if savefig_kwargs is not None else default_savefig_kwargs
                 with warnings.catch_warnings():
@@ -16779,8 +16778,7 @@ class SingleCell:
             if filename is not None:
                 default_savefig_kwargs = \
                     dict(dpi=300, bbox_inches='tight', pad_inches='layout',
-                         transparent=filename is not None and
-                                     filename.endswith('.pdf'))
+                         transparent=filename.endswith('.pdf'))
                 savefig_kwargs = default_savefig_kwargs | savefig_kwargs \
                     if savefig_kwargs is not None else default_savefig_kwargs
                 with warnings.catch_warnings():
@@ -18206,11 +18204,12 @@ class SingleCell:
                                order of the keys in `colormap`.
             colormap: a string or
                       [`Colormap`](https://matplotlib.org/stable/api/_as_gen/matplotlib.colors.Colormap.html)
-                      object indicating the Matplotlib colormap to use; or, if
-                      `color_column` is discrete, a dictionary mapping values
-                      in `color_column` to Matplotlib colors (cells with values
-                      of `color_column` that are not in the dictionary will be
-                      plotted in the color `default_color`). Defaults to
+                      object indicating the Matplotlib colormap to use, if
+                      `color_column` is continuous; or, if `color_column` is
+                      discrete, a dictionary mapping values in `color_column`
+                      to Matplotlib colors (cells with values of `color_column`
+                      that are not in the dictionary will be plotted in the
+                      color `default_color`). Defaults to
                       `plt.rcParams['image.cmap']` (`'viridis'` by default) if
                       `color_column` is continous, or the colors from a
                       maximally perceptually distinct colormap if
@@ -18315,10 +18314,9 @@ class SingleCell:
                              `'center left'` and `bbox_to_anchor` to `(1, 0.5)`
                              to put the legend to the right of the plot,
                              anchored at the middle.
-                           - `ncols` to set its number of columns. By
-                             default, set to
-                             `ceil(obs[color_column].n_unique() / 24)` to have
-                             at most 24 items per column.
+                           - `ncols` to set its number of columns. By default,
+                             set to the number of legend entries divided by 24
+                             (rounded up) to have at most 24 items per column.
                            - `prop`, `fontsize`, and `labelcolor` to set its
                              font properties
                            - `facecolor` and `framealpha` to set its background
@@ -19471,8 +19469,7 @@ class SingleCell:
         # If `point_size` is `None`, default to 20,000 / num_cells; otherwise,
         # check that it is a positive number or the name of a numeric column of
         # `obs` with all-positive numbers
-        num_cells = \
-            len(self) if cells_to_plot_column is None else len(embedding)
+        num_cells = len(embedding)
         if point_size is None:
             point_size = 20_000 / num_cells
         else:
@@ -19524,14 +19521,36 @@ class SingleCell:
                     f'{color_column_description} is continuous')
                 raise ValueError(error_message)
 
-        # Handle coloring based on the values of `colormap` and `color_column`
+        # `lightness_range`, `chroma_range`, `hue_range`, `first_color`, and
+        # `stride` only apply when generating a palette, i.e. when
+        # `color_column` is discrete and `colormap` is `None`. Compare types
+        # too, so that e.g. a NumPy array doesn't raise an error when compared
+        # with `!=`.
+        generate_colormap = \
+            color_column is not None and discrete and colormap is None
+        if not generate_colormap:
+            for arg, default, arg_name in (
+                    (lightness_range, (100 / 3, 200 / 3), 'lightness_range'),
+                    (chroma_range, (50, 100), 'chroma_range'),
+                    (hue_range, None, 'hue_range'),
+                    (first_color, '#008cb9', 'first_color'),
+                    (stride, 5, 'stride')):
+                if type(arg) is not type(default) or arg != default:
+                    error_message = (
+                        f'{arg_name} can only be specified when color_column '
+                        f'is discrete and colormap is None')
+                    raise ValueError(error_message)
+
+        # Handle coloring based on the values of `colormap` and `color_column`.
+        # Afterwards, `colormap` is a dictionary if and only if `color_column`
+        # is discrete.
         if colormap is not None:
             # If `colormap` was specified, check that it is a string in
             # `plt.colormaps`, Colormap object, or dictionary where all keys
             # are in `color_column` and all values are valid Matplotlib colors.
             # Normalize the color(s) to RGBA. Make sure `color_column` is not
-            # `None` and `lightness_range`, `chroma_range`, `hue_range`,
-            # `first_color`, and `stride` have their default values.
+            # `None`, and that `colormap` is a dictionary if and only if
+            # `color_column` is discrete.
             check_type(colormap, 'colormap',
                        (str, plt.matplotlib.colors.Colormap, dict),
                        'a string, matplotlib Colormap object, or dictionary')
@@ -19539,42 +19558,7 @@ class SingleCell:
                 error_message = \
                     'colormap must be None when color_column is None'
                 raise ValueError(error_message)
-            if not (isinstance(lightness_range, tuple) and
-                    len(lightness_range) == 2 and
-                    isinstance(lightness_range[0], float) and
-                    lightness_range[0] == 100 / 3 and
-                    isinstance(lightness_range[1], float) and
-                    lightness_range[1] == 200 / 3):
-                error_message = (
-                    f'lightness_range cannot be specified when colormap is '
-                    f'specified')
-                raise ValueError(error_message)
-            if not (isinstance(chroma_range, tuple) and
-                    len(chroma_range) == 2 and
-                    isinstance(chroma_range[0], int) and
-                    chroma_range[0] == 50 and
-                    isinstance(chroma_range[1], int) and
-                    chroma_range[1] == 100):
-                error_message = (
-                    f'chroma_range cannot be specified when colormap is '
-                    f'specified')
-                raise ValueError(error_message)
-            if hue_range is not None:
-                error_message = \
-                    'hue_range must be None when colormap is specified'
-                raise ValueError(error_message)
-            if not isinstance(first_color, str) or first_color != '#008cb9':
-                error_message = (
-                    f'first_color cannot be specified when colormap is '
-                    f'specified')
-                raise ValueError(error_message)
-            if stride != 5:
-                error_message = \
-                    'stride cannot be specified when colormap is specified'
-                raise ValueError(error_message)
-            if isinstance(colormap, str):
-                colormap = plt.colormaps[colormap]
-            elif isinstance(colormap, dict):
+            if isinstance(colormap, dict):
                 if not discrete:
                     color_column_description = \
                         SingleCell._describe_column('color_column',
@@ -19583,6 +19567,9 @@ class SingleCell:
                         f'colormap cannot be a dictionary when '
                         f'{color_column_description} is continuous')
                     raise ValueError(error_message)
+                # Copy, so that normalizing the colors to RGBA below doesn't
+                # modify the user's dictionary
+                colormap = dict(colormap)
                 for key, value in colormap.items():
                     if not isinstance(key, str):
                         error_message = (
@@ -19604,76 +19591,38 @@ class SingleCell:
                             f'color')
                         raise ValueError(error_message)
                     colormap[key] = plt.matplotlib.colors.to_rgba(value)
-        else:
-            if color_column is not None and discrete:
-                # `color_column` is discrete and `colormap` was not specified;
-                # generate a maximally perceptually distinct colormap. Assign
-                # colors in natural sort order, or decreasing order of
-                # frequency if `sort_by_frequency=True`.
-                color_order = color_column\
-                    .value_counts(sort=True)\
-                    .to_series()\
-                    .drop_nulls() if sort_by_frequency else \
-                        sorted(unique_color_column,
-                               key=lambda color_label: [
-                                   int(text) if text.isdigit() else
-                                   text.lower() for text in
-                                   re.split('([0-9]+)', color_label)])
-                colormap = generate_palette(num_colors=len(color_order),
-                                            lightness_range=lightness_range,
-                                            chroma_range=chroma_range,
-                                            hue_range=hue_range,
-                                            first_color=first_color,
-                                            stride=stride)
-                colormap = np.c_[colormap, np.ones(len(colormap))]  # add alpha
-                colormap = dict(zip(color_order, colormap))
-            else:
-                # `color_column` is `None` or continuous, so make sure
-                # `lightness_range`, `chroma_range`, `hue_range`,
-                # `first_color`, and `stride` have their default values
-                for arg, arg_name in ((lightness_range, 'lightness_range'),
-                                      (chroma_range, 'chroma_range'),
-                                      (hue_range, 'hue_range'),
-                                      (first_color, 'first_color'),
-                                      (stride, 'stride')):
-                    if arg is lightness_range:
-                        if isinstance(lightness_range, tuple) and \
-                                len(lightness_range) == 2 and \
-                                isinstance(lightness_range[0], float) and \
-                                lightness_range[0] == 100 / 3 and \
-                                isinstance(lightness_range[1], float) and \
-                                lightness_range[1] == 200 / 3:
-                            continue
-                    elif arg is chroma_range:
-                        if isinstance(chroma_range, tuple) and \
-                                len(chroma_range) == 2 and \
-                                isinstance(chroma_range[0], int) and \
-                                chroma_range[0] == 50 and \
-                                isinstance(chroma_range[1], int) and \
-                                chroma_range[1] == 100:
-                            continue
-                    elif arg is first_color:
-                        if isinstance(first_color, str) and \
-                                first_color == '#008cb9':
-                            continue
-                    elif arg is stride:
-                        if isinstance(stride, int) and stride == 5:
-                            continue
-                    elif arg is None:
-                        continue
-                    if color_column is None:
-                        error_message = (
-                            f'{arg_name} must be None when color_column is '
-                            f'None')
-                        raise ValueError(error_message)
-                    else:
-                        color_column_description = \
-                            SingleCell._describe_column(
-                                'color_column', original_color_column)
-                        error_message = (
-                            f'{arg_name} must be None when '
-                            f'{color_column_description} is continuous')
-                        raise ValueError(error_message)
+            elif discrete:
+                color_column_description = \
+                    SingleCell._describe_column('color_column',
+                                                original_color_column)
+                error_message = (
+                    f'colormap must be a dictionary when '
+                    f'{color_column_description} is discrete')
+                raise ValueError(error_message)
+            elif isinstance(colormap, str):
+                colormap = plt.colormaps[colormap]
+        elif generate_colormap:
+            # `color_column` is discrete and `colormap` was not specified;
+            # generate a maximally perceptually distinct colormap. Assign
+            # colors in natural sort order, or decreasing order of frequency
+            # if `sort_by_frequency=True`.
+            color_order = color_column\
+                .value_counts(sort=True)\
+                .to_series()\
+                .drop_nulls() if sort_by_frequency else \
+                    sorted(unique_color_column,
+                           key=lambda color_label: [
+                               int(text) if text.isdigit() else
+                               text.lower() for text in
+                               re.split('([0-9]+)', color_label)])
+            colormap = generate_palette(num_colors=len(color_order),
+                                        lightness_range=lightness_range,
+                                        chroma_range=chroma_range,
+                                        hue_range=hue_range,
+                                        first_color=first_color,
+                                        stride=stride)
+            colormap = np.c_[colormap, np.ones(len(colormap))]  # add alpha
+            colormap = dict(zip(color_order, colormap))
 
         # Check that `default_color` is a valid Matplotlib color, and convert
         # it to RGBA
@@ -19833,8 +19782,7 @@ class SingleCell:
             # plotted are the same color). Cells with missing (`null`) values,
             # or with values not in `colormap`, are plotted first (at the
             # bottom) in `default_color`.
-            if color_column is not None and discrete and \
-                    isinstance(colormap, dict):
+            if isinstance(colormap, dict):
                 color_values = color_column.to_numpy()
                 point_size_per_cell = isinstance(point_size, pl.Series)
                 if point_size_per_cell:
@@ -19891,17 +19839,14 @@ class SingleCell:
             if add_legend:
                 default_legend_kwargs = dict(
                     loc='center left', bbox_to_anchor=(1, 0.5), frameon=False,
-                    ncols=(len(unique_color_column) + 23) // 24)
+                    ncols=(len(colormap) + 23) // 24)
                 legend_kwargs = default_legend_kwargs | legend_kwargs \
                     if legend_kwargs is not None else default_legend_kwargs
-                if isinstance(colormap, dict):
-                    for color_label, color in colormap.items():
-                        ax.add_artist(plt.Line2D([], [], color=color,
-                                                 label=color_label, marker='o',
-                                                 markersize=4, linewidth=0))
-                    plt.legend(**legend_kwargs)
-                else:
-                    plt.legend(*scatter.legend_elements(), **legend_kwargs)
+                ax.legend(handles=[
+                    plt.Line2D([], [], color=color, label=color_label,
+                               marker='o', markersize=4, linewidth=0)
+                    for color_label, color in colormap.items()],
+                    **legend_kwargs)
 
             # Add the colorbar; override the defaults for certain keys of
             # `colorbar_kwargs`
@@ -19950,8 +19895,7 @@ class SingleCell:
             if filename is not None:
                 default_savefig_kwargs = \
                     dict(dpi=300, bbox_inches='tight', pad_inches='layout',
-                         transparent=filename is not None and
-                                     filename.endswith('.pdf'))
+                         transparent=filename.endswith('.pdf'))
                 savefig_kwargs = default_savefig_kwargs | savefig_kwargs \
                     if savefig_kwargs is not None else default_savefig_kwargs
                 with warnings.catch_warnings():
