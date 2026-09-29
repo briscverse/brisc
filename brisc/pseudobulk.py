@@ -1445,7 +1445,10 @@ class Pseudobulk:
                            for dataset in datasets[1:])]
                 cast_dict = {column: pl.Enum(
                     pl.concat([dataset._obs[cell_type][column]
-                              .cat.get_categories() for dataset in datasets])
+                               .unique(maintain_order=True)
+                               .drop_nulls()
+                               .cast(pl.String)
+                               for dataset in datasets])
                     .unique(maintain_order=True))
                     for column in obs_mismatched_categoricals}
                 cell_type_obs = [
@@ -1705,7 +1708,10 @@ class Pseudobulk:
                            for dataset in datasets[1:])]
                 cast_dict = {column: pl.Enum(
                     pl.concat([dataset._var[cell_type][column]
-                              .cat.get_categories() for dataset in datasets])
+                               .unique(maintain_order=True)
+                               .drop_nulls()
+                               .cast(pl.String)
+                               for dataset in datasets])
                     .unique(maintain_order=True))
                     for column in var_mismatched_categoricals}
                 cell_type_var = [
@@ -2837,10 +2843,13 @@ class Pseudobulk:
                 if (left_dtype == pl.Enum or left_dtype == pl.Categorical) \
                         and (right_dtype == pl.Enum or
                              right_dtype == pl.Categorical):
-                    common_dtype = \
-                        pl.Enum(pl.concat([left_column.cat.get_categories(),
-                                           right_column.cat.get_categories()])
-                                .unique(maintain_order=True))
+                    common_dtype = pl.Enum(pl.concat([
+                        column.dtype.categories
+                        if column.dtype == pl.Enum else
+                        column.unique(maintain_order=True).drop_nulls()
+                        .cast(pl.String)
+                        for column in (left_column, right_column)])
+                        .unique(maintain_order=True))
                     left_cast_dict[left_column.name] = common_dtype
                     right_cast_dict[right_column.name] = common_dtype
                 else:
@@ -2981,10 +2990,13 @@ class Pseudobulk:
                 if (left_dtype == pl.Enum or left_dtype == pl.Categorical) \
                         and (right_dtype == pl.Enum or
                              right_dtype == pl.Categorical):
-                    common_dtype = \
-                        pl.Enum(pl.concat([left_column.cat.get_categories(),
-                                           right_column.cat.get_categories()])
-                                .unique(maintain_order=True))
+                    common_dtype = pl.Enum(pl.concat([
+                        column.dtype.categories
+                        if column.dtype == pl.Enum else
+                        column.unique(maintain_order=True).drop_nulls()
+                        .cast(pl.String)
+                        for column in (left_column, right_column)])
+                        .unique(maintain_order=True))
                     left_cast_dict[left_column.name] = common_dtype
                     right_cast_dict[right_column.name] = common_dtype
                 else:
@@ -4722,15 +4734,14 @@ class Pseudobulk:
 
         # Check that no column is specified in both `categorical_columns` and
         # `ordinal_columns`
-        if categorical_columns is not None and ordinal_columns is not None:
-            for column in categorical_columns:
-                if column in ordinal_columns:
-                    error_message = (
-                        f'the column {column!r} is specified in both '
-                        f'categorical_columns and ordinal_columns for cell '
-                        f'type {cell_type!r}, but a column cannot be both '
-                        f'categorical and ordinal')
-                    raise ValueError(error_message)
+        for column in categorical_columns:
+            if column in ordinal_columns:
+                error_message = (
+                    f'the column {column!r} is specified in both '
+                    f'categorical_columns and ordinal_columns for cell '
+                    f'type {cell_type!r}, but a column cannot be both '
+                    f'categorical and ordinal')
+                raise ValueError(error_message)
 
         # Determine which columns of `obs` will become unordered factors and
         # which will become ordered factors. String, Categorical, and Enum
@@ -4754,27 +4765,35 @@ class Pseudobulk:
         #
         # Integer columns in `categorical_columns` or `ordinal_columns` are
         # also cast to Enum, with the categories being the integers cast to
-        # strings; this requires casting the column to String first, since
-        # polars (as of version 1.0) does not support Enums with non-string
-        # categories and also disallows direct integer-to-Enum casts.
+        # strings (in numeric order); each integer is mapped to its level
+        # index and reinterpreted as an Enum code, since polars Enums only
+        # support string categories.
         columns_to_cast = [column for column in
                            unordered_columns + ordered_columns
                            if obs[column].dtype.base_type() != pl.Enum]
         if columns_to_cast:
             # Compute the levels before casting, so integer factors keep
             # numeric rather than lexicographic level order
-            levels = obs.select(
-                pl.selectors.by_name(columns_to_cast)
-                .unique()
-                .sort()
-                .implode()
-                .list.drop_nulls())
-            obs = obs.with_columns(
-                (pl.col(column).cast(pl.String)
-                 if obs[column].dtype.base_type() in INTEGER_DTYPES else
-                 pl.col(column))
-                .cast(pl.Enum(levels[column][0].cast(pl.String)))
-                for column in columns_to_cast)
+            levels = obs.select(pl.selectors.by_name(columns_to_cast)
+                                .unique().sort().implode())
+            expressions = []
+            for column in columns_to_cast:
+                column_levels = levels[column][0]
+                enum = pl.Enum(column_levels.cast(pl.String))
+                if obs[column].dtype.base_type() in INTEGER_DTYPES:
+                    # Map each integer to its index in `column_levels`, then
+                    # reinterpret those indices as Enum codes; this avoids
+                    # converting every value to a string
+                    physical_dtype = pl.Series(dtype=enum).to_physical().dtype
+                    expressions.append(
+                        pl.col(column)
+                        .replace_strict(column_levels, pl.int_range(
+                            len(column_levels), dtype=physical_dtype,
+                            eager=True))
+                        .cat.to(enum))
+                else:
+                    expressions.append(pl.col(column).cast(enum))
+            obs = obs.with_columns(expressions)
 
         # Cast 64-bit integer columns to Float64, since `to_r()` maps them to
         # R's integer64 class, which `model.matrix()` does not recognize. This
@@ -4801,6 +4820,7 @@ class Pseudobulk:
                     R_column = _rlib.VECTOR_ELT(R_obs, column_index)
                     _rlib.Rf_setAttrib(R_column, _rlib.R_ClassSymbol,
                                        new_class)
+
         # Create the design matrix
         r(f'{prefix}.design.matrix = model.matrix('
           f'{prefix}.formula, {prefix}.obs)')
@@ -5753,14 +5773,15 @@ class Pseudobulk:
                             f'{column} = {{}}' for column in group_columns),
                             *group_columns))\
                         .to_series()
-                    group = group\
-                        .cast(pl.Enum(group.unique().sort().to_list()))
+                    levels = group.unique().sort()
 
                     # If there's only one group (i.e. every sample has the same
                     # value of `group_columns`), disable grouping
-                    single_group = len(group.cat.get_categories()) == 1
+                    single_group = len(levels) == 1
                     if single_group:
                         group = None
+                    else:
+                        group = group.cast(pl.Enum(levels))
 
                     # If `verbose=True`, print whether and how we're grouping
                     if verbose:
@@ -6486,14 +6507,6 @@ class Pseudobulk:
                             f'data type {base_type!r}')
                         raise TypeError(error_message)
 
-                    # Remove unused categories, if Enum
-                    if base_type == pl.Enum:
-                        unique_values = column.unique()
-                        if len(unique_values) < \
-                                len(column.cat.get_categories()):
-                            column = column.cast(
-                                pl.Enum(unique_values.cast(pl.String)))
-
                     # Check `null` values
                     null_count = column.null_count()
                     if null_count > 0:
@@ -6502,6 +6515,15 @@ class Pseudobulk:
                             f'{plural("null value", null_count)}, but must '
                             f'not contain any')
                         raise ValueError(error_message)
+
+                    # Remove unused categories, if Enum, preserving the order
+                    # of the remaining categories
+                    if base_type == pl.Enum:
+                        categories = column.dtype.categories
+                        codes = column.to_physical().unique()
+                        if len(codes) < len(categories):
+                            column = column.cast(
+                                pl.Enum(categories.gather(codes.sort())))
 
                     # Reassign the result
                     groups[cell_type] = column
@@ -6527,13 +6549,14 @@ class Pseudobulk:
                                 f'group automatically).')
                             raise ValueError(error_message)
 
-                    # Remove unused categories, if Enum
-                    if column.dtype == pl.Enum:
-                        unique_values = column.unique()
-                        if len(unique_values) < \
-                                len(column.cat.get_categories()):
-                            groups[cell_type] = column.cast(
-                                pl.Enum(unique_values.cast(pl.String)))
+                        # Remove unused categories, if Enum, preserving the
+                        # order of the remaining categories
+                        if column.dtype == pl.Enum:
+                            categories = column.dtype.categories
+                            codes = column.to_physical().unique()
+                            if len(codes) < len(categories):
+                                groups[cell_type] = column.cast(
+                                    pl.Enum(categories.gather(codes.sort())))
 
         # Check that `categorical_columns` is one or more strings or `None`, or
         # a dictionary mapping cell types to one or more strings or `None`.

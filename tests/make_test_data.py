@@ -70,8 +70,8 @@ def remove_unused_categories(s: pl.Series) -> pl.Expr:
     """polars-Enum version of pandas' remove_unused_categories: rebuild each
     Enum from the values present."""
     present = set(s.unique().to_list())
-    kept = [c for c in s.cat.get_categories().to_list() if c in present]
-    return pl.col(s.name).cast(pl.String).cast(pl.Enum(kept))
+    kept = [c for c in s.dtype.categories.to_list() if c in present]
+    return pl.col(s.name).cast(pl.Enum(kept))
 
 # Fetch the 10M source once
 data_dir.mkdir(parents=True, exist_ok=True)

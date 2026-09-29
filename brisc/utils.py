@@ -153,45 +153,26 @@ def bonferroni(pvalues: pl.Expr) -> pl.Expr:
 
 def cast_to_Enum(series: pl.Series, enum_type: pl.Enum) -> pl.Series:
     """
-    Cast a polars Enum Series to a new Enum type. All categories in the
-    Series's current Enum type must be present in the new Enum type (not
-    checked).
+    Cast a polars Enum or Categorical Series to a new Enum type. All values
+    present in the Series must be categories of the new Enum type (not
+    checked); values that are not become `null`.
 
     Args:
-        series: a polars Series of Enum data type
-        enum_type: the new Enum data type
+        series: a polars Series of Enum or Categorical data type
+        enum_type: the Enum data type to cast to
 
     Returns:
         The cast Series.
     """
-    # Get categories as Series
-    old_categories = series.cat.get_categories()
-    new_categories = enum_type.categories
+    if series.dtype != pl.Enum:
+        return series.cast(enum_type)
 
-    # Get Series's physical representation
-    physical = series.to_physical()
-
-    # Create mapping table (old index to new index)
-    mapping = \
-        pl.DataFrame({'value': old_categories})\
-        .with_columns(old_index=pl.int_range(len(old_categories),
-                                             dtype=physical.dtype))\
-        .join(pl.DataFrame({'value': new_categories})
-              .with_columns(new_index=pl.int_range(
-                    len(new_categories),
-                    dtype=pl.Series([]).cast(enum_type).to_physical().dtype)),
-              on='value', how='left', maintain_order='left')\
-        .select('old_index', 'new_index')
-
-    # Join with original indices
-    original_indices = physical.alias('old_index')
-    remapped = original_indices\
-        .to_frame()\
-        .join(mapping, on='old_index', how='left', maintain_order='left')\
-        .get_column('new_index')
-
-    # Create new Enum series
-    return remapped.cast(enum_type)
+    # Look up each old category's code in the new Enum; unused old categories
+    # that are absent from the new Enum map to `null`
+    lookup = \
+        series.dtype.categories.cast(enum_type, strict=False).to_physical()
+    return lookup.gather(series.to_physical()).cat.to(enum_type)\
+        .alias(series.name)
 
 
 def check_bounds(variable: Any,

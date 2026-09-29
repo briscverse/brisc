@@ -2571,10 +2571,11 @@ class SingleCell:
                     raise ValueError(error_message)
                 values = SingleCell._read_dataset(
                     value['values'], preloaded_datasets)
-                levels = value['levels'][:]
-                data[column] = \
-                    (pl.Series(values).replace({-2147483648: None}) - 1)\
-                    .cast(pl.Enum(pl.Series(levels).cast(pl.String)))
+                levels = pl.Enum(pl.Series(value['levels'][:]).cast(pl.String))
+                codes = pl.Series(values).replace({-2147483648: None}) - 1
+                data[column] = codes\
+                    .cast(pl.Series(dtype=levels).to_physical().dtype)\
+                    .cat.to(levels)
             else:
                 data[column] = pl.Series(SingleCell._read_dataset(
                     value, preloaded_datasets), nan_to_null=True)
@@ -3855,8 +3856,13 @@ class SingleCell:
                 subgroup.attrs['encoding-type'] = 'categorical'
                 subgroup.attrs['encoding-version'] = '0.2.0'
                 subgroup.attrs['ordered'] = is_Enum
-                categories = column.cat.get_categories()
-                if not is_Enum:
+                if is_Enum:
+                    categories = dtype.categories
+                else:
+                    categories = column\
+                        .unique(maintain_order=True)\
+                        .drop_nulls()\
+                        .cast(pl.String)
                     column = column.cast(pl.Enum(categories))
                 codes = column.to_physical().cast(pl.Int32).fill_null(-1)
                 subgroup.create_dataset('codes', data=codes.to_numpy())
@@ -3932,8 +3938,13 @@ class SingleCell:
                     continue
             if dtype == pl.Enum or dtype == pl.Categorical:
                 subgroup = group.create_group(column.name)
-                levels = column.cat.get_categories()
-                if dtype != pl.Enum:
+                if dtype == pl.Enum:
+                    levels = dtype.categories
+                else:
+                    levels = column\
+                        .unique(maintain_order=True)\
+                        .drop_nulls()\
+                        .cast(pl.String)
                     column = column.cast(pl.Enum(levels))
                 values = (column.to_physical() + 1).fill_null(-2147483648)
                 subgroup.create_dataset('values', data=values.to_numpy())
@@ -4909,6 +4920,15 @@ class SingleCell:
             raise ValueError(error_message)
         assay_slot = f'{seurat_object_name}@assays${assay}'
 
+        # R function that converts a data.frame's unordered factor columns to
+        # ordered factors, so that ryp converts them to Enums (preserving R's
+        # level order) instead of Categoricals. Operates on a copy, so the
+        # Seurat object itself is not modified.
+        as_ordered = (
+            '(function(df) { df[] = lapply(df, function(x) { '
+            'if (is.factor(x) && !is.ordered(x)) '
+            'class(x) = c("ordered", "factor"); x }); df })')
+
         # If Seurat v5, merge layers if necessary, and use `$slot` instead of
         # `@slot` for `X` and `meta.data` instead of `meta.features` for `var`
         v5 = to_py(f'inherits({assay_slot}, "Assay5")')
@@ -4946,7 +4966,7 @@ class SingleCell:
             # reconcile them, we must get the layer-specific feature names and
             # use them to filter the assay-level metadata.
             var = to_py(f'''
-                (function() {{
+                {as_ordered}((function() {{
                     target_features = {assay_slot}@features[[{layer!r}]]
                     meta.data = {assay_slot}@meta.data
                     if (nrow(meta.data) == nrow({assay_slot})) {{
@@ -4955,7 +4975,7 @@ class SingleCell:
                     res <- meta.data[target_features, , drop=FALSE]
                     rownames(res) = target_features
                     res
-                }})()''', index='gene')
+                }})())''', index='gene')
             X_slot = f'{assay_slot}@layers${layer}'
         else:
             # unlike v5 objects, v3 objects indicate the absence of a layer
@@ -4971,7 +4991,7 @@ class SingleCell:
                     f'{", ".join(map(repr, current_assay_slots))}')
                 raise ValueError(error_message)
             X_slot = f'{assay_slot}@{layer}'
-            var = to_py(f'{assay_slot}@meta.features')
+            var = to_py(f'{as_ordered}({assay_slot}@meta.features)')
         X_classes = tuple(to_py(f'class({X_slot})', squeeze=False))
         if X_classes == ('dgCMatrix',):
             X = to_py(X_slot).T
@@ -5000,14 +5020,11 @@ class SingleCell:
                 f'{layer_name} than {layer!r}')
             raise TypeError(error_message)
         obs_key = f'{seurat_object_name}@meta.data'
-        obs = to_py(obs_key, index='_index' if to_py(f'"cell" %in% {obs_key}')
-                                   else 'cell')
+        obs = to_py(f'{as_ordered}({obs_key})',
+                    index='_index'
+                    if to_py(f'"cell" %in% colnames({obs_key})') else 'cell')
         if var is None:
             var = to_py(f'rownames({assay_slot}@{layer})').to_frame('gene')
-        obs = obs.cast({column.name: pl.Enum(column.cat.get_categories())
-                        for column in obs.select(pl.col(pl.Categorical))})
-        var = var.cast({column.name: pl.Enum(column.cat.get_categories())
-                        for column in var.select(pl.col(pl.Categorical))})
         reduction_names = to_py(f'names({seurat_object_name}@reductions)')
         obsm = {reduction_name: to_py(f'{seurat_object_name}@reductions$'
                                       f'{reduction_name}@cell.embeddings',
@@ -5260,7 +5277,7 @@ class SingleCell:
         num_with_underscores = \
             var_names.str.contains('_', literal=True).sum() \
             if is_string else \
-            var_names.cat.get_categories()\
+            var_names.unique().cast(pl.String)\
                 .str.contains('_', literal=True).sum()
         if num_with_underscores:
             var_names_expression = f'pl.col.{var_names.name}' \
@@ -5472,7 +5489,7 @@ class SingleCell:
         Returns:
             A length-5 tuple of (`X`, `obs`, `var`, `obsm`, `uns`).
         """
-        from ryp import to_py
+        from ryp import r, to_py
         X_slot = f'{sce_object_name}@assays@data${assay}'
         if not to_py(f'"{assay}" %in% names({sce_object_name}@assays@data)'):
             error_message = (
@@ -5508,14 +5525,24 @@ class SingleCell:
             error_message += (
                 f'; specify a different {assay_name} than {assay!r}')
             raise TypeError(error_message)
-        obs = SingleCell._get_DFrame(f'colData({sce_object_name})',
-                                     index='cell')
-        var = SingleCell._get_DFrame(f'rowData({sce_object_name})',
-                                     index='gene')
-        obs = obs.cast({column.name: pl.Enum(column.cat.get_categories())
-                        for column in obs.select(pl.col(pl.Categorical))})
-        var = var.cast({column.name: pl.Enum(column.cat.get_categories())
-                        for column in var.select(pl.col(pl.Categorical))})
+        # Convert unordered factor columns of `colData` and `rowData` to
+        # ordered factors, so that ryp converts them to Enums (preserving R's
+        # level order) instead of Categoricals. This operates on copies, so
+        # the SingleCellExperiment object itself is not modified.
+        as_ordered = (
+            '(function(df) { for (column in colnames(df)) { '
+            'x = df[[column]]; '
+            'if (is.factor(x) && !is.ordered(x)) { '
+            'class(x) = c("ordered", "factor"); df[[column]] = x } }; df })')
+        try:
+            r(f'.SingleCell.colData = '
+              f'{as_ordered}(colData({sce_object_name}))')
+            r(f'.SingleCell.rowData = '
+              f'{as_ordered}(rowData({sce_object_name}))')
+            obs = SingleCell._get_DFrame('.SingleCell.colData', index='cell')
+            var = SingleCell._get_DFrame('.SingleCell.rowData', index='gene')
+        finally:
+            r('suppressWarnings(rm(.SingleCell.colData, .SingleCell.rowData))')
         obsm = to_py(f'reducedDims({sce_object_name})@listData',
                      format='numpy')
         uns = to_py(f'{sce_object_name}@metadata', format='numpy')
@@ -6058,7 +6085,10 @@ class SingleCell:
                        dataset._obs[column].dtype == dtype
                        for dataset in datasets[1:])]
             cast_dict = {column: pl.Enum(
-                pl.concat([dataset._obs[column].cat.get_categories()
+                pl.concat([dataset._obs[column]
+                           .unique(maintain_order=True)
+                           .drop_nulls()
+                           .cast(pl.String)
                            for dataset in datasets])
                 .unique(maintain_order=True))
                 for column in obs_mismatched_categoricals}
@@ -6430,7 +6460,10 @@ class SingleCell:
                        dataset._var[column].dtype == dtype
                        for dataset in datasets[1:])]
             cast_dict = {column: pl.Enum(
-                pl.concat([dataset._var[column].cat.get_categories()
+                pl.concat([dataset._var[column]
+                           .unique(maintain_order=True)
+                           .drop_nulls()
+                           .cast(pl.String)
                            for dataset in datasets])
                 .unique(maintain_order=True))
                 for column in var_mismatched_categoricals}
@@ -8071,10 +8104,13 @@ class SingleCell:
                 continue
             if (left_dtype == pl.Enum or left_dtype == pl.Categorical) and (
                     right_dtype == pl.Enum or right_dtype == pl.Categorical):
-                common_dtype = \
-                    pl.Enum(pl.concat([left_column.cat.get_categories(),
-                                       right_column.cat.get_categories()])
-                            .unique(maintain_order=True))
+                common_dtype = pl.Enum(pl.concat([
+                    column.dtype.categories
+                    if column.dtype == pl.Enum else
+                    column.unique(maintain_order=True).drop_nulls()
+                    .cast(pl.String)
+                    for column in (left_column, right_column)])
+                    .unique(maintain_order=True))
                 left_cast_dict[left_column.name] = common_dtype
                 right_cast_dict[right_column.name] = common_dtype
             else:
@@ -8084,7 +8120,7 @@ class SingleCell:
                     f'other[{right_column.name!r}] has data type '
                     f'{right_dtype.base_type()!r}')
                 raise TypeError(error_message)
-        if left_cast_dict is not None:
+        if left_cast_dict:
             left = left.cast(left_cast_dict)
             right = right.cast(right_cast_dict)
         obs = left.join(right, on=on, how='left', left_on=left_on,
@@ -8198,10 +8234,13 @@ class SingleCell:
                 continue
             if (left_dtype == pl.Enum or left_dtype == pl.Categorical) and (
                     right_dtype == pl.Enum or right_dtype == pl.Categorical):
-                common_dtype = \
-                    pl.Enum(pl.concat([left_column.cat.get_categories(),
-                                       right_column.cat.get_categories()])
-                            .unique(maintain_order=True))
+                common_dtype = pl.Enum(pl.concat([
+                    column.dtype.categories
+                    if column.dtype == pl.Enum else
+                    column.unique(maintain_order=True).drop_nulls()
+                    .cast(pl.String)
+                    for column in (left_column, right_column)])
+                    .unique(maintain_order=True))
                 left_cast_dict[left_column.name] = common_dtype
                 right_cast_dict[right_column.name] = common_dtype
             else:
@@ -8211,7 +8250,7 @@ class SingleCell:
                     f'other[{right_column.name!r}] has data type '
                     f'{right_dtype.base_type()!r}')
                 raise TypeError(error_message)
-        if left_cast_dict is not None:
+        if left_cast_dict:
             left = left.cast(left_cast_dict)
             right = right.cast(right_cast_dict)
         var = left.join(right, on=on, how='left', left_on=left_on,
@@ -10370,6 +10409,10 @@ class SingleCell:
 
         Raises an error if any `obs_names` already contain `separator`.
 
+        `obs_names` keeps its data type: String stays String, Categorical
+        stays Categorical, and Enum becomes an Enum whose categories are the
+        new names, in order.
+
         Args:
             separator: the string connecting the original name and the integer
                        suffix
@@ -10378,9 +10421,9 @@ class SingleCell:
             A new SingleCell dataset with the `obs_names` made unique.
         """
         check_type(separator, 'separator', str, 'a string')
-        unique_obs_names = self.obs_names \
-            if self.obs_names.dtype == pl.String else \
-            self.obs_names.cat.get_categories()
+        dtype = self.obs_names.dtype
+        unique_obs_names = self.obs_names if dtype == pl.String else \
+            self.obs_names.unique().drop_nulls().cast(pl.String)
         if unique_obs_names.str.contains(separator, literal=True).any():
             error_message = (
                 f'some obs_names already contain the separator {separator!r}; '
@@ -10388,15 +10431,23 @@ class SingleCell:
                 f'the separator argument to a different string.')
             raise ValueError(error_message)
         obs_names = pl.col(self.obs_names.name)
+        string_obs_names = obs_names if dtype == pl.String else \
+            obs_names.cast(pl.String)
         num_times_seen = pl.int_range(pl.len(), dtype=pl.Int32).over(obs_names)
-        return SingleCell(X=self._X,
-                          obs=self._obs.with_columns(
-                              pl.when(num_times_seen > 0)
-                              .then(obs_names + separator +
-                                    num_times_seen.cast(str))
-                              .otherwise(obs_names)),
-                          var=self._var, obsm=self._obsm, varm=self._varm,
-                          obsp=self._obsp, varp=self._varp, uns=self._uns,
+        new_obs_names = pl.when(num_times_seen > 0)\
+            .then(pl.concat_str(string_obs_names, pl.lit(separator),
+                                num_times_seen.cast(pl.String)))\
+            .otherwise(string_obs_names)
+        if dtype == pl.Categorical:
+            new_obs_names = new_obs_names.cast(pl.Categorical)
+        obs = self._obs.with_columns(new_obs_names)
+        if dtype == pl.Enum:
+            new_obs_names = obs[:, 0]
+            obs = obs.with_columns(
+                new_obs_names.cast(pl.Enum(new_obs_names.drop_nulls())))
+        return SingleCell(X=self._X, obs=obs, var=self._var,
+                          obsm=self._obsm, varm=self._varm, obsp=self._obsp,
+                          varp=self._varp, uns=self._uns,
                           num_threads=self._num_threads)
 
     def make_var_names_unique(self, *, separator: str = '-') -> SingleCell:
@@ -10409,6 +10460,10 @@ class SingleCell:
 
         Raises an error if any `var_names` already contain `separator`.
 
+        `var_names` keeps its data type: String stays String, Categorical
+        stays Categorical, and Enum becomes an Enum whose categories are the
+        new names, in order.
+
         Args:
             separator: the string connecting the original name and the integer
                        suffix
@@ -10417,9 +10472,9 @@ class SingleCell:
             A new SingleCell dataset with the `var_names` made unique.
         """
         check_type(separator, 'separator', str, 'a string')
-        unique_var_names = self.var_names \
-            if self.var_names.dtype == pl.String else \
-            self.var_names.cat.get_categories()
+        dtype = self.var_names.dtype
+        unique_var_names = self.var_names if dtype == pl.String else \
+            self.var_names.unique().drop_nulls().cast(pl.String)
         if unique_var_names.str.contains(separator, literal=True).any():
             error_message = (
                 f'some var_names already contain the separator {separator!r}; '
@@ -10427,14 +10482,21 @@ class SingleCell:
                 f'the separator argument to a different string.')
             raise ValueError(error_message)
         var_names = pl.col(self.var_names.name)
+        string_var_names = var_names if dtype == pl.String else \
+            var_names.cast(pl.String)
         num_times_seen = pl.int_range(pl.len(), dtype=pl.Int32).over(var_names)
-        return SingleCell(X=self._X,
-                          obs=self._obs,
-                          var=self._var.with_columns(
-                              pl.when(num_times_seen > 0)
-                              .then(var_names + separator +
-                                    num_times_seen.cast(str))
-                              .otherwise(var_names)),
+        new_var_names = pl.when(num_times_seen > 0)\
+            .then(pl.concat_str(string_var_names, pl.lit(separator),
+                                num_times_seen.cast(pl.String)))\
+            .otherwise(string_var_names)
+        if dtype == pl.Categorical:
+            new_var_names = new_var_names.cast(pl.Categorical)
+        var = self._var.with_columns(new_var_names)
+        if dtype == pl.Enum:
+            new_var_names = var[:, 0]
+            var = var.with_columns(
+                new_var_names.cast(pl.Enum(new_var_names.drop_nulls())))
+        return SingleCell(X=self._X, obs=self._obs, var=var,
                           obsm=self._obsm, varm=self._varm, obsp=self._obsp,
                           varp=self._varp, uns=self._uns,
                           num_threads=self._num_threads)
@@ -11274,7 +11336,8 @@ class SingleCell:
                                 partition['_SingleCell_idx'].to_numpy(),
                                 gene_indices))
                     else:
-                        for batch in dataset_batch_column.unique():
+                        for batch in dataset_batch_column\
+                                .unique(maintain_order=True):
                             batches.append((
                                 dataset._X,
                                 (dataset_batch_column.eq_missing(batch)
@@ -11312,11 +11375,13 @@ class SingleCell:
                     batches = ((X, (batch_column.eq_missing(batch) &
                                     QC_columns[0]).to_numpy(),
                                 single_dataset_gene_indices)
-                               for batch in batch_column.unique())
+                               for batch in batch_column.unique(
+                                    maintain_order=True))
                 else:
                     batches = ((X, batch_column.eq_missing(batch).to_numpy(),
                                 single_dataset_gene_indices)
-                               for batch in batch_column.unique())
+                               for batch in batch_column.unique(
+                                    maintain_order=True))
 
         # Get the variance of each gene in each batch across cells passing QC.
         # Keep track of the total number of cells each gene was detected in
@@ -13156,8 +13221,10 @@ class SingleCell:
                     f'the recommended approach of running neighbors().')
                 raise ValueError(error_message)
 
+            cluster_enum = pl.Enum(map(str, range(num_final_communities)))
             clusters = pl.Series(cluster_column, clusters)\
-                .cast(pl.Enum(map(str, range(num_final_communities))))
+                .cast(pl.Series(dtype=cluster_enum).to_physical().dtype)\
+                .cat.to(cluster_enum)
             if QC_column is not None:
                 # Back-project from QCed cells to all cells, filling with
                 # `null`
@@ -13211,12 +13278,16 @@ class SingleCell:
                     f'the recommended approach of running neighbors().')
                 raise ValueError(error_message)
 
-            clusters = pl.DataFrame(clusters.T, schema=[
-                f'{cluster_column}_{resolution_index}'
-                for resolution_index in range(num_resolutions)])\
-                .cast({f'{cluster_column}_{resolution_index}': pl.Enum(map(
-                    str, range(num_final_communities[resolution_index])))
-                       for resolution_index in range(num_resolutions)})
+            names = [f'{cluster_column}_{resolution_index}'
+                     for resolution_index in range(num_resolutions)]
+            enums = [pl.Enum(map(str, range(
+                        num_final_communities[resolution_index])))
+                     for resolution_index in range(num_resolutions)]
+            clusters = pl.DataFrame(clusters.T, schema=names)\
+                .select(pl.col(name)
+                        .cast(pl.Series(dtype=enum).to_physical().dtype)
+                        .cat.to(enum)
+                        for name, enum in zip(names, enums))
             if QC_column is not None:
                 # Back-project from QCed cells to all cells, filling with
                 # `null`
@@ -13286,14 +13357,14 @@ class SingleCell:
         parallelized. Instead, we parallelize within blocks by dividing them
         into chunks of `chunk_size` cells (512 by default). We process each
         chunk in parallel, subtracting only the `O` and `E` contributions of
-        the chunk itself, updating `R` for the chunk, and, after and, after
-        processing all chunks in the block, add back the `O` and `E`
-        contributions for all chunks based on the updated `R`. Updating `O` and
-        `E` at the end of each block (rather than after processing every cell
-        in the dataset) ensures convergence, while the inner chunking enables
-        parallelization without disrupting convergence. To use the original
-        implementation's chunkless strategy for updating `R`, `O`, and `E`,
-        specify `original=True, num_threads=1`.
+        the chunk itself, updating `R` for the chunk, and, after processing all
+        chunks in the block, add back the `O` and `E` contributions for all
+        chunks based on the updated `R`. Updating `O` and `E` at the end of
+        each block (rather than after processing every cell in the dataset)
+        ensures convergence, while the inner chunking enables parallelization
+        without disrupting convergence. To use the original implementation's
+        chunkless strategy for updating `R`, `O`, and `E`, specify
+        `original=True, num_threads=1`.
 
         Second, we reduce the default number of clustering iterations
         (Harmony's inner loop) from 20 to 5, but always complete all 5
@@ -13755,19 +13826,37 @@ class SingleCell:
                 if batch_col is not None:
                     if QC_col is not None:
                         batch_col = batch_col.filter(QC_col)
-                    if batch_col.dtype in (pl.String, pl.Enum, pl.Categorical):
-                        if batch_col.dtype != pl.Enum:
-                            batch_col = batch_col \
-                                .cast(pl.Enum(batch_col.unique().drop_nulls()))
+                    # Relabel this dataset's batches as 0, 1, 2, ..., so that
+                    # they don't overlap with the next dataset's batches after
+                    # adding `batch_index`. Nulls become their own batch.
+                    dtype = batch_col.dtype
+                    if dtype in (pl.String, pl.Categorical):
+                        categories = batch_col\
+                            .unique(maintain_order=True)\
+                            .drop_nulls()\
+                            .cast(pl.String)
+                        batch_col = \
+                            batch_col.cast(pl.Enum(categories)).to_physical()
+                        num_dataset_batches = len(categories)
+                    elif dtype == pl.Enum:
+                        # The physical codes are already 0, 1, 2, ... unless
+                        # some categories are unused
                         batch_col = batch_col.to_physical()
-                    if batch_col.dtype != pl.UInt32:
-                        batch_col = batch_col.cast(pl.UInt32)
-                    if batch_col.null_count() > 0:
+                        num_dataset_batches = batch_col.n_unique() - \
+                            (batch_col.null_count() > 0)
+                        if num_dataset_batches < len(dtype.categories):
+                            batch_col = batch_col.rank('dense') - 1
+                    else:  # integer dtype
+                        batch_col = batch_col.rank('dense') - 1
                         max_val = batch_col.max()
-                        batch_col = batch_col.fill_null(
-                            max_val + 1 if max_val is not None else 0)
+                        num_dataset_batches = \
+                            0 if max_val is None else max_val + 1
+                    batch_col = batch_col.cast(pl.UInt32)
+                    if batch_col.null_count() > 0:
+                        batch_col = batch_col.fill_null(num_dataset_batches)
+                        num_dataset_batches += 1
                     batch_labels.append(batch_col.to_numpy() + batch_index)
-                    batch_index += batch_col.n_unique()
+                    batch_index += num_dataset_batches
                 else:
                     batch_labels.append(np.full(len(dataset) if QC_col is None
                                                 else QC_col.sum(),
@@ -15485,12 +15574,7 @@ class SingleCell:
             else:
                 cell_types = to_tuple_checked(cell_types, 'cell_types', str,
                                               'strings')
-            if cell_type_column.dtype == pl.Enum or \
-                    cell_type_column.dtype == pl.Categorical:
-                unique_cell_types = cell_type_column.cat.get_categories()
-            else:
-                unique_cell_types = \
-                    cell_type_column.unique(maintain_order=True)
+            unique_cell_types = cell_type_column.unique().drop_nulls()
             for cell_type in cell_types:
                 if cell_type not in unique_cell_types:
                     if is_string:
@@ -15518,12 +15602,7 @@ class SingleCell:
                 excluded_cell_types = to_tuple_checked(
                     excluded_cell_types, 'excluded_cell_types', str,
                     'strings')
-            if cell_type_column.dtype == pl.Enum or \
-                    cell_type_column.dtype == pl.Categorical:
-                unique_cell_types = cell_type_column.cat.get_categories()
-            else:
-                unique_cell_types = \
-                    cell_type_column.unique(maintain_order=True)
+            unique_cell_types = cell_type_column.unique().drop_nulls()
             for cell_type in excluded_cell_types:
                 if cell_type not in unique_cell_types:
                     if is_string:
@@ -15536,7 +15615,7 @@ class SingleCell:
                             f'excluded_cell_types contains a cell type, '
                             f'{cell_type!r}, not present in cell_type_column')
                         raise ValueError(error_message)
-            if len(excluded_cell_types) == len(unique_cell_types):
+            if len(set(excluded_cell_types)) == len(unique_cell_types):
                 error_message = \
                     'all cell types were excluded by excluded_cell_types'
                 raise ValueError(error_message)
@@ -15762,8 +15841,11 @@ class SingleCell:
         # If `cell_types` is not `None`, reorder `groups` to be in the same
         # order as `cell_types`
         if cell_types is not None:
-            groups = groups.sort(pl.first().cast(
-                pl.Enum(to_tuple(cell_types))), nulls_last=True)
+            groups = groups.sort(
+                pl.first().replace_strict(cell_types, range(len(cell_types)),
+                                          default=None,
+                                          return_dtype=pl.UInt32),
+                nulls_last=True)
 
         # Get a cell-type-by-gene matrix of the number of cells of each type
         # with non-zero expression of each gene, i.e. the gene's detection
@@ -16374,8 +16456,11 @@ class SingleCell:
         # `groups`, sorting alphabetically if `alphabetical_cell_types` and
         # `cell_type_column` is Enum or Categorical.
         if cell_types is not None:
-            groups = groups.sort(pl.first().cast(
-                pl.Enum(to_tuple(cell_types))), nulls_last=True)
+            groups = groups.sort(
+                pl.first().replace_strict(cell_types, range(len(cell_types)),
+                                          default=None,
+                                          return_dtype=pl.UInt32),
+                nulls_last=True)
         else:
             if alphabetical_cell_types and (
                     cell_type_column.dtype == pl.Enum or
@@ -19505,10 +19590,13 @@ class SingleCell:
                             f'contains a key of type {type(key).__name__!r}')
                         raise TypeError(error_message)
                     if key not in unique_color_column:
+                        color_column_description = \
+                            SingleCell._describe_column('color_column',
+                                                        original_color_column)
                         error_message = (
                             f'colormap is a dictionary containing the key '
                             f'{key!r}, which is not one of the values in '
-                            f'obs[{color_column!r}]')
+                            f'{color_column_description}')
                         raise ValueError(error_message)
                     if not plt.matplotlib.colors.is_color_like(value):
                         error_message = (
@@ -19708,16 +19796,9 @@ class SingleCell:
             c = default_color
             cmap = None
         elif isinstance(colormap, dict):
-            # Fill both missing values and values missing from `colormap` with
-            # `default_color`
-            if color_column.dtype == pl.String:
-                color_column = color_column.cast(pl.Categorical)
-            categories = color_column.cat.get_categories()
-            lookup = np.array([colormap.get(cat, default_color)
-                              for cat in categories], dtype=np.float32)
-            c = lookup[color_column.to_physical().fill_null(0)]
-            c[color_column.is_null()] = default_color
-            cmap = None
+            # Colors are assigned per value when plotting below, so `c` and
+            # `cmap` are unused
+            c = cmap = None
         else:
             c = color_column.to_numpy()
             cmap = colormap if colormap is not None else \
