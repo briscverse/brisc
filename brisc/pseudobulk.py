@@ -4554,8 +4554,7 @@ class Pseudobulk:
                           num_threads=self._num_threads)
 
     @staticmethod
-    def _get_unique_variables(formulas: str | Iterable[str],
-                              composite: bool = False) -> list[str]:
+    def _get_unique_variables(formulas: str | Iterable[str]) -> list[str]:
         """
         Get a list of the unique variables referenced in one or more R
         formulas. Include backtick-quoted variable names that contain spaces
@@ -4565,11 +4564,6 @@ class Pseudobulk:
 
         Args:
             formulas: one or more R formulas, represented as Python strings
-            composite: if `True`, avoid splitting "composite" variables like
-                       `x1:x2`, so that the unique variables are columns of the
-                       design matrix. If `False`, split these into their
-                       components, so that the unique variables are columns of
-                       obs.
 
         Returns:
             A list of the unique variables in `formula`, in order of first
@@ -4577,7 +4571,7 @@ class Pseudobulk:
         """
         if isinstance(formulas, str):
             formulas = formulas,
-        pattern = rf'[+\-*/^()]|`[^`]+`|[\w{":" if composite else ""}.]+'
+        pattern = r'[+\-*/^()]|`[^`]+`|[\w.]+'
         seen = set()
         unique_variables = [
             token[1:-1] if token[0] == '`' else token
@@ -4587,8 +4581,7 @@ class Pseudobulk:
             if (token not in seen and not seen.add(token) and
                 not re.fullmatch(r'\d+\.?\d*', token) and
                 (token[0] == '`' or
-                 re.fullmatch(rf'[\w{":" if composite else ""}.]*', token)) and
-                next_token != '(')]
+                 re.fullmatch(r'[\w.]*', token)) and next_token != '(')]
         return unique_variables
 
     @staticmethod
@@ -5455,6 +5448,9 @@ class Pseudobulk:
                        `{'CD8 vs CD4': 'CD8+ T-cells - CD4+ T-cells'}` is valid
                        even though the two column names `'CD8+ T-cells'` and
                        `'CD4+ T-cells'` are not escaped with backticks.
+                       Unquoted names are matched greedily, so `a-b` means the
+                       column `'a-b'` if one exists; write `a - b` or
+                       `` `a`-`b` `` for subtraction.
             group: if `group=False`, force the use of voom instead of
                    voomByGroup. If `group=None`, group on the unique
                    combinations of values of the categorical columns of `obs`
@@ -5599,20 +5595,34 @@ class Pseudobulk:
 
                 # Extract the name of the design matrix column corresponding to
                 # each integer in `coefficient`; make sure none of the integers
-                # are ≥ the design matrix width
+                # are out of bounds. Raise an error if a column is referenced
+                # more than once, e.g. if an integer and a name refer to the
+                # same column.
                 for coef in coefficient:
-                    if isinstance(coef, (int, np.integer)) and coef >= width:
+                    if isinstance(coef, (int, np.integer)) and \
+                            not -width <= coef < width:
                         contains_string = 'is' \
                             if len(coefficient) == 1 else 'contains the number'
                         error_message = (
                             f'coefficient {contains_string} {coef}, which is '
-                            f'more than the number of columns of the design '
-                            f'matrix ({width:,}) minus 1 for cell type '
-                            f'{cell_type!r}')
+                            f'out of bounds for the design matrix of cell '
+                            f'type {cell_type!r}; since it has {width:,} '
+                            f'{plural("column", width)}, integer coefficients '
+                            f'must be between {-width:,} and {width - 1:,}, '
+                            f'inclusive')
                         raise ValueError(error_message)
                 coefficient = [design_matrix_columns[coef]
                                if isinstance(coef, (int, np.integer)) else coef
                                for coef in coefficient]
+                if len(set(coefficient)) < len(coefficient):
+                    duplicate = next(
+                        coef for index, coef in enumerate(coefficient)
+                        if coef in coefficient[:index])
+                    error_message = (
+                        f'coefficient refers to the design matrix column '
+                        f'{duplicate!r} more than once for cell type '
+                        f'{cell_type!r}')
+                    raise ValueError(error_message)
 
                 # Convert `coefficient` to R
                 to_r(pl.Series(coefficient), f'{prefix}.coef')
@@ -5620,18 +5630,45 @@ class Pseudobulk:
                 if verbose:
                     print(f'[{cell_type}] Validating contrasts...')
 
-                # Check that all variables referenced in `contrasts` are in the
-                # design matrix. Use `composite=True` to avoid splitting e.g.
-                # `x1:x2` into `x1` and `x2`.
-                contrasts = {contrast_name: contrast.replace(' ', '')
-                             for contrast_name, contrast in contrasts.items()}
+                # Find the design matrix columns referenced in each contrast.
+                # Column names can contain spaces and characters like `+` and
+                # `-` (e.g. `'CD8+ T-cells'`), so rather than tokenizing, match
+                # the column names themselves. Match longest first, so that
+                # columns that are substrings of other columns don't match
+                # early. Use negative lookbehind/lookahead to forbid matches
+                # that split a valid R identifier (`[\w.]` characters) in two:
+                # otherwise, a column called `'24h'` would match inside
+                # `'CD24high'`. Backticks are optional, but backtick-quoted
+                # names are matched as a whole and taken literally, so that
+                # e.g. `` `a`-`b` `` means `a` minus `b` even if `a-b` is also
+                # a column. Anything left over besides numbers, arithmetic
+                # operators, parentheses, and whitespace is an unknown
+                # variable.
                 valid_dtypes = INTEGER_DTYPES + (
                     pl.String, pl.Enum, pl.Categorical, pl.Boolean)
-                unique_contrast_variables = \
-                    Pseudobulk._get_unique_variables(contrasts.values(),
-                                                     composite=True)
-                for variable in unique_contrast_variables:
-                    if variable not in design_matrix_columns:
+                column_pattern = re.compile('`[^`]*`|' + '|'.join(
+                    rf'(?<![\w.](?=[\w.])){re.escape(column)}'
+                    rf'(?!(?<=[\w.])[\w.])'
+                    for column in sorted(design_matrix_columns, key=len,
+                                         reverse=True)))
+                unique_contrast_variables = set()
+                for contrast in contrasts.values():
+                    variables = [match.strip('`') for match in
+                                 column_pattern.findall(contrast)]
+                    unique_contrast_variables.update(variables)
+                    # Unknown backtick-quoted names, then unknown bare names
+                    variable = next((variable for variable in variables
+                                     if variable not in design_matrix_columns),
+                                    None)
+                    if variable is None:
+                        leftover_tokens = re.findall(
+                            r'[^\s+\-*/()]+',
+                            column_pattern.sub(' ', contrast))
+                        variable = next(
+                            (token for token in leftover_tokens
+                             if not re.fullmatch(r'\d+\.?\d*|\.\d+', token)),
+                            None)
+                    if variable is not None:
                         error_message = (
                             f'a contrast contains the variable {variable!r}, '
                             f'which is not the name of a column of the design '
@@ -5841,25 +5878,28 @@ class Pseudobulk:
             to_r(group, f'{prefix}.group')
 
             # Run voom
-            to_r(return_voom_info, 'save.plot')
+            to_r(return_voom_info, f'{prefix}.save.plot')
             if grouping:
                 if verbose:
                     print(f'[{cell_type}] Running voomByGroup...')
                 r(f'{prefix}.voom.result = voomByGroup('
                   f'{prefix}.X.T, {prefix}.group, {prefix}.design.matrix, '
-                  f'{prefix}.library.size, save.plot=save.plot, print=FALSE)')
+                  f'{prefix}.library.size, save.plot={prefix}.save.plot, '
+                  f'print=FALSE)')
             else:
                 if verbose:
                     print(f'[{cell_type}] Running voom...')
                 r(f'{prefix}.voom.result = voom('
                   f'{prefix}.X.T, {prefix}.design.matrix, '
-                  f'{prefix}.library.size, save.plot=save.plot)')
+                  f'{prefix}.library.size, save.plot={prefix}.save.plot)')
             if return_voom_info:
                 voom_weights = \
                     to_py(f'{prefix}.voom.result$weights', index='gene')
                 if grouping:
                     voom_plot_data = var_names.to_frame('gene')
-                    for group_name in group.unique(maintain_order=True):
+                    group_names = to_py(
+                        f'names({prefix}.voom.result$voom.xy)', squeeze=False)
+                    for group_name in group_names:
                         group_voom_plot_data = pl.DataFrame({
                             'gene': to_py(
                                 f'names({prefix}.voom.result$voom.xy$'
@@ -5936,33 +5976,13 @@ class Pseudobulk:
                 original_to_escaped = dict(zip(original, escaped))
 
                 # Escape the column names within each contrast by mapping them
-                # through the `original_to_escaped` mapping. This is
-                # challenging because e.g. `'CD8+ T-cells'` could be referring
-                # to either a single column called `'CD8+ T-cells'` or a
-                # contrast between two columns called `'CD8+ T'` and `'cells'`.
-                # So we need to refererence our list of what the original
-                # columns were, and detect instances of them within each
-                # contrast. Additional complications:
-                # - If there's a column called `'24h'` (which R escapes to
-                #   `'X24h'` because R variables can't start with numbers) and
-                #   another called `'CD24high'`, blindly replacing `'24h'` with
-                #   `'X24h'` everywhere will corrupt `'CD24high'` to
-                #   `'CDX24high'`. So  naive exact substring matching (e.g.
-                #  `polars.Series.str.contains_any()`) will fail. We need to
-                #   use regex instead, using negative lookbehind/lookahead to
-                #   forbid matches that split valid R identifiers in two. Valid
-                #   R identifier characters are `[\w.]`, i.e. word characters
-                #   or a dot.
-                # - The original columns may be substrings of each other, so
-                #   try to match the longest column names first. We can do this
-                #   by sorting the column names in descending order of length
-                #   before putting them into the regex.
-                pattern = re.compile('|'.join(
-                    rf'(?<![\w.](?=[\w.])){re.escape(c)}(?!(?<=[\w.])[\w.])'
-                    for c in sorted(original, key=len, reverse=True)))
+                # through the `original_to_escaped` mapping, using the same
+                # regex we used above to find the columns referenced in each
+                # contrast (`original` is the same list of column names as
+                # `design_matrix_columns`)
                 escaped_contrasts = [
-                    pattern.sub(lambda match: original_to_escaped[
-                                    match.group(0)], contrast)
+                    column_pattern.sub(lambda match: original_to_escaped[
+                                       match.group(0).strip('`')], contrast)
                     for contrast in contrasts.values()]
 
                 # Convert the escaped contrasts to R
@@ -6029,7 +6049,8 @@ class Pseudobulk:
               f'"{prefix}.voom.result", "{prefix}.lmFit.result", '
               f'"{prefix}.contrasts", "{prefix}.original", '
               f'"{prefix}.escaped", "{prefix}.robust", '
-              f'"{prefix}.eBayes.result", "{prefix}.coef")))')
+              f'"{prefix}.eBayes.result", "{prefix}.coef", '
+              f'"{prefix}.save.plot")))')
         return (DE_results, voom_weights, voom_plot_data) \
             if return_voom_info else DE_results
 
@@ -6362,6 +6383,9 @@ class Pseudobulk:
         contrasts_is_nested_dict = False
         if contrasts is not None:
             check_type(contrasts, 'contrasts', dict, 'a dictionary')
+            if not contrasts:
+                error_message = 'contrasts must not be an empty dictionary'
+                raise ValueError(error_message)
             if coefficient is not None:
                 error_message = \
                     'coefficient and contrasts cannot both be specified'
@@ -6395,6 +6419,12 @@ class Pseudobulk:
                     raise ValueError(error_message)
                 for key, value in contrasts.items():
                     if value is not None:
+                        if not value:
+                            error_message = (
+                                f'contrasts[{key!r}] must not be an empty '
+                                f'dictionary; set it to None to use the '
+                                f'default coefficient for this cell type')
+                            raise ValueError(error_message)
                         for inner_key, inner_value in value.items():
                             if not isinstance(inner_key, str):
                                 error_message = (
