@@ -10058,7 +10058,6 @@ class SingleCell:
             doublet_indices = np.array([], dtype=np.uint32)
         all_detection_counts = np.empty(num_total_genes, dtype=np.uint32)
         detection_counts_buffer = np.empty(num_genes, dtype=np.uint32)
-        ps_buffer = np.empty(num_genes, dtype=np.float32)
         hvgs = np.empty(num_genes, dtype=np.uint32)
         distances = np.empty(num_genes, dtype=np.float32)
         obs_buffer = np.empty(num_genes * num_genes, dtype=np.uint32)
@@ -10088,19 +10087,15 @@ class SingleCell:
                 getnnz(X_batch, axis=0, num_threads=num_threads,
                        output=all_detection_counts)
 
-                # Normalize `detection_counts` by `num_cells` to get the
-                # detection rate `p`. Subset to the `num_genes` genes with
-                # detection rates closest to 50%. Exclude genes with detection
-                # rates of 0% or 100%.
+                # Subset to the `num_genes` genes with detection rates closest
+                # to 50%, excluding genes with detection rates of 0% or 100%
                 num_cells = X_batch.shape[0]
-
                 batch_num_genes = get_hvgs(
                     all_detection_counts=all_detection_counts,
-                    detection_counts=detection_counts_buffer, ps=ps_buffer,
-                    hvgs=hvgs, distances=distances, num_cells=num_cells,
+                    detection_counts=detection_counts_buffer, hvgs=hvgs,
+                    distances=distances, num_cells=num_cells,
                     num_total_genes=num_total_genes, num_genes=num_genes)
                 detection_counts = detection_counts_buffer[:batch_num_genes]
-                ps = ps_buffer[:batch_num_genes]
                 X_batch = X_batch[:, hvgs[:batch_num_genes]]
 
                 # Convert `X_batch` to CSR, if CSC
@@ -10125,8 +10120,8 @@ class SingleCell:
                 # the upper triangle of `S` is used; the rest is garbage.
                 S = S_buffer[:batch_num_genes * batch_num_genes]\
                     .reshape((batch_num_genes, batch_num_genes))
-                compute_S(obs=obs, ps=ps, num_cells=num_cells, S=S,
-                          num_threads=num_threads)
+                compute_S(obs=obs, detection_counts=detection_counts,
+                          num_cells=num_cells, S=S, num_threads=num_threads)
 
                 # Calculate each cell's cxds score: the sum of `-S[i, j]`
                 # across all gene pairs `i` and `j` that are both expressed by

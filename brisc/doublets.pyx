@@ -212,7 +212,6 @@ cdef extern from * nogil:
 
 def get_hvgs(unsigned[::1] all_detection_counts,
              unsigned[::1] detection_counts,
-             float[::1] ps,
              unsigned[::1] hvgs,
              float[::1] distances,
              const unsigned long long num_cells,
@@ -255,12 +254,9 @@ def get_hvgs(unsigned[::1] all_detection_counts,
     # Sort the indices of the highly variable genes
     sort(&hvgs[0], &hvgs[0] + num_genes)
 
-    # Populate `detection_counts` and `ps` for the highly variable genes
+    # Populate `detection_counts` for the highly variable genes
     for i in range(num_genes):
-        gene = hvgs[i]
-        detection_count = all_detection_counts[gene]
-        detection_counts[i] = detection_count
-        ps[i] = detection_count * inverse_num_cells
+        detection_counts[i] = all_detection_counts[hvgs[i]]
 
     # Return the number of genes (same as the input `num_genes` except in the
     # rare case mentioned above)
@@ -325,31 +321,40 @@ def compute_obs(const unsigned[::1] detection_counts,
 
 
 def compute_S(const unsigned[:, ::1] obs,
-              const float[::1] ps,
+              const unsigned[::1] detection_counts,
               const unsigned long long num_cells,
               float[:, ::1] S,
               unsigned num_threads):
 
-    cdef unsigned num_genes = ps.shape[0]
+    cdef unsigned num_genes = detection_counts.shape[0]
     cdef unsigned i, j
-    cdef float ps_i
+    cdef unsigned long long c_i, c_j
+    cdef double inverse_num_cells_squared = 1.0 / (num_cells * num_cells)
 
+    # The probability that exactly one of genes i and j is detected,
+    # p_i * (1 - p_j) + (1 - p_i) * p_j, where p_i and p_j are the genes'
+    # detection rates, is computed from the integer detection counts c_i and
+    # c_j as (c_i * (n - c_j) + (n - c_i) * c_j) / n^2
     num_threads = min(num_threads, num_genes)
     if num_threads <= 1:
         for i in range(num_genes):
-            ps_i = ps[i]
+            c_i = detection_counts[i]
             for j in range(i + 1, num_genes):
+                c_j = detection_counts[j]
                 S[i, j] = <float> 0 if obs[i, j] == 0 else <float> binom_logsf(
                     k=obs[i, j] - 1, n=num_cells,
-                    p=ps_i * (<float> 1 - ps[j]) + (<float> 1 - ps_i) * ps[j])
+                    p=(c_i * (num_cells - c_j) + (num_cells - c_i) * c_j) *
+                    inverse_num_cells_squared)
     else:
         for i in prange(num_genes, nogil=True,
                         num_threads=num_threads):
-            ps_i = ps[i]
+            c_i = detection_counts[i]
             for j in range(i + 1, num_genes):
+                c_j = detection_counts[j]
                 S[i, j] = <float> 0 if obs[i, j] == 0 else <float> binom_logsf(
                     k=obs[i, j] - 1, n=num_cells,
-                    p=ps_i * (<float> 1 - ps[j]) + (<float> 1 - ps_i) * ps[j])
+                    p=(c_i * (num_cells - c_j) + (num_cells - c_i) * c_j) *
+                    inverse_num_cells_squared)
 
 
 def compute_cxds(
