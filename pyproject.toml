@@ -67,6 +67,11 @@ curl -L https://anaconda.org/conda-forge/llvm-openmp/11.1.0/download/osx-64/llvm
 [tool.cibuildwheel.windows]
 archs = ["AMD64"]
 
+[tool.pytest.ini_options]
+filterwarnings = [
+    "error",
+]
+
 [project.urls]
 Homepage = "https://brisc.run"
 Repository = "https://github.com/briscverse/brisc"
