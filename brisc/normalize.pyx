@@ -9,8 +9,9 @@ from .cyutils cimport get_thread_offset, numeric, signed_integer, \
 cdef inline float log1p(const float x) noexcept nogil:
     # log1p(x) for finite x >= 0, adapted from fdlibm's `log1pf()`. This
     # version is vectorized by the compiler, unlike the C++ stdlib's `log1p()`,
-    # which is only vectorized on GCC with glibc >= 2.35. Not compatible with
-    # fast-math semantics.
+    # which is only vectorized on GCC with glibc >= 2.35. Must be compiled
+    # without reassociation (-fassociative-math), which would optimize away the
+    # rounding correction `c` and reorder the final sum.
     #
     # log1p(x) is calculated as log(u) + c / u, where u is 1 + x rounded to a
     # float and c = x - (u - 1) is the part of x lost in that rounding, which

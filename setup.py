@@ -150,14 +150,19 @@ try:
             linker_flags = ['-fopenmp', '-s']
         if march:
             compiler_flags.append(march)
-        # normalize.pyx must be compiled without fast-math semantics or
-        # floating-point contraction to avoid floating-point roundoff
-        # differences between vectorized and non-vectorized code paths.
-        normalize_compiler_flags = [
-            '-O3' if flag == '-Ofast' else '/fp:precise' if flag == '/fp:fast'
-            else flag for flag in compiler_flags if flag != '-ffast-math']
-        if not windows:
-            normalize_compiler_flags.append('-ffp-contract=off')
+        # normalize.pyx must be compiled without reassociation, which would
+        # break log1p()'s rounding correction, and without reciprocal math or
+        # fused multiply-add, which would cause roundoff differences between
+        # vectorized and non-vectorized code paths. MSVC can't disable these
+        # individually, so it uses /fp:precise instead of /fp:fast.
+        if windows:
+            normalize_compiler_flags = [
+                '/fp:precise' if flag == '/fp:fast' else flag
+                for flag in compiler_flags]
+        else:
+            normalize_compiler_flags = compiler_flags + [
+                '-fno-associative-math', '-fno-reciprocal-math',
+                '-ffp-contract=off']
         if variant_name:
             # Copy each Cython source file to a separate temporary directory
             # for each variant
