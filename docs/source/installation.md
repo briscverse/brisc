@@ -35,7 +35,7 @@ conda install -c bioconda bioconductor-limma
 :::
 :::{tab-item} BiocManager (all platforms)
 ```bash
-R -e 'if (!require("BiocManager", quietly = TRUE)) install.packages("BiocManager"); BiocManager::install("limma")'
+R -e "if (!require('BiocManager', quietly = TRUE)) install.packages('BiocManager'); BiocManager::install('limma')"
 ```
 :::
 ::::
