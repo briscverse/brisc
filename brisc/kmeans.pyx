@@ -1286,7 +1286,9 @@ def kmeans(const float[:, ::1] X,
                         # parallelism, but just aggregate the number of cells
                         # in each cluster by thread since they are not
                         # floating-point.
-                        chunk_centroids_new[chunk_index, :] = 0
+                        for i in range(num_clusters):
+                            for j in range(num_dimensions):
+                                chunk_centroids_new[chunk_index, i, j] = 0
                         for i in range(chunk_num_cells):
                             best_cluster = cluster_labels[start + i]
                             num_cells_per_cluster_pointer[best_cluster] += 1
