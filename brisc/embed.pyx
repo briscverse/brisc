@@ -18,10 +18,11 @@ cdef inline void get_neighbor_pairs(const float[:, ::1] X,
                                     const unsigned[:, ::1] neighbors,
                                     const float[:, ::1] distances,
                                     unsigned[:, ::1] neighbor_pairs,
-                                    float[::1] average_distances,
+                                    float[::1] total_distances,
                                     unsigned num_threads,
                                     bint& too_large,
-                                    bint& self_neighbors):
+                                    bint& self_neighbors,
+                                    const bint match_parallel):
     cdef unsigned i, j, k, neighbor, thread_index, \
         num_total_neighbors = distances.shape[1], \
         num_neighbors = neighbor_pairs.shape[1], num_PCs = X.shape[1]
@@ -32,15 +33,17 @@ cdef inline void get_neighbor_pairs(const float[:, ::1] X,
     cdef float[::1] scaled_distances_i
 
     num_threads = min(num_threads, num_cells)
-    if num_threads <= 1:
-        # Calculate the average Euclidean distance from each cell to its 4th-,
-        # 5th-, and 6th-nearest neighbors
+    if num_threads <= 1 and not match_parallel:
+        # Calculate the total Euclidean distance from each cell to its 4th-,
+        # 5th-, and 6th-nearest neighbors. (The original implementation uses
+        # the average, but since we are just using this for ranking, avoiding
+        # the division by 3 is fine.)
         for i in range(num_cells):
-            average_distances[i] = (
+            total_distances[i] = (
                 sqrt(distances[i, 3]) + sqrt(distances[i, 4]) +
-                sqrt(distances[i, 5])) / <float> 3
-            if average_distances[i] < <float> 1e-10:
-                average_distances[i] = <float> 1e-10
+                sqrt(distances[i, 5]))
+            if total_distances[i] < <float> 3e-10:
+                total_distances[i] = <float> 3e-10
 
         # Select the `num_neighbors` of each cell's `num_total_neighbors`
         # nearest neighbors with the lowest scaled distances. We define the
@@ -65,7 +68,7 @@ cdef inline void get_neighbor_pairs(const float[:, ::1] X,
                 elif neighbor == i:
                     self_neighbors = True
                     return
-                scaled_distance = distances[i, j] / average_distances[neighbor]
+                scaled_distance = distances[i, j] / total_distances[neighbor]
                 if scaled_distance < worst_distance:
                     max_heap_replace_top(&neighbor_pairs[i, 0],
                                          &scaled_distances_i[0],
@@ -85,11 +88,11 @@ cdef inline void get_neighbor_pairs(const float[:, ::1] X,
 
         with nogil:
             for i in prange(num_cells, num_threads=num_threads):
-                average_distances[i] = (
+                total_distances[i] = (
                     sqrt(distances[i, 3]) + sqrt(distances[i, 4]) +
-                    sqrt(distances[i, 5])) / <float> 3
-                if average_distances[i] < <float> 1e-10:
-                    average_distances[i] = <float> 1e-10
+                    sqrt(distances[i, 5]))
+                if total_distances[i] < <float> 3e-10:
+                    total_distances[i] = <float> 3e-10
 
             thread_scaled_distances_i.resize(num_threads)
             with parallel(num_threads=num_threads):
@@ -108,7 +111,7 @@ cdef inline void get_neighbor_pairs(const float[:, ::1] X,
                             atomic_or(self_neighbors, True)
                             return
                         scaled_distance = \
-                            distances[i, j] / average_distances[neighbor]
+                            distances[i, j] / total_distances[neighbor]
                         if scaled_distance < worst_distance:
                             max_heap_replace_top(
                                 &neighbor_pairs[i, 0],
@@ -122,10 +125,11 @@ cdef inline void get_neighbor_pairs(const float[:, ::1] X,
                         num_neighbors)
 
 
-def sample_mid_near_pairs(const float[:, ::1] X,
-                          unsigned[:, ::1] mid_near_pairs,
-                          const unsigned long long seed,
-                          const unsigned num_threads):
+cdef inline void sample_mid_near_pairs(const float[:, ::1] X,
+                                       unsigned[:, ::1] mid_near_pairs,
+                                       const unsigned long long seed,
+                                       const unsigned num_threads,
+                                       const bint match_parallel):
     cdef unsigned i, j, k, l, sampled_k, closest_cell, second_closest_cell, \
         thread_index, n = X.shape[0], \
         num_mid_near_pairs = mid_near_pairs.shape[1], num_PCs = X.shape[1]
@@ -135,7 +139,7 @@ def sample_mid_near_pairs(const float[:, ::1] X,
     cdef vector[uninitialized_vector[unsigned]] thread_sampled
     cdef unsigned[::1] sampled
 
-    if num_threads == 1:
+    if num_threads == 1 and not match_parallel:
         sampled_buffer.resize(6)
         sampled = <unsigned[:6]> sampled_buffer.data()
         for i in range(n):
@@ -231,13 +235,14 @@ cdef inline void sample_further_pairs(
         const unsigned[:, ::1] neighbor_pairs,
         unsigned[:, ::1] further_pairs,
         const unsigned long long seed,
-        const unsigned num_threads) noexcept nogil:
+        const unsigned num_threads,
+        const bint match_parallel) noexcept nogil:
     cdef unsigned i, j, k, further_pair_index, n = X.shape[0], \
         num_further_pairs = further_pairs.shape[1], \
         num_neighbors = neighbor_pairs.shape[1]
     cdef unsigned long long state
 
-    if num_threads == 1:
+    if num_threads == 1 and not match_parallel:
         for i in range(n):
             state = srand(seed + i)
             for j in range(num_further_pairs):
@@ -294,77 +299,49 @@ cdef inline void sample_further_pairs_nearby(
         num_neighbors = neighbor_pairs.shape[1]
     cdef unsigned long long state
 
-    if num_threads == 1:
-        for i in range(n):
-            state = srand(seed + i)
-            for j in range(num_further_pairs):
-                # Give up after 100 trials, and keep the further pair as-is;
-                # this corrects the original implementation's logic by counting
-                # all types of failures towards the 100 trials, including ones
-                # where the candidate further pair is too far away
-                for count in range(100):
-                    # Sample a random cell...
-                    further_pair_index = randint(n, &state)
+    # Use a parallel loop even when single-threaded, to ensure identical
+    # results regardless of the number of threads
+    for i in prange(n, nogil=True, num_threads=num_threads):
+        state = srand(seed + i)
+        for j in range(num_further_pairs):
+            # Give up after 100 trials, and keep the further pair as-is;
+            # this corrects the original implementation's logic by counting
+            # all types of failures towards the 100 trials, including ones
+            # where the candidate further pair is too far away
+            for count in range(100):
+                # Sample a random cell...
+                further_pair_index = randint(n, &state)
 
-                    # ...that is not this cell...
-                    if further_pair_index == i:
-                        continue
+                # ...that is not this cell...
+                if further_pair_index == i:
+                    continue
 
-                    # ...nor one of its nearest neighbors...
-                    for k in range(num_neighbors):
-                        if further_pair_index == neighbor_pairs[i, k]:
+                # ...nor one of its nearest neighbors...
+                for k in range(num_neighbors):
+                    if further_pair_index == neighbor_pairs[i, k]:
+                        break
+                else:
+                    # ...nor a previously sampled cell...
+                    for k in range(j):
+                        if further_pair_index == further_pairs[i, k]:
                             break
                     else:
-                        # ...nor a previously sampled cell...
-                        for k in range(j):
-                            if further_pair_index == further_pairs[i, k]:
-                                break
+                        # ...nor a cell farther than `max_distance` away
+                        # (in embedding space)
+                        if (embedding[i, 0] -
+                                embedding[further_pair_index, 0]) * \
+                                (embedding[i, 0] -
+                                 embedding[further_pair_index, 0]) + \
+                                (embedding[i, 1] -
+                                 embedding[further_pair_index, 1]) * \
+                                (embedding[i, 1] -
+                                 embedding[further_pair_index, 1]) > \
+                                max_distance_squared:
+                            continue
                         else:
-                            # ...nor a cell farther than `max_distance` away
-                            # (in embedding space)
-                            if (embedding[i, 0] -
-                                    embedding[further_pair_index, 0]) * \
-                                    (embedding[i, 0] -
-                                     embedding[further_pair_index, 0]) + \
-                                    (embedding[i, 1] -
-                                     embedding[further_pair_index, 1]) * \
-                                    (embedding[i, 1] -
-                                     embedding[further_pair_index, 1]) > \
-                                    max_distance_squared:
-                                continue
-                            else:
-                                # Sampling successful - assign the further pair
-                                further_pairs[i, j] = further_pair_index
-                                break
-    else:
-        for i in prange(n, nogil=True, num_threads=num_threads):
-            state = srand(seed + i)
-            for j in range(num_further_pairs):
-                for count in range(100):
-                    further_pair_index = randint(n, &state)
-                    if further_pair_index == i:
-                        continue
-                    for k in range(num_neighbors):
-                        if further_pair_index == neighbor_pairs[i, k]:
+                            # Sampling successful - assign the further pair
+                            further_pairs[i, j] = further_pair_index
                             break
-                    else:
-                        for k in range(j):
-                            if further_pair_index == further_pairs[i, k]:
-                                break
-                        else:
-                            if (embedding[i, 0] -
-                                    embedding[further_pair_index, 0]) * \
-                                    (embedding[i, 0] -
-                                     embedding[further_pair_index, 0]) + \
-                                    (embedding[i, 1] -
-                                     embedding[further_pair_index, 1]) * \
-                                    (embedding[i, 1] -
-                                     embedding[further_pair_index, 1]) > \
-                                    max_distance_squared:
-                                continue
-                            else:
-                                further_pairs[i, j] = further_pair_index
-                                break
 
 
 cdef inline void reformat_for_parallel(
@@ -612,26 +589,6 @@ cdef inline void get_gradient(const float[:, ::1] embedding,
     gradients[i, 1] = gradient_i1
 
 
-cdef inline void get_gradients(const float[:, ::1] embedding,
-                               const unsigned[::1] neighbor_pair_indices,
-                               const unsigned[::1] neighbor_pair_indptr,
-                               const unsigned[::1] mid_near_pair_indices,
-                               const unsigned[::1] mid_near_pair_indptr,
-                               const unsigned[::1] further_pair_indices,
-                               const unsigned[::1] further_pair_indptr,
-                               const float w_neighbors,
-                               const float w_mid_near,
-                               float[:, ::1] gradients):
-    cdef unsigned i
-    cdef unsigned long long num_cells = embedding.shape[0]
-
-    for i in range(num_cells):
-        get_gradient(embedding, neighbor_pair_indices, neighbor_pair_indptr,
-                     mid_near_pair_indices, mid_near_pair_indptr,
-                     further_pair_indices, further_pair_indptr, w_neighbors,
-                     w_mid_near, gradients, i)
-
-
 cdef inline void get_gradients_parallel(
         const float[:, ::1] embedding,
         const unsigned[::1] neighbor_pair_indices,
@@ -714,29 +671,6 @@ cdef inline void get_scaled_gradient(const float[:, ::1] embedding,
 
     gradients[i, 0] = gradient_i0
     gradients[i, 1] = gradient_i1
-
-
-cdef inline void get_scaled_gradients(
-        const float[:, ::1] embedding,
-        const unsigned[::1] neighbor_pair_indices,
-        const unsigned[::1] neighbor_pair_indptr,
-        const unsigned[::1] mid_near_pair_indices,
-        const unsigned[::1] mid_near_pair_indptr,
-        const unsigned[::1] further_pair_indices,
-        const unsigned[::1] further_pair_indptr,
-        const float w_neighbors,
-        const float w_mid_near,
-        const float half_max_distance,
-        float[:, ::1] gradients):
-    cdef unsigned i
-    cdef unsigned long long num_cells = embedding.shape[0]
-
-    for i in range(num_cells):
-        get_scaled_gradient(embedding, neighbor_pair_indices,
-                            neighbor_pair_indptr, mid_near_pair_indices,
-                            mid_near_pair_indptr, further_pair_indices,
-                            further_pair_indptr, w_neighbors, w_mid_near,
-                            half_max_distance, gradients, i)
 
 
 cdef inline void get_scaled_gradients_parallel(
@@ -878,66 +812,6 @@ cdef inline void pacmap_serial_fast(const float[:, ::1] PCs,
             PyErr_CheckSignals()
 
 
-cdef inline void pacmap_serial(const float[:, ::1] PCs,
-                               float[:, ::1] embedding,
-                               float[:, ::1] momentum,
-                               float[:, ::1] velocity,
-                               float[:, ::1] gradients,
-                               const unsigned[::1] neighbor_pair_indices,
-                               const unsigned[::1] neighbor_pair_indptr,
-                               const unsigned[::1] mid_near_pair_indices,
-                               const unsigned[::1] mid_near_pair_indptr,
-                               unsigned[::1] further_pair_indices,
-                               unsigned[::1] further_pair_indptr,
-                               const unsigned num_phase_1_iterations,
-                               const unsigned num_phase_2_iterations,
-                               const unsigned num_phase_3_iterations,
-                               const float learning_rate):
-    cdef unsigned i, iteration, num_iterations = num_phase_1_iterations + \
-        num_phase_2_iterations + num_phase_3_iterations, \
-        w_mid_near_init = 1000
-    cdef unsigned long long num_cells = PCs.shape[0]
-    cdef float iteration_fraction, w_mid_near, w_neighbors, \
-        beta1 = <float> 0.9, beta2 = <float> 0.999
-
-    # Initialize the embedding, momentum and velocity
-    for i in range(num_cells):
-        embedding[i, 0] = <float> 0.01 * PCs[i, 0]
-        embedding[i, 1] = <float> 0.01 * PCs[i, 1]
-    momentum[:] = 0
-    velocity[:] = 0
-
-    # Optimize the embedding
-    for iteration in range(num_iterations):
-        if iteration < num_phase_1_iterations:
-            iteration_fraction = <float> iteration / num_phase_1_iterations
-            w_mid_near = (<float> 1 - iteration_fraction) * w_mid_near_init + \
-                iteration_fraction * <float> 3
-            w_neighbors = 2
-        elif iteration < num_phase_1_iterations + num_phase_2_iterations:
-            w_mid_near = 3
-            w_neighbors = 3
-        else:
-            w_mid_near = 0
-            w_neighbors = 1
-
-        # Calculate gradients
-        get_gradients(embedding, neighbor_pair_indices,
-                      neighbor_pair_indptr, mid_near_pair_indices,
-                      mid_near_pair_indptr, further_pair_indices,
-                      further_pair_indptr, w_neighbors, w_mid_near,
-                      gradients)
-
-        # Update the embedding based on the gradients, via the Adam optimizer
-        update_embedding_adam(embedding, gradients, momentum, velocity,
-                              num_cells, beta1, beta2, learning_rate,
-                              iteration)
-
-        # Check for KeyboardInterrupts
-        if iteration % 8 == 7:
-            PyErr_CheckSignals()
-
-
 cdef inline void pacmap_parallel(const float[:, ::1] PCs,
                                  float[:, ::1] embedding,
                                  float[:, ::1] momentum,
@@ -1011,7 +885,7 @@ def pacmap(const float[:, ::1] PCs,
            float[:, ::1] momentum,
            float[:, ::1] velocity,
            float[:, ::1] gradients,
-           float[::1] average_distances,
+           float[::1] total_distances,
            unsigned[:, ::1] neighbor_pairs,
            unsigned[:, ::1] mid_near_pairs,
            unsigned[:, ::1] further_pairs,
@@ -1042,8 +916,8 @@ def pacmap(const float[:, ::1] PCs,
     # Select the `num_neighbors` of the `num_total_neighbors`
     # nearest-neighbor pairs with the lowest scaled distances
     get_neighbor_pairs(PCs, neighbors, distances, neighbor_pairs,
-                       average_distances, num_threads, too_large,
-                       self_neighbors)
+                       total_distances, num_threads, too_large,
+                       self_neighbors, match_parallel)
 
     # If any nearest-neighbor indices were out of bounds or equal to the
     # cell's own index, raise an error
@@ -1067,11 +941,13 @@ def pacmap(const float[:, ::1] PCs,
         raise ValueError(error_message)
 
     # Sample mid-near pairs
-    sample_mid_near_pairs(PCs, mid_near_pairs, seed, num_threads)
+    sample_mid_near_pairs(PCs, mid_near_pairs, seed, num_threads,
+                          match_parallel)
 
     # Sample further pairs
     sample_further_pairs(PCs, neighbor_pairs, further_pairs,
-                         seed + num_cells * num_mid_near_pairs, num_threads)
+                         seed + num_cells * num_mid_near_pairs, num_threads,
+                         match_parallel)
 
     # If multithreaded, or single-threaded with `match_parallel=True`,
     # reformat the three lists of pairs to ensure deterministic
@@ -1113,20 +989,14 @@ def pacmap(const float[:, ::1] PCs,
                                           further_pair_indptr, num_threads)
         PyErr_CheckSignals()
 
-        if num_threads <= 1:
-            pacmap_serial(PCs, embedding, momentum, velocity, gradients,
-                          neighbor_pair_indices, neighbor_pair_indptr,
-                          mid_near_pair_indices, mid_near_pair_indptr,
-                          further_pair_indices, further_pair_indptr,
-                          num_phase_1_iterations, num_phase_2_iterations,
-                          num_phase_3_iterations, learning_rate)
-        else:
-            pacmap_parallel(PCs, embedding, momentum, velocity, gradients,
-                            neighbor_pair_indices, neighbor_pair_indptr,
-                            mid_near_pair_indices, mid_near_pair_indptr,
-                            further_pair_indices, further_pair_indptr,
-                            num_phase_1_iterations, num_phase_2_iterations,
-                            num_phase_3_iterations, learning_rate, num_threads)
+        # Use the parallel implementation even when single-threaded, to
+        # ensure identical results regardless of the number of threads
+        pacmap_parallel(PCs, embedding, momentum, velocity, gradients,
+                        neighbor_pair_indices, neighbor_pair_indptr,
+                        mid_near_pair_indices, mid_near_pair_indptr,
+                        further_pair_indices, further_pair_indptr,
+                        num_phase_1_iterations, num_phase_2_iterations,
+                        num_phase_3_iterations, learning_rate, num_threads)
 
 
 cdef inline void localmap_serial_fast(const float[:, ::1] PCs,
@@ -1196,88 +1066,6 @@ cdef inline void localmap_serial_fast(const float[:, ::1] PCs,
             sample_further_pairs_nearby(embedding, neighbor_pairs,
                                         further_pairs, seed + iteration,
                                         max_distance_squared, num_threads=1)
-
-        # Check for KeyboardInterrupts
-        elif iteration % 8 == 7:
-            PyErr_CheckSignals()
-
-
-cdef inline void localmap_serial(const float[:, ::1] PCs,
-                                 float[:, ::1] embedding,
-                                 float[:, ::1] momentum,
-                                 float[:, ::1] velocity,
-                                 float[:, ::1] gradients,
-                                 const unsigned[:, ::1] neighbor_pairs,
-                                 const unsigned[::1] neighbor_pair_indices,
-                                 const unsigned[::1] neighbor_pair_indptr,
-                                 const unsigned[::1] mid_near_pair_indices,
-                                 const unsigned[::1] mid_near_pair_indptr,
-                                 unsigned[:, ::1] further_pairs,
-                                 unsigned[::1] further_pair_indices,
-                                 unsigned[::1] further_pair_indptr,
-                                 const unsigned num_phase_1_iterations,
-                                 const unsigned num_phase_2_iterations,
-                                 const unsigned num_phase_3_iterations,
-                                 const float learning_rate,
-                                 const float max_distance,
-                                 const unsigned long long seed):
-    cdef unsigned i, iteration, num_iterations = num_phase_1_iterations + \
-        num_phase_2_iterations + num_phase_3_iterations, \
-        w_mid_near_init = 1000
-    cdef unsigned long long num_cells = PCs.shape[0]
-    cdef float iteration_fraction, w_mid_near, w_neighbors, \
-        half_max_distance = <float> 0.5 * max_distance, \
-        max_distance_squared = max_distance * max_distance, \
-        beta1 = <float> 0.9, beta2 = <float> 0.999
-
-    # Initialize the embedding, momentum and velocity
-    for i in range(num_cells):
-        embedding[i, 0] = <float> 0.01 * PCs[i, 0]
-        embedding[i, 1] = <float> 0.01 * PCs[i, 1]
-    momentum[:] = 0
-    velocity[:] = 0
-
-    # Optimize the embedding
-    for iteration in range(num_iterations):
-        if iteration < num_phase_1_iterations:
-            iteration_fraction = <float> iteration / num_phase_1_iterations
-            w_mid_near = (<float> 1 - iteration_fraction) * w_mid_near_init + \
-                iteration_fraction * <float> 3
-            w_neighbors = 2
-        elif iteration < num_phase_1_iterations + num_phase_2_iterations:
-            w_mid_near = 3
-            w_neighbors = 3
-        else:
-            w_mid_near = 0
-            w_neighbors = 1
-
-        # Calculate gradients
-        if iteration >= num_phase_1_iterations + num_phase_2_iterations:
-            get_scaled_gradients(embedding, neighbor_pair_indices,
-                                 neighbor_pair_indptr, mid_near_pair_indices,
-                                 mid_near_pair_indptr, further_pair_indices,
-                                 further_pair_indptr, w_neighbors, w_mid_near,
-                                 half_max_distance, gradients)
-        else:
-            get_gradients(embedding, neighbor_pair_indices,
-                          neighbor_pair_indptr, mid_near_pair_indices,
-                          mid_near_pair_indptr, further_pair_indices,
-                          further_pair_indptr, w_neighbors, w_mid_near,
-                          gradients)
-
-        # Update the embedding based on the gradients, via the Adam optimizer
-        update_embedding_adam(embedding, gradients, momentum, velocity,
-                              num_cells, beta1, beta2, learning_rate,
-                              iteration)
-
-        # Re-sample further pairs every 10 iterations in phase 3
-        if iteration >= num_phase_1_iterations + num_phase_2_iterations \
-                and iteration % 10 == 0:
-            sample_further_pairs_nearby(embedding, neighbor_pairs,
-                                        further_pairs, seed + iteration,
-                                        max_distance_squared, num_threads=1)
-            reformat_for_parallel(further_pairs, further_pair_indices,
-                                  further_pair_indptr, num_threads=1)
 
         # Check for KeyboardInterrupts
         elif iteration % 8 == 7:
@@ -1379,7 +1167,7 @@ def localmap(const float[:, ::1] PCs,
              float[:, ::1] momentum,
              float[:, ::1] velocity,
              float[:, ::1] gradients,
-             float[::1] average_distances,
+             float[::1] total_distances,
              unsigned[:, ::1] neighbor_pairs,
              unsigned[:, ::1] mid_near_pairs,
              unsigned[:, ::1] further_pairs,
@@ -1411,8 +1199,8 @@ def localmap(const float[:, ::1] PCs,
     # Select the `num_neighbors` of the `num_total_neighbors`
     # nearest-neighbor pairs with the lowest scaled distances
     get_neighbor_pairs(PCs, neighbors, distances, neighbor_pairs,
-                       average_distances, num_threads, too_large,
-                       self_neighbors)
+                       total_distances, num_threads, too_large,
+                       self_neighbors, match_parallel)
 
     # If any nearest-neighbor indices were out of bounds or equal to the
     # cell's own index, raise an error
@@ -1436,11 +1224,13 @@ def localmap(const float[:, ::1] PCs,
         raise ValueError(error_message)
 
     # Sample mid-near pairs
-    sample_mid_near_pairs(PCs, mid_near_pairs, seed, num_threads)
+    sample_mid_near_pairs(PCs, mid_near_pairs, seed, num_threads,
+                          match_parallel)
 
     # Sample further pairs
     sample_further_pairs(PCs, neighbor_pairs, further_pairs,
-                         seed + num_cells * num_mid_near_pairs, num_threads)
+                         seed + num_cells * num_mid_near_pairs, num_threads,
+                         match_parallel)
 
     # If multithreaded, or single-threaded with `match_parallel=True`,
     # reformat the three lists of pairs to ensure deterministic
@@ -1483,24 +1273,16 @@ def localmap(const float[:, ::1] PCs,
                                           further_pair_indptr, num_threads)
         PyErr_CheckSignals()
 
-        if num_threads <= 1:
-            localmap_serial(PCs, embedding, momentum, velocity, gradients,
-                            neighbor_pairs, neighbor_pair_indices,
-                            neighbor_pair_indptr, mid_near_pair_indices,
-                            mid_near_pair_indptr, further_pairs,
-                            further_pair_indices, further_pair_indptr,
-                            num_phase_1_iterations, num_phase_2_iterations,
-                            num_phase_3_iterations, learning_rate,
-                            max_distance, seed)
-        else:
-            localmap_parallel(PCs, embedding, momentum, velocity, gradients,
-                              neighbor_pairs, neighbor_pair_indices,
-                              neighbor_pair_indptr, mid_near_pair_indices,
-                              mid_near_pair_indptr, further_pairs,
-                              further_pair_indices, further_pair_indptr,
-                              num_phase_1_iterations, num_phase_2_iterations,
-                              num_phase_3_iterations, learning_rate,
-                              max_distance, seed, num_threads)
+        # Use the parallel implementation even when single-threaded, to
+        # ensure identical results regardless of the number of threads
+        localmap_parallel(PCs, embedding, momentum, velocity, gradients,
+                          neighbor_pairs, neighbor_pair_indices,
+                          neighbor_pair_indptr, mid_near_pair_indices,
+                          mid_near_pair_indptr, further_pairs,
+                          further_pair_indices, further_pair_indptr,
+                          num_phase_1_iterations, num_phase_2_iterations,
+                          num_phase_3_iterations, learning_rate,
+                          max_distance, seed, num_threads)
 
 
 def umap_fuzzy_weights(const float[:, ::1] distances,
