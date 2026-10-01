@@ -163,7 +163,8 @@ try:
         elif mac:
             normalize_compiler_flags = compiler_flags + [
                 '-fno-associative-math', '-fno-reciprocal-math',
-                '-fno-finite-math-only', '-ffp-contract=off']
+                '-fno-finite-math-only', '-ffp-contract=off',
+                '-Wno-error=overriding-option']
         else:
             normalize_compiler_flags = compiler_flags + [
                 '-fno-associative-math', '-fno-reciprocal-math',
