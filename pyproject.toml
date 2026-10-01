@@ -18,7 +18,7 @@ dependencies = [
     "matplotlib>=3.5.0",
     "numpy>=1.17.0",
     "pandas",
-    "polars>=1.41.0",
+    "polars>=1.43.0",
     "pyarrow>=0.17.0",
     "ryp",
     "scipy>=0.16.0",
@@ -68,9 +68,7 @@ curl -L https://anaconda.org/conda-forge/llvm-openmp/11.1.0/download/osx-64/llvm
 archs = ["AMD64"]
 
 [tool.pytest.ini_options]
-filterwarnings = [
-    "error",
-]
+filterwarnings = ["error"]
 
 [project.urls]
 Homepage = "https://brisc.run"

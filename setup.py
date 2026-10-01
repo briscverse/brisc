@@ -152,7 +152,7 @@ try:
             compiler_flags.append(march)
         # normalize.pyx must be compiled without reassociation, which would
         # break log1p()'s rounding correction, and without reciprocal math or
-        # fused multiply-add, which would cause roundoff differences between
+        # finite-math assumptions, which cause roundoff differences between
         # vectorized and non-vectorized code paths. MSVC can't disable these
         # individually, so it uses /fp:precise instead of /fp:fast.
         if windows:
@@ -162,7 +162,7 @@ try:
         else:
             normalize_compiler_flags = compiler_flags + [
                 '-fno-associative-math', '-fno-reciprocal-math',
-                '-ffp-contract=off']
+                '-fno-finite-math-only']
         if variant_name:
             # Copy each Cython source file to a separate temporary directory
             # for each variant
