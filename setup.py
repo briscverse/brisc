@@ -152,13 +152,18 @@ try:
             compiler_flags.append(march)
         # normalize.pyx must be compiled without reassociation, which would
         # break log1p()'s rounding correction, and without reciprocal math or
-        # finite-math assumptions, which cause roundoff differences between
-        # vectorized and non-vectorized code paths. MSVC can't disable these
-        # individually, so it uses /fp:precise instead of /fp:fast.
+        # finite-math assumptions (or fused multiply-add on Mac), which cause
+        # roundoff differences between vectorized and non-vectorized code
+        # paths. MSVC can't disable these individually, so it uses /fp:precise
+        # instead of /fp:fast.
         if windows:
             normalize_compiler_flags = [
                 '/fp:precise' if flag == '/fp:fast' else flag
                 for flag in compiler_flags]
+        elif mac:
+            normalize_compiler_flags = compiler_flags + [
+                '-fno-associative-math', '-fno-reciprocal-math',
+                '-fno-finite-math-only', '-ffp-contract=off']
         else:
             normalize_compiler_flags = compiler_flags + [
                 '-fno-associative-math', '-fno-reciprocal-math',
