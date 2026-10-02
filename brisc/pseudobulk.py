@@ -9,10 +9,10 @@ from itertools import islice, pairwise
 from pathlib import Path
 from scipy.special import stdtrit
 from textwrap import fill
-from threadpoolctl import threadpool_limits
 from typing import Any, Callable, ItemsView, KeysView, Literal, Mapping, \
     NoReturn, Sequence, ValuesView
 from .de import DE
+from .threadpoolctl import threadpool_limits
 from .type_aliases import Indexer, Scalar, SingleCellColumn, PseudobulkColumn
 from .utils import array_equal, bonferroni, cast_to_Enum, check_bounds, \
     check_dtype, check_type, check_types, concatenate, fdr, import_cython, \

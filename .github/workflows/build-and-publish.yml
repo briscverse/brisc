@@ -89,8 +89,9 @@ jobs:
             -c conda-forge
             python=3.13 pytest pip huggingface_hub
             anndata h5py matplotlib-base numpy pandas polars pyarrow
-            ryp scikit-misc scipy threadpoolctl
+            ryp scikit-misc scipy
             ${{ startsWith(matrix.os, 'windows') && 'r-biocmanager' || '-c bioconda bioconductor-limma' }}
+            ${{ startsWith(matrix.os, 'macos') && 'libblas=*=*newaccelerate' || '' }}
       - name: Install brisc wheel
         run: pip install --no-index --find-links wheelhouse --no-deps --only-binary ':all:' brisc
       - name: Install limma via BiocManager (Windows only)
@@ -101,6 +102,9 @@ jobs:
       - name: Run tests
         run: |
           unset R_HOME R_LIBS_USER
+          if [ "$RUNNER_OS" = macOS ]; then
+            export VECLIB_MAXIMUM_THREADS=1
+          fi
           pytest tests/
 
   publish:

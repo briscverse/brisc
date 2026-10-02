@@ -23,7 +23,6 @@ dependencies = [
     "ryp",
     "scipy>=0.16.0",
     "scikit-misc",
-    "threadpoolctl"
 ]
 
 [project.optional-dependencies]

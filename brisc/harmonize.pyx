@@ -243,12 +243,16 @@ cdef inline void normalize_rows_inplace_parallel(
 
 def normalize_rows(const float[:, ::1] arr,
                    float[:, ::1] out,
-                   unsigned num_threads):
+                   unsigned num_threads,
+                   const bint is_mac):
     cdef unsigned i, j, num_rows = arr.shape[0], num_columns = arr.shape[1]
     cdef float norm
 
+    # Force the parallel path for Mac for floating-point consistency between 1
+    # and multiple threads
+
     num_threads = min(num_threads, num_rows)
-    if num_threads <= 1:
+    if num_threads <= 1 and not is_mac:
         for i in range(num_rows):
             norm = 0
             for j in range(num_columns):

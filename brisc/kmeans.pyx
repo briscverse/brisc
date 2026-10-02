@@ -933,7 +933,7 @@ def kmeans(const float[:, ::1] X,
         cluster_tile_size = num_clusters
 
     # Force the parallel path for Mac for floating-point consistency between 1
-    # and multiple threads.
+    # and multiple threads
 
     num_threads = min(num_threads, num_chunks)
     if num_threads <= 1 and not is_mac:

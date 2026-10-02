@@ -44,6 +44,10 @@ try:
 finally:
     signal.signal(signal.SIGINT, original_sigint_handler)
 
+# Import threadpoolctl before anything loads an OpenMP runtime, since it sets
+# KMP_DUPLICATE_LIB_OK
+from .threadpoolctl import brisc_blas
+
 # On Linux with thread pinning enabled, MKL BLAS narrows the thread affinity
 # mask to one core when first executed, which would make all of brisc run
 # single-threaded if not fixed. Fix this now by running a BLAS function, then
@@ -54,17 +58,10 @@ if hasattr(os, 'sched_setaffinity'):
     np.linalg.svd([[0]])
     os.sched_setaffinity(0, range(os.cpu_count()))
 
-# Ignore harmless warnings about libiomp/libomp mismatch on Windows, which come
-# from compiling with /openmp:llvm but calling BLAS functions compiled with
-# Intel OpenMP
-if sys.platform == 'win32':
-    import warnings
-    warnings.filterwarnings(action='ignore', module='threadpoolctl',
-                            category=RuntimeWarning)
-
 # Expose the public API
 from .single_cell import SingleCell
 from .pseudobulk import Pseudobulk
 from .de import DE
 from .concatenate import concat_obs, concat_var
-__all__ = 'SingleCell', 'Pseudobulk', 'DE', 'concat_obs', 'concat_var'
+__all__ = 'SingleCell', 'Pseudobulk', 'DE', 'brisc_blas', 'concat_obs', \
+    'concat_var'

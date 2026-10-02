@@ -16,10 +16,10 @@ from itertools import chain, islice
 from pathlib import Path
 from scipy import sparse
 from textwrap import fill
-from threadpoolctl import threadpool_info, threadpool_limits
 from typing import Any, Callable, Literal, Mapping, NoReturn, Sequence
 from .pseudobulk import Pseudobulk
 from .sparse import csc_array, csr_array
+from .threadpoolctl import brisc_blas, threadpool_limits
 from .type_aliases import Color, Indexer, Scalar, UnsDict, UnsItem, \
     SingleCellColumn
 from .utils import array_equal, cast_to_Enum, check_bounds, check_dtype, \
@@ -12494,8 +12494,7 @@ class SingleCell:
         # Cap to 64 threads for OpenBLAS to avoid the error "OpenBLAS : Program
         # is Terminated. Because you tried to allocate too many memory
         # regions".
-        if num_threads > 64 and any(lib.get('internal_api') == 'openblas'
-                                    for lib in threadpool_info()):
+        if num_threads > 64 and brisc_blas() == 'openblas':
             num_threads = 64
 
         # Subset PCs to QCed cells only, if `QC_column` is not `None`
@@ -12594,6 +12593,7 @@ class SingleCell:
         centroids_new = np.empty((num_clusters, num_dimensions),
                                  dtype=np.float32)
         num_cells_per_cluster = np.empty(num_clusters, dtype=np.uint32)
+        is_mac = sys.platform == 'darwin'
         with threadpool_limits(
                 1, user_api=None if num_threads == 1 else 'blas'):
             iterations_until_convergence = kmeans(
@@ -12606,8 +12606,8 @@ class SingleCell:
                 num_kmeans_iterations=num_kmeans_iterations,
                 tolerance=kmeans_tolerance,
                 oversampling_factor=oversampling_factor, seed=seed,
-                chunk_size=chunk_size_kmeans,
-                is_mac=sys.platform == 'darwin', num_threads=num_threads)
+                chunk_size=chunk_size_kmeans, is_mac=is_mac,
+                num_threads=num_threads)
         if iterations_until_convergence & 1:
             centroids = centroids_new
         del centroids_new, min_distances
@@ -12686,8 +12686,7 @@ class SingleCell:
                      num_neighbors=num_neighbors,
                      num_clusters_searched=num_clusters_searched,
                      chunk_size_kmeans=chunk_size_kmeans,
-                     chunk_size_search=chunk_size_search,
-                     is_mac=sys.platform == 'darwin',
+                     chunk_size_search=chunk_size_search, is_mac=is_mac,
                      num_threads=num_threads)
         del centroid_distances, nearest_clusters, cell_norms
 
@@ -13770,8 +13769,7 @@ class SingleCell:
         # Cap to 64 threads for OpenBLAS to avoid the error "OpenBLAS : Program
         # is Terminated. Because you tried to allocate too many memory
         # regions".
-        if num_threads > 64 and any(lib.get('internal_api') == 'openblas'
-                                    for lib in threadpool_info()):
+        if num_threads > 64 and brisc_blas() == 'openblas':
             num_threads = 64
 
         # Check that `original` is Boolean, and `False` unless `num_threads=1`
@@ -13912,7 +13910,8 @@ class SingleCell:
             Z = numa_zeros((num_cells, num_PCs), dtype=np.float32)
             cluster_labels = numa_zeros(num_cells, dtype=np.uint32)
             min_distances = numa_zeros(num_cells, dtype=np.float32)
-        normalize_rows(arr=PCs, out=Z, num_threads=num_threads)
+        is_mac = sys.platform == 'darwin'
+        normalize_rows(arr=PCs, out=Z, num_threads=num_threads, is_mac=is_mac)
 
         # Run k-means clustering on `Z`. Since `Y` and `Y_new` are swapped
         # every iteration, `Y_new` will contain the final `Y` when doing an odd
@@ -13932,8 +13931,8 @@ class SingleCell:
                 num_kmeans_iterations=num_kmeans_iterations,
                 tolerance=kmeans_tolerance,
                 oversampling_factor=oversampling_factor, seed=seed,
-                chunk_size=chunk_size_kmeans,
-                is_mac=sys.platform == 'darwin', num_threads=num_threads)
+                chunk_size=chunk_size_kmeans, is_mac=is_mac,
+                num_threads=num_threads)
         if iterations_until_convergence & 1:
             Y = Y_new
         del Y_new, cluster_labels, min_distances
@@ -14427,8 +14426,7 @@ class SingleCell:
         # Cap to 64 threads for OpenBLAS to avoid the error "OpenBLAS : Program
         # is Terminated. Because you tried to allocate too many memory
         # regions".
-        if num_threads > 64 and any(lib.get('internal_api') == 'openblas'
-                                    for lib in threadpool_info()):
+        if num_threads > 64 and brisc_blas() == 'openblas':
             num_threads = 64
 
         # Check that `verbose` is Boolean
@@ -14577,6 +14575,7 @@ class SingleCell:
         centroids_new = np.empty((num_clusters, num_dimensions),
                                  dtype=np.float32)
         num_cells_per_cluster = np.empty(num_clusters, dtype=np.uint32)
+        is_mac = sys.platform == 'darwin'
         with threadpool_limits(
                 1, user_api=None if num_threads == 1 else 'blas'):
             iterations_until_convergence = kmeans(
@@ -14589,7 +14588,7 @@ class SingleCell:
                 num_kmeans_iterations=num_kmeans_iterations,
                 tolerance=kmeans_tolerance,
                 oversampling_factor=oversampling_factor, seed=seed,
-                chunk_size=chunk_size_kmeans, is_mac=sys.platform == 'darwin',
+                chunk_size=chunk_size_kmeans, is_mac=is_mac,
                 num_threads=num_threads)
         if iterations_until_convergence & 1:
             centroids = centroids_new
@@ -14678,8 +14677,7 @@ class SingleCell:
                       query_norms=query_norms, num_neighbors=num_neighbors,
                       num_clusters_searched=num_clusters_searched,
                       chunk_size_kmeans=chunk_size_kmeans,
-                      chunk_size_search=chunk_size_search,
-                      is_mac=sys.platform == 'darwin',
+                      chunk_size_search=chunk_size_search, is_mac=is_mac,
                       num_threads=num_threads)
         del centroid_distances, nearest_clusters, query_norms
 
