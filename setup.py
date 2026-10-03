@@ -97,6 +97,7 @@ try:
                 '/wd4018',  # signed/unsigned mismatch
                 '/wd4060',  # switch statement contains no case/default labels
                 '/wd4125',  # decimal digit terminates octal escape sequence
+                '/wd4127',  # conditional expression is constant
                 '/wd4146',  # unary minus applied to unsigned type
                 '/wd4244',  # conversion with possible loss of data
                 '/wd4245',  # signed/unsigned mismatch
@@ -146,7 +147,7 @@ try:
                 # Out-of-bounds warnings
                 '-Warray-bounds=2', '-Wstringop-overflow=4',
                 # C++ and optimizer warnings
-                '-Wsign-promo', '-Wdisabled-optimization']
+                '-Wsign-promo']
             linker_flags = ['-fopenmp', '-s']
         if march:
             compiler_flags.append(march)
