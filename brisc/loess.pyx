@@ -35,9 +35,9 @@
 #   `loess_model.drop_square` return the values that were set (scikit-misc
 #   reinterprets their int storage as doubles, so e.g. `[False, True]` reads
 #   back as `[True, False]`)
-# - confidence intervals are NaN in the cases where scikit-misc loops forever
-#   computing the t quantile, which happens for some negative or infinite
-#   degrees of freedom (e.g. for small fits with `surface='direct'`)
+# - an error is raised in the cases where scikit-misc loops forever computing
+#   the t quantile, which happens for some negative or infinite degrees of
+#   freedom (e.g. for small fits with `surface='direct'`)
 # - warning messages are always intact; scikit-misc builds them in a stack
 #   buffer that is no longer live when Python reads it, so they are
 #   occasionally garbage
@@ -104,12 +104,11 @@
 cimport cython
 from libc.float cimport DBL_EPSILON, DBL_MAX, DBL_MIN
 from libc.limits cimport INT_MAX
-from libc.math cimport NAN, ceil, copysign, exp, fabs, floor, lgamma, log, \
-    pow, sqrt
 from libc.stdio cimport snprintf
 from libc.stdlib cimport calloc, free, malloc, qsort
+from libcpp.cmath cimport abs, ceil, copysign, exp, floor, lgamma, log, pow, \
+    sqrt
 from scipy.linalg cimport cython_blas, cython_lapack
-
 import numpy as np
 
 ###############################################################################
@@ -260,18 +259,6 @@ cdef void ehg184(const char* s, const double* x, int n,
 # Fortran intrinsics
 ###############################################################################
 
-# gfortran evaluates `min(a, b)` as `b < a ? b : a` and `max(a, b)` as
-# `b > a ? b : a`; these only differ from other definitions when an argument
-# is NaN
-
-cdef inline double f77_min(double a, double b) noexcept nogil:
-    return b if b < a else a
-
-
-cdef inline double f77_max(double a, double b) noexcept nogil:
-    return b if b > a else a
-
-
 cdef inline int ifloor(double x) noexcept nogil:
     cdef int result = <int> x
     if result > x:
@@ -363,11 +350,11 @@ cdef void ehg126(int d, int n, int vc, const double* x, double* v,
         beta = -machin
         for i in range(1, n + 1):
             t = x[(i - 1) + (k - 1) * n]
-            alpha = f77_min(alpha, t)
-            beta = f77_max(beta, t)
+            alpha = min(alpha, t)
+            beta = max(beta, t)
         # Expand the box a little
-        mu = 0.005 * f77_max(beta - alpha, 1e-10 * f77_max(
-            fabs(alpha), fabs(beta)) + 1e-30)
+        mu = 0.005 * max(beta - alpha,
+                         1e-10 * max(abs(alpha), abs(beta)) + 1e-30)
         alpha = alpha - mu
         beta = beta + mu
         v[(k - 1) * nvmax] = alpha
@@ -501,7 +488,7 @@ cdef void ehg127(const double* q, int n, int d, int nf, double f,
             tmp = x[(i3 - 1) + (j - 1) * n] - i4
             dist[i3 - 1] = dist[i3 - 1] + tmp * tmp
     ehg106(1, n, nf, 1, dist, psi, n)
-    rho = dist[psi[nf - 1] - 1] * f77_max(1.0, f)
+    rho = dist[psi[nf - 1] - 1] * max(1.0, f)
     if rho <= 0:
         ehg182(120)
 
@@ -512,7 +499,7 @@ cdef void ehg127(const double* q, int n, int d, int nf, double f,
         tmp = w[i3 - 1]
         tmp3 = 1 - tmp * tmp * tmp
         w[i3 - 1] = sqrt(rw[psi[i3 - 1] - 1] * (tmp3 * tmp3 * tmp3))
-    if fabs(w[idamax(nf, w, 1) - 1]) == 0:
+    if abs(w[idamax(nf, w, 1) - 1]) == 0:
         ehg184("at ", q, dd, 1)
         ehg184("radius ", &rho, 1, 1)
         ehg182(121)
@@ -581,7 +568,7 @@ cdef void ehg127(const double* q, int n, int d, int nf, double f,
     if not info == 0:
         ehg182(182)
     tol[0] = sigma[0] * (100 * machep)
-    rcond[0] = f77_min(rcond[0], sigma[k[0] - 1] / sigma[0])
+    rcond[0] = min(rcond[0], sigma[k[0] - 1] / sigma[0])
     if sigma[k[0] - 1] <= tol[0]:
         sing[0] = sing[0] + 1
         if sing[0] == 1:
@@ -700,7 +687,7 @@ cdef void ehg141(double trl, int n, int deg, int k, int d, int nsing,
         ehg184("Chernobyl! trL<k", &trl, 1, 1)
     elif z < 0:
         ehg184("Chernobyl! trL>n", &trl, 1, 1)
-    z = f77_min(1.0, f77_max(0.0, z))
+    z = min(1.0, max(0.0, z))
     zz[0] = z
     c4 = exp(ehg176(zz))
     i = 1 + 3 * (min(d, 4) - 1 + 4 * (deg - 1))
@@ -881,7 +868,7 @@ cdef void ehg197(int deg, int d, double f, int* dk,
     if deg == 2:
         dk[0] = ((d + 2) * (d + 1)) / 2
     g1 = (-0.08125 * d + 0.13) * d + 1.05
-    trl[0] = dk[0] * (1 + f77_max(0.0, (g1 - f) / f))
+    trl[0] = dk[0] * (1 + max(0.0, (g1 - f) / f))
 
 
 cdef inline void hermite(double h, double* phi0, double* phi1, double* psi0,
@@ -1539,7 +1526,7 @@ cdef void lowesw(const double* res, int n, double* rw,
     cdef double cmad, rsmall, ratio, tmp
     # Find median of absolute residuals
     for i1 in range(1, n + 1):
-        rw[i1 - 1] = fabs(res[i1 - 1])
+        rw[i1 - 1] = abs(res[i1 - 1])
     for identi in range(1, n + 1):
         pi[identi - 1] = identi
     nh = ifloor(<double> n / 2.0) + 1
@@ -1574,7 +1561,7 @@ cdef void lowesp(int n, const double* y, const double* yhat,
     cdef int i2, i3, i, m
     # Median absolute deviation (using partial sort)
     for i in range(1, n + 1):
-        ytilde[i - 1] = fabs(y[i - 1] - yhat[i - 1]) * sqrt(pwgts[i - 1])
+        ytilde[i - 1] = abs(y[i - 1] - yhat[i - 1]) * sqrt(pwgts[i - 1])
         pi[i - 1] = i
     m = ifloor(<double> n / 2.0) + 1
     ehg106(1, n, m, 1, ytilde, pi, n)
@@ -1710,8 +1697,8 @@ cdef void ehg129(int l, int u, int d, const double* x, const int* pi, int n,
         beta = -machin
         for i in range(l, u + 1):
             t = x[(pi[i - 1] - 1) + (k - 1) * n]
-            alpha = f77_min(alpha, x[(pi[i - 1] - 1) + (k - 1) * n])
-            beta = f77_max(beta, t)
+            alpha = min(alpha, x[(pi[i - 1] - 1) + (k - 1) * n])
+            beta = max(beta, t)
         sigma[k - 1] = beta - alpha
 
 
@@ -2476,7 +2463,7 @@ cdef double invibeta(double p, double a, double b) noexcept nogil:
         pm = ibeta(qm, a, b)
         qdiff = qr - ql
         pdiff = pm - p
-        if fabs(qdiff) < DBL_EPSILON * qm or fabs(pdiff) < DBL_EPSILON:
+        if abs(qdiff) < DBL_EPSILON * qm or abs(pdiff) < DBL_EPSILON:
             return qm
         if pdiff < 0:
             ql = qm
@@ -2491,8 +2478,7 @@ cdef double invibeta(double p, double a, double b) noexcept nogil:
         pm = ibeta(qm, a, b)
         qdiff = qr - ql
         pdiff = pm - p
-        if fabs(qdiff) < 2 * DBL_EPSILON * qm or \
-                fabs(pdiff) < 2 * DBL_EPSILON:
+        if abs(qdiff) < 2 * DBL_EPSILON * qm or abs(pdiff) < 2 * DBL_EPSILON:
             return qm
         if pdiff < 0:
             ql = qm
@@ -2507,7 +2493,7 @@ cdef double invibeta(double p, double a, double b) noexcept nogil:
 
 cdef double qt(double p, double df) noexcept nogil:
     cdef double t
-    t = invibeta(fabs(2 * p - 1), 0.5, df / 2)
+    t = invibeta(abs(2 * p - 1), 0.5, df / 2)
     return (1 if p > 0.5 else -1) * sqrt(t * df / (1 - t))
 
 
@@ -2562,16 +2548,19 @@ cdef double ibeta(double x, double a, double b) noexcept nogil:
         next = pn[4] / pn[5]
         for i in range(4):
             pn[i] = pn[i + 2]
-        if fabs(pn[4]) >= DBL_MAX:
+        if abs(pn[4]) >= DBL_MAX:
             for i in range(4):
                 pn[i] /= DBL_MAX
-        if fabs(pn[4]) <= DBL_MIN:
+        if abs(pn[4]) <= DBL_MIN:
             for i in range(4):
                 pn[i] /= DBL_MIN
-        if not fabs(next - prev) > DBL_EPSILON * prev:
+        if not abs(next - prev) > DBL_EPSILON * prev:
             break
         if count == max_count:
-            return NAN
+            with gil:
+                error_message = \
+                    'convergence failure in ibeta() during loess fitting'
+                raise RuntimeError(error_message)
     factor = a * log(x) + (b - 1) * log(1 - x)
     factor -= lgamma(a + 1) + lgamma(b) - lgamma(a + b)
     I = exp(factor) * next
