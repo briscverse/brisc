@@ -89,7 +89,7 @@ jobs:
             -c conda-forge
             python=3.13 pytest pip huggingface_hub
             anndata h5py matplotlib-base numpy pandas polars pyarrow
-            ryp scikit-misc scipy
+            ryp scipy
             ${{ startsWith(matrix.os, 'windows') && 'r-biocmanager' || '-c bioconda bioconductor-limma' }}
             ${{ startsWith(matrix.os, 'macos') && 'libblas=*=*newaccelerate' || '' }}
       - name: Install brisc wheel

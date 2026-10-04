@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "brisc"
-version = "0.1.7"
+version = "0.1.8"
 description = "Fast single-cell toolkit"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -22,7 +22,6 @@ dependencies = [
     "pyarrow>=0.17.0",
     "ryp",
     "scipy>=0.16.0",
-    "scikit-misc",
 ]
 
 [project.optional-dependencies]

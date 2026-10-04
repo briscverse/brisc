@@ -107,6 +107,7 @@ try:
                 '/wd4456',  # declaration hides previous local declaration
                 '/wd4551',  # function call missing argument list
                 '/wd4701',  # potentially uninitialized local variable used
+                '/wd4702',  # unreachable code
                 '/wd4703']  # potentially uninitialized local pointer used
             linker_flags = ['/OPT:REF', '/OPT:ICF']
         elif mac:

@@ -44,6 +44,7 @@ import_cython({
     'kmeans': 'kmeans',
     'knn': ('knn_self', 'knn_cross'),
     'leiden': ('leiden', 'leiden_multiresolution'),
+    'loess': 'loess',
     'normalize': ('normalize_csc', 'normalize_csr'),
     'pca': 'irlba',
     'pseudobulk_and_markers': (
@@ -11116,8 +11117,6 @@ class SingleCell:
             selecting the final list of highly variable genes, instead of the
             unstable sort used by Seurat and Scanpy.
         """
-        from skmisc.loess import loess
-
         # If `others` was specified, check that all elements of `others` are
         # SingleCell datasets
         if others:
