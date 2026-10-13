@@ -36,8 +36,7 @@ import_cython({
                  'get_hvgs', 'get_simulated_doublets_max_nnz',
                  'simulate_doublets'),
     'embed': ('localmap', 'pacmap', 'umap_fuzzy_weights', 'umap_optimize'),
-    'harmonize': ('label_transfer', 'harmony', 'harmony_original',
-                  'normalize_rows'),
+    'harmonize': ('label_transfer', 'harmony', 'normalize_rows'),
     'hdf5': 'read_all_datasets',
     'hvg': ('clipped_sum_csc', 'clipped_sum_csr', 'gene_mean_and_variance_csc',
             'gene_mean_and_variance_csr'),
@@ -13323,7 +13322,6 @@ class SingleCell:
                   sigma: int | float | np.integer | np.floating = 0.1,
                   chunk_size_Harmony: int | np.integer | None = None,
                   seed: int | np.integer = 0,
-                  original: bool = False,
                   overwrite: bool = False,
                   verbose: bool = False,
                   num_threads: int | np.integer | None = None) -> \
@@ -13348,16 +13346,18 @@ class SingleCell:
         updates to `R` for future blocks depend on updates to `O` and `E` from
         previous blocks, leading to convergence failure if naively
         parallelized. Instead, we parallelize within blocks by dividing them
-        into chunks of `chunk_size` cells (512 by default). We process each
-        chunk in parallel, subtracting only the `O` and `E` contributions of
-        the chunk itself, updating `R` for the chunk, and, after processing all
-        chunks in the block, add back the `O` and `E` contributions for all
-        chunks based on the updated `R`. Updating `O` and `E` at the end of
-        each block (rather than after processing every cell in the dataset)
-        ensures convergence, while the inner chunking enables parallelization
-        without disrupting convergence. To use the original implementation's
-        chunkless strategy for updating `R`, `O`, and `E`, specify
-        `original=True, num_threads=1`.
+        into chunks of `chunk_size_Harmony` cells. We process each chunk in
+        parallel, subtracting only the `O` and `E` contributions of the chunk
+        itself, updating `R` for the chunk, and, after processing all chunks in
+        the block, add back the `O` and `E` contributions for all chunks based
+        on the updated `R`. Updating `O` and `E` at the end of each block
+        (rather than after processing every cell in the dataset) ensures
+        convergence, while the inner chunking enables parallelization without
+        disrupting convergence. To use the original implementation's strategy
+        of updating `R`, `O`, and `E` for each block as a whole, set
+        `chunk_size_Harmony` to at least the block size (`block_proportion`
+        times the total number of cells, rounded up to a multiple of 16), at
+        the cost of no longer parallelizing the update of `R`.
 
         Second, we reduce the default number of clustering iterations
         (Harmony's inner loop) from 20 to 5, but always complete all 5
@@ -13367,11 +13367,8 @@ class SingleCell:
         assignments (inner loop). Our implementation makes updating the PCs
         sufficiently fast that there are rapidly diminishing returns from
         performing lots of clustering updates, versus just skipping directly to
-        updating the PCs after a few clustering iterations. By skipping
-        convergence checks, we reduce the number of objective function
-        evaluations (which are expensive) from once per inner iteration to once
-        per outer iteration. To use the original implementation's default of 20
-        iterations with early stopping, specify
+        updating the PCs after a few clustering iterations. To use the original
+        implementation's default of 20 iterations with early stopping, specify
         `early_stopping=True, max_clustering_iterations=20`.
 
         Third, we use random k-means initialization, like version 1 of Harmony,
@@ -13525,22 +13522,14 @@ class SingleCell:
                    result in more aggressive correction.
             sigma: the weight of the entropy term in the Harmony objective
                    function; must be positive
-            chunk_size_Harmony: the chunk size to use for Harmony. Setting this
-                                to a multiple of 16 is recommended. Defaults to
-                                `min(256, total number of cells)`, capped to a
-                                maximum of 4096 chunks. Not used when
-                                `original=True`.
+            chunk_size_Harmony: the chunk size to use for Harmony. Must be a
+                                multiple of 16. Defaults to the larger of 256
+                                and the number of batches (rounded up to a
+                                multiple of 16), but at most the total number
+                                of cells. Harmony's memory usage and work per
+                                chunk grow with the number of batches, so
+                                chunks should have at least that many cells.
             seed: the random seed to use for the initial k-means clustering
-            original: if `True`, use the original Harmony algorithm's blocking
-                      strategy, rather than our nested chunks-within-blocks
-                      strategy. `original=True` requires `num_threads=1`. This
-                      gives lower memory usage and closer correspondence to the
-                      original algorithm, at the cost of a) a moderate
-                      (~20-25%) degradation in performance and b) no longer
-                      matching the Harmony embeddings produced by the
-                      multithreaded version. If `True`, exactly match the
-                      results of the multithreaded version when
-                      `num_threads=1`. Must be `False` unless `num_threads=1`.
             overwrite: if `True`, overwrite `Harmony_key` if already present in
                        obsm, instead of raising an error
             verbose: whether to print details of the harmonization process
@@ -13755,6 +13744,14 @@ class SingleCell:
                            'a positive integer')
                 check_bounds(chunk_size, chunk_size_name, 1)
 
+        # If `chunk_size_Harmony` is not `None`, check that it is a multiple of
+        # 16
+        if chunk_size_Harmony is not None and chunk_size_Harmony % 16:
+            error_message = (
+                f'chunk_size_Harmony is {chunk_size_Harmony:,}, but must be '
+                f'a multiple of 16')
+            raise ValueError(error_message)
+
         # Check that `seed` is an integer
         check_type(seed, 'seed', int, 'an integer')
 
@@ -13770,12 +13767,6 @@ class SingleCell:
         # regions".
         if num_threads > 64 and brisc_blas() == 'openblas':
             num_threads = 64
-
-        # Check that `original` is Boolean, and `False` unless `num_threads=1`
-        check_type(original, 'original', bool, 'Boolean')
-        if original and num_threads != 1:
-            error_message = 'original must be False unless num_threads is 1'
-            raise ValueError(error_message)
 
         # Concatenate PCs across datasets; get labels indicating which rows of
         # these concatenated PCs come from each dataset or batch. Check that
@@ -13883,15 +13874,16 @@ class SingleCell:
                 f'({num_cells:,})')
             raise ValueError(error_message)
 
-        # If `chunk_size_Harmony` is `None`, set it to `min(256, num_cells)`,
-        # capped to a maximum of 4096 chunks. Otherwise, check that it is less
-        # than the total number of cells across all datasets.
+        # If `chunk_size_Harmony` is `None`, set it to the larger of 256 and
+        # `num_batches` (rounded up to a multiple of 16), but at most
+        # `num_cells`. Harmony's per-chunk memory and work are proportional to
+        # `num_batches * num_clusters`, so chunks of at least `num_batches`
+        # cells keep them below the memory and work of computing `R` itself.
+        # Otherwise, check that it is less than the total number of cells
+        # across all datasets.
         if chunk_size_Harmony is None:
-            # Smallest chunk size giving at most 4096 chunks, rounded up to a
-            # multiple of 16 so each thread's buffer slice is 64-byte aligned
-            min_chunk_size = (num_cells + 4095) // 4096
-            min_chunk_size = (min_chunk_size + 15) // 16 * 16
-            chunk_size_Harmony = min(max(256, min_chunk_size), num_cells)
+            chunk_size_Harmony = min(max(256, (num_batches + 15) // 16 * 16),
+                                     num_cells)
         elif chunk_size_Harmony >= num_cells:
             error_message = (
                 f'chunk_size_Harmony is {chunk_size_Harmony:,}, but must be '
@@ -13942,31 +13934,18 @@ class SingleCell:
             R = np.empty((num_cells, num_clusters), dtype=np.float32)
         else:
             R = numa_zeros((num_cells, num_clusters), dtype=np.float32)
-        if original:
-            with threadpool_limits(
-                    1, user_api=None if num_threads == 1 else 'blas'):
-                harmony_original(
-                    PCs=PCs, Z=Z, Y=Y, R=R, batch_labels=batch_labels,
+        num_threads = min(num_threads, num_cells)
+        with threadpool_limits(
+                1, user_api=None if num_threads == 1 else 'blas'):
+            harmony(PCs=PCs, Z=Z, Y=Y, R=R, batch_labels=batch_labels,
                     num_batches=num_batches, max_iterations=max_iterations,
                     max_clustering_iterations=max_clustering_iterations,
                     block_proportion=block_proportion, tolerance=tolerance,
                     early_stopping=early_stopping,
                     clustering_tolerance=clustering_tolerance, theta=theta,
                     tau=tau, alpha=alpha, sigma=sigma,
-                    chunk_size=chunk_size_Harmony, seed=seed, verbose=verbose)
-        else:
-            num_threads = min(num_threads, num_cells)
-            with threadpool_limits(
-                    1, user_api=None if num_threads == 1 else 'blas'):
-                harmony(PCs=PCs, Z=Z, Y=Y, R=R, batch_labels=batch_labels,
-                        num_batches=num_batches, max_iterations=max_iterations,
-                        max_clustering_iterations=max_clustering_iterations,
-                        block_proportion=block_proportion, tolerance=tolerance,
-                        early_stopping=early_stopping,
-                        clustering_tolerance=clustering_tolerance, theta=theta,
-                        tau=tau, alpha=alpha, sigma=sigma,
-                        chunk_size=chunk_size_Harmony, seed=seed,
-                        verbose=verbose, num_threads=num_threads)
+                    chunk_size=chunk_size_Harmony, seed=seed,
+                    verbose=verbose, num_threads=num_threads)
 
         del batch_labels, PCs, Y
 
