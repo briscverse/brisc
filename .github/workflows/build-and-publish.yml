@@ -1,6 +1,9 @@
 # Build wheels, test them, and publish to PyPI. Runs only when a v* tag is
 # pushed or moved (including tags created by publishing a GitHub release),
 # plus manual dispatch, to conserve CI minutes.
+name: Build and publish
+run-name: ${{ github.ref_name }}
+
 on:
   push:
     tags: ['v*']       # new tags AND force-moved tags; never plain commits

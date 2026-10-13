@@ -3,6 +3,7 @@
 # Deploys on docs/** edits and each published release; source-only changes to
 # brisc/** are picked up at the next release (or a manual run).
 name: Docs
+run-name: ${{ github.ref_name }} docs
 
 on:
   push:

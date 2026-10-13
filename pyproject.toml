@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "brisc"
-version = "0.1.8"
+version = "0.2.0"
 description = "Fast single-cell toolkit"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -40,8 +40,8 @@ include = ["brisc", "brisc.*"]
 "*" = ["*.cpp", "*.c"]
 
 [tool.cibuildwheel]
-build = "cp39-* cp310-* cp311-* cp312-* cp313-* cp314-*" 
-skip = "*musllinux* *i686* *ppc64le* *s390x* cp314t-*"
+build = "cp39-* cp310-* cp311-* cp312-* cp313-* cp314-* cp315-*"
+skip = "*musllinux* *i686* *ppc64le* *s390x* cp314t-* cp315t-*"
 
 [tool.cibuildwheel.linux]
 manylinux-x86_64-image = "manylinux_2_28"
