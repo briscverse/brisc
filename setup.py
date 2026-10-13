@@ -128,6 +128,7 @@ try:
                 # Baseline warnings
                 '-Wall', '-Wextra', '-Werror', '-Wno-uninitialized',
                 '-Wno-ignored-qualifiers', '-Wno-unreachable-code',
+                '-Wno-missing-field-initializers',
                 # Floating-point warnings
                 '-Wfloat-conversion', '-Wimplicit-float-conversion',
                 '-Wno-implicit-int-float-conversion']
