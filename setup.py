@@ -142,6 +142,7 @@ try:
                 # Baseline warnings
                 '-Wall', '-Wextra', '-Werror', '-Wno-uninitialized',
                 '-Wno-maybe-uninitialized', '-Wno-ignored-qualifiers',
+                '-Wno-missing-field-initializers',
                 # Floating-point warnings
                 '-Wdouble-promotion', '-Wfloat-conversion',
                 # Typo/copy-paste warnings
