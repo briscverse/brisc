@@ -2401,13 +2401,16 @@ class SingleCell:
                 elif category_encoding_type == 'string-array' or (
                         isinstance(category_object, h5py.Dataset) and
                         category_object.dtype == object):
+                    enum_type = \
+                        pl.Enum(pl.Series(categories).cast(pl.String))
                     if has_missing:
                         codes[mask] = 0
-                    data[column] = pl.Series(codes, dtype=pl.UInt32)
+                    data[column] = pl.Series(
+                        codes,
+                        dtype=pl.Series(dtype=enum_type).to_physical().dtype)
                     if has_missing:
                         data[column] = data[column].set(mask, None)
-                    deferred_casts.append(pl.col(column).cast(
-                        pl.Enum(pl.Series(categories).cast(pl.String))))
+                    deferred_casts.append(pl.col(column).cat.to(enum_type))
                 else:
                     encoding = \
                         f'encoding-type {category_encoding_type!r}' \
