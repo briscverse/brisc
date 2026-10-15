@@ -15634,14 +15634,14 @@ class SingleCell:
         run before or after normalization.
 
         Marker genes are chosen via an adaptation of the strategy of Fischer
-        and Gillis 2021 (ncbi.nlm.nih.gov/pmc/articles/PMC8571500). For a given
-        cell type, genes are scored based on a) their "detection rate" in that
-        cell type (the fraction of cells of that type that have non-zero count
-        for that gene), as well as b) the fold change in detection rate between
-        that cell type and every other cell type. Genes must also have a
-        detection rate of at least `min_detection_rate` (25% by default) and a
-        minimum fold change of at least `min_fold_change` (2-fold by default)
-        to be considered as markers.
+        and Gillis 2021 (https://ncbi.nlm.nih.gov/pmc/articles/PMC8571500). For
+        a given cell type, genes are scored based on a) their "detection rate"
+        in that cell type (the fraction of cells of that type that have
+        non-zero count for that gene), as well as b) the fold change in
+        detection rate between that cell type and every other cell type. Genes
+        must also have a detection rate of at least `min_detection_rate` (25%
+        by default) and a minimum fold change of at least `min_fold_change`
+        (2-fold by default) to be considered as markers.
 
         There is an inherent tradeoff between these two metrics. For instance,
         candidate marker genes with high enough expression to be expressed in
