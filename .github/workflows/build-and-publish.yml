@@ -128,3 +128,22 @@ jobs:
         run: ls dist/brisc-${GITHUB_REF_NAME#v}.tar.gz
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  promote_release:
+    name: Promote pre-release to full release
+    needs: [publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed to edit the release
+    steps:
+      - name: Mark GitHub release as full release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+               --json isPrerelease -q .isPrerelease 2>/dev/null | grep -q true; then
+            gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              --prerelease=false --latest
+          else
+            echo "No pre-release found for $GITHUB_REF_NAME, nothing to promote"
+          fi
