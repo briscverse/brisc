@@ -9,9 +9,9 @@ from libc.string cimport memcpy
 from libcpp.algorithm cimport sort
 from libcpp.cmath cimport cos, exp, log, log2, pow, sqrt
 from libcpp.vector cimport vector
-from .cyutils cimport atomic_or, max_heap_replace_top, max_heap_sort, \
-    randint, random_normal, random_uniform, signed_integer, srand, \
-    uninitialized_vector
+from .cyutils cimport PREFETCH, atomic_or, max_heap_replace_top, \
+    max_heap_sort, randint, random_normal, random_uniform, signed_integer, \
+    srand, uninitialized_vector
 
 
 cdef inline void get_neighbor_pairs(const float[:, ::1] X,
@@ -1290,27 +1290,32 @@ def umap_fuzzy_weights(const float[:, ::1] distances,
                        const unsigned num_threads):
 
     cdef unsigned i, j, n, N = distances.shape[0], K = distances.shape[1]
-    cdef float lo, mid, hi, psum, d, rho, val, mean_ith, ith_sum, \
-        target = log2(<float> K)
+    cdef unsigned long long offset
+    cdef float lo, mid, hi, psum, d, rho, mean_ith, ith_sum, \
+        target = log2(<float> (K + 1))
 
     if num_threads == 1:
         for i in range(N):
+            offset = <unsigned long long> i * K
             ith_sum = 0
-            rho = distances[i, 0]
             for j in range(K):
-                ith_sum += distances[i, j]
-            mean_ith = ith_sum / K
+                d = sqrt(max(distances[i, j], <float> 0))
+                data[offset + j] = d
+                ith_sum += d
+            rho = 0
+            for j in range(K):
+                if data[offset + j] > <float> 0:
+                    rho = data[offset + j]
+                    break
+            mean_ith = ith_sum / (K + 1)
             lo = 0
             mid = 1
             hi = FLT_MAX
             for n in range(64):
                 psum = 0
                 for j in range(K):
-                    d = distances[i, j] - rho
-                    if d > <float> 0:
-                        psum += exp(-(d / mid))
-                    else:
-                        psum += <float> 1
+                    d = max(data[offset + j] - rho, <float> 0)
+                    psum += exp(-(d / mid))
                 if abs(psum - target) < <float> 1e-5:
                     break
                 if psum > target:
@@ -1325,30 +1330,30 @@ def umap_fuzzy_weights(const float[:, ::1] distances,
             if mid < <float> 0.001 * mean_ith:
                 mid = <float> 0.001 * mean_ith
             for j in range(K):
-                d = distances[i, j] - rho
-                if d <= <float> 0 or not mid:
-                    val = 1
-                else:
-                    val = exp(-(d / mid))
-                data[i * K + j] = val
+                d = max(data[offset + j] - rho, <float> 0)
+                data[offset + j] = exp(-(d / mid))
     else:
         for i in prange(N, nogil=True, num_threads=num_threads):
+            offset = <unsigned long long> i * K
             ith_sum = 0
-            rho = distances[i, 0]
             for j in range(K):
-                ith_sum = ith_sum + distances[i, j]
-            mean_ith = ith_sum / K
+                d = sqrt(max(distances[i, j], <float> 0))
+                data[offset + j] = d
+                ith_sum = ith_sum + d
+            rho = 0
+            for j in range(K):
+                if data[offset + j] > <float> 0:
+                    rho = data[offset + j]
+                    break
+            mean_ith = ith_sum / (K + 1)
             lo = 0
             mid = 1
             hi = FLT_MAX
             for n in range(64):
                 psum = 0
                 for j in range(K):
-                    d = distances[i, j] - rho
-                    if d > <float> 0:
-                        psum = psum + exp(-(d / mid))
-                    else:
-                        psum = psum + <float> 1
+                    d = max(data[offset + j] - rho, <float> 0)
+                    psum = psum + exp(-(d / mid))
                 if abs(psum - target) < <float> 1e-5:
                     break
                 if psum > target:
@@ -1363,12 +1368,8 @@ def umap_fuzzy_weights(const float[:, ::1] distances,
             if mid < <float> 0.001 * mean_ith:
                 mid = <float> 0.001 * mean_ith
             for j in range(K):
-                d = distances[i, j] - rho
-                if d <= <float> 0 or not mid:
-                    val = 1
-                else:
-                    val = exp(-(d / mid))
-                data[i * K + j] = val
+                d = max(data[offset + j] - rho, <float> 0)
+                data[offset + j] = exp(-(d / mid))
 
 
 cdef inline void umap_noisy_scale(float[:, ::1] embedding,
@@ -1390,9 +1391,9 @@ cdef inline void umap_noisy_scale(float[:, ::1] embedding,
     # Scale and add noise
     for i in range(N):
         embedding[i, 0] = (embedding[i, 0] * scale) + \
-            <float> 0.0001 * random_normal(&rng_state[i])
+            <float> 0.0001 * random_normal(&rng_state[0])
         embedding[i, 1] = (embedding[i, 1] * scale) + \
-            <float> 0.0001 * random_normal(&rng_state[i])
+            <float> 0.0001 * random_normal(&rng_state[0])
 
     # Compute min/max for each dimension
     min0 = max0 = embedding[0, 0]
@@ -1414,8 +1415,8 @@ cdef inline void umap_noisy_scale(float[:, ::1] embedding,
 
 
 def umap_optimize(float[:, ::1] embedding,
-                  const signed_integer[::1] head,
-                  const signed_integer[::1] tail,
+                  const signed_integer[::1] indptr,
+                  const signed_integer[::1] indices,
                   const float[::1] weights,
                   const unsigned num_iterations,
                   const float a,
@@ -1427,115 +1428,123 @@ def umap_optimize(float[:, ::1] embedding,
                   unsigned num_threads):
     # The main SGD optimizer for UMAP
 
-    cdef unsigned epoch, i, u, v, start, end, current_negative_sample_rate, \
-        num_vertices = embedding.shape[0], num_edges = head.shape[0]
-    cdef float epoch_modifier, alpha, weight, movement
+    cdef unsigned epoch, t, k, u, num_vertices = embedding.shape[0]
+    cdef float alpha
     cdef uninitialized_vector[unsigned long long] rng_state_buffer
+    cdef uninitialized_vector[unsigned] negative_samples_buffer
     cdef unsigned long long[::1] rng_state
+    cdef unsigned[:, ::1] negative_samples
 
-    # Initialize per-vertex random number generators
-    rng_state_buffer.resize(num_vertices)
-    rng_state = <unsigned long long[:num_vertices]> rng_state_buffer.data()
-    for i in range(num_vertices):
-        rng_state[i] = srand(seed + i)
+    # Initialize a random number generator for each thread, and a queue of the
+    # next `negative_sample_rate` negative samples it will use, which are
+    # drawn one edge ahead so they can be prefetched. Pad both to avoid false
+    # sharing between threads.
+    num_threads = min(num_threads, num_vertices)
+    rng_state_buffer.resize(8 * num_threads)
+    rng_state = <unsigned long long[:8 * num_threads]> \
+        rng_state_buffer.data()
+    negative_samples_buffer.resize(num_threads * (negative_sample_rate + 16))
+    negative_samples = <unsigned[:num_threads, :negative_sample_rate + 16]> \
+        negative_samples_buffer.data()
+    for t in range(num_threads):
+        rng_state[8 * t] = srand(seed + t)
+        for k in range(negative_sample_rate):
+            negative_samples[t, k] = randint(num_vertices, &rng_state[8 * t])
 
     # Add noise and scale the initial embedding
     umap_noisy_scale(embedding, rng_state)
 
-    num_threads = min(num_threads, num_vertices)
     if num_threads == 1:
         # Perform SGD
         for epoch in range(num_iterations):
-            epoch_modifier = <float> 1 - epoch / <float> num_iterations
-            alpha = initial_alpha * epoch_modifier
-            for i in range(num_edges):
-                u = head[i]
-                v = tail[i]
-                weight = weights[i]
-                umap_single_edge_gradient_update(
-                    embedding, u, v, weight, a, b, gamma, alpha,
-                    negative_sample_rate, &rng_state[u], num_vertices)
+            alpha = initial_alpha * \
+                (<float> 1 - epoch / <float> num_iterations)
+            for u in range(num_vertices):
+                umap_cell_update(embedding, u, indptr[u], indptr[u + 1],
+                                 indices, weights, a, b, gamma, alpha,
+                                 negative_sample_rate, rng_state,
+                                 negative_samples, 0)
             PyErr_CheckSignals()
     else:
-        # Hogwild! Re-initialize `rng_state` to be per-thread RNGs, not
-        # per-vertex.
-        for i in range(num_threads):
-            rng_state[i] = srand(seed + i)
-
         # Perform SGD in parallel, without locks
         for epoch in range(num_iterations):
-            epoch_modifier = <float> 1 - epoch / <float> num_iterations
-            alpha = initial_alpha * epoch_modifier
-            for i in prange(num_edges, num_threads=num_threads, nogil=True):
-                u = head[i]
-                v = tail[i]
-                weight = weights[i]
-                umap_single_edge_gradient_update(
-                    embedding, u, v, weight, a, b, gamma, alpha,
-                    negative_sample_rate, &rng_state[threadid()], num_vertices)
+            alpha = initial_alpha * \
+                (<float> 1 - epoch / <float> num_iterations)
+            for u in prange(num_vertices, num_threads=num_threads, nogil=True):
+                umap_cell_update(embedding, u, indptr[u], indptr[u + 1],
+                                 indices, weights, a, b, gamma, alpha,
+                                 negative_sample_rate, rng_state,
+                                 negative_samples, threadid())
             PyErr_CheckSignals()
 
 
-cdef inline void umap_single_edge_gradient_update(
+cdef inline void umap_cell_update(
         float[:, ::1] embedding,
         const unsigned u,
-        const unsigned v,
-        const float weight,
+        const unsigned long long start,
+        const unsigned long long end,
+        const signed_integer[::1] indices,
+        const float[::1] weights,
         const float a,
         const float b,
         const float gamma,
         const float alpha,
         const unsigned negative_sample_rate,
-        unsigned long long *rng_state,
-        const unsigned num_vertices) noexcept nogil:
-    # Update the gradients for the two cells linked by a single edge.
-    # Attractive forces update both endpoints (`u` and `v`) symmetrically so
-    # the edge pulls the two cells together in the embedding. Repulsive forces
-    # are implemented using negative sampling: we draw random vertices and push
-    # them away from `u` only. This asymmetric update is intentional and
-    # matches the stochastic approximation used in the original UMAP optimizer.
-    # In expectation the repulsion is symmetric because every vertex appears as
-    # the source vertex of some edge update, but updating only `u` keeps the
-    # computation cheaper.
+        unsigned long long[::1] rng_state,
+        unsigned[:, ::1] negative_samples,
+        const unsigned thread_index) noexcept nogil:
+    # Update the position of cell `u` by attracting it to each of its
+    # neighbors and, for each neighbor, repelling it from
+    # `negative_sample_rate` randomly selected (and thus usually far-away)
+    # cells; also attract each of `u`'s neighbors to `u`. Instead of
+    # deterministically scheduling edge updates as in umap-learn, we randomly
+    # drop edge updates (both attractive and repulsive) with probability
+    # `1 - weight`; in expectation, both approaches give the same number of
+    # updates to every edge.
 
-    cdef unsigned k, other_v
-    cdef float ux, uy, vx, vy, dx, dy, dist_squared, dist_b_minus_1, dist_b, \
-        denom, scale, gradx, grady, \
-        attraction_constant = <float> -2 * a * b * alpha, \
-        repulsion_constant = alpha * (<float> 2 * gamma * b)
+    cdef unsigned long long i
+    cdef unsigned k, v, num_vertices = embedding.shape[0]
+    cdef unsigned long long state = rng_state[8 * thread_index]
+    cdef float ux = embedding[u, 0], uy = embedding[u, 1], vx, vy, dx, dy, \
+        dist_squared, dist_b_minus_1, scale, gradx, grady, \
+        attraction_constant = <float> -2 * a * b, \
+        repulsion_constant = <float> 2 * gamma * b, b_minus_1 = b - <float> 1
 
-    # Randomly drop the edge update with probability `1 - weight`.
-    # This is mathematically equivalent to UMAP's fractional epoch updates!
-    if weight < random_uniform(rng_state): return
+    for i in range(start, end):
+        if i + 8 < <unsigned long long> indices.shape[0]:
+            PREFETCH(&embedding[indices[i + 8], 0])
 
-    # Attractive gradients
-    ux = embedding[u, 0]; uy = embedding[u, 1]
-    vx = embedding[v, 0]; vy = embedding[v, 1]
-    dx = ux - vx; dy = uy - vy
-    dist_squared = dx * dx + dy * dy
-    if dist_squared:
-        dist_b_minus_1 = pow(dist_squared, b - <float> 1)
-        dist_b = dist_b_minus_1 * dist_squared
-        denom = <float> 1 + a * dist_b
-        scale = attraction_constant * dist_b_minus_1 / denom
-        gradx = min(<float> 4, max(<float> -4, scale * dx))
-        grady = min(<float> 4, max(<float> -4, scale * dy))
-        ux += gradx; uy += grady
-        vx -= gradx; vy -= grady
-    embedding[v, 0] = vx; embedding[v, 1] = vy
+        # Drop the edge update with probability `1 - weight`
+        if weights[i] < random_uniform(&state): continue
 
-    # Repulsive gradients, using negative sampling
-    for k in range(negative_sample_rate):
-        other_v = randint(num_vertices, rng_state)
-        if other_v == u: continue
-        vx = embedding[other_v, 0]; vy = embedding[other_v, 1]
+        # Attractive gradients
+        v = indices[i]
+        vx = embedding[v, 0]; vy = embedding[v, 1]
         dx = ux - vx; dy = uy - vy
         dist_squared = dx * dx + dy * dy
         if dist_squared:
-            denom = (<float> 0.001 + dist_squared) * \
-                (<float> 1 + a * pow(dist_squared, b))
-            scale = repulsion_constant / denom
-            gradx = min(<float> 4, max(<float> -4, scale * dx))
-            grady = min(<float> 4, max(<float> -4, scale * dy))
+            dist_b_minus_1 = pow(dist_squared, b_minus_1)
+            scale = attraction_constant * dist_b_minus_1 / \
+                (<float> 1 + a * dist_b_minus_1 * dist_squared)
+            gradx = alpha * min(<float> 4, max(<float> -4, scale * dx))
+            grady = alpha * min(<float> 4, max(<float> -4, scale * dy))
             ux += gradx; uy += grady
+            embedding[v, 0] = vx - gradx; embedding[v, 1] = vy - grady
+
+        # Repulsive gradients, using negative sampling. Take each negative
+        # sample from the queue and replace it with a new one, prefetching it.
+        for k in range(negative_sample_rate):
+            v = negative_samples[thread_index, k]
+            negative_samples[thread_index, k] = randint(num_vertices, &state)
+            PREFETCH(&embedding[negative_samples[thread_index, k], 0])
+            if v == u: continue
+            dx = ux - embedding[v, 0]; dy = uy - embedding[v, 1]
+            dist_squared = dx * dx + dy * dy
+            if dist_squared:
+                scale = repulsion_constant / ((<float> 0.001 + dist_squared) *
+                    (<float> 1 + a * pow(dist_squared, b)))
+                gradx = alpha * min(<float> 4, max(<float> -4, scale * dx))
+                grady = alpha * min(<float> 4, max(<float> -4, scale * dy))
+                ux += gradx; uy += grady
     embedding[u, 0] = ux; embedding[u, 1] = uy
+    rng_state[8 * thread_index] = state

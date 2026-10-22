@@ -17979,14 +17979,23 @@ class SingleCell:
                 data = np.empty(neighbors.size, dtype=np.float32)
             else:
                 data = numa_zeros(neighbors.size, dtype=np.float32)
-            indices = neighbors.ravel().view(np.int32)
-            indptr = np.arange(0, (N + 1) * K, K, dtype=np.int32)
+            if N * K <= np.iinfo(np.int32).max:
+                indices = neighbors.ravel().view(np.int32)
+                indptr = np.arange(0, (N + 1) * K, K, dtype=np.int32)
+            else:
+                indices = neighbors.ravel().astype(np.int64)
+                indptr = np.arange(0, (N + 1) * K, K, dtype=np.int64)
             umap_fuzzy_weights(distances, data, num_threads)
             result = csr_array((data, indices, indptr), shape=(N, N))
             result = result + result.T - result * result.T
             return result
 
         graph = fuzzy_simplicial_set(neighbors, distances, num_threads)
+        num_pruning_iterations = num_iterations if num_iterations > 10 else \
+            500 if num_cells <= 10_000 else 200
+        graph.data[graph.data <
+                   graph.data.max() / num_pruning_iterations] = 0
+        graph.eliminate_zeros()
 
         def spectral_layout(data, graph, random_state):
             from scipy.linalg import eigh
@@ -18008,16 +18017,22 @@ class SingleCell:
                         cdist(component_centroids, component_centroids)
                     affinity_matrix = np.exp(-(distance_matrix ** 2))
                     # Spectral embedding of the affinity matrix
-                    inv_sqrt_degree = \
-                        affinity_matrix.sum(axis=1).ravel() ** -0.5
+                    np.fill_diagonal(affinity_matrix, 0)
+                    sqrt_degree = np.sqrt(affinity_matrix.sum(axis=1))
+                    isolated = sqrt_degree == 0
+                    sqrt_degree[isolated] = 1
                     normalized_affinity_matrix = \
-                        affinity_matrix * inv_sqrt_degree[:, None] * \
-                        inv_sqrt_degree[None, :]
+                        affinity_matrix / sqrt_degree[:, None] / \
+                        sqrt_degree[None, :]
+                    normalized_affinity_matrix[isolated, isolated] = 1
                     eigenvectors = eigh(normalized_affinity_matrix)[1]
                     # skip trivial largest eigenvector, reorder largest to
                     # smallest, just take the next-largest two
-                    meta_embedding = eigenvectors[:, [-2, -3]]
-                    meta_embedding /= np.abs(meta_embedding).max()
+                    meta_embedding = \
+                        eigenvectors[:, [-2, -3]] / sqrt_degree[:, None]
+                    meta_embedding *= np.sign(meta_embedding[
+                        np.abs(meta_embedding).argmax(axis=0), [0, 1]])
+                    meta_embedding /= meta_embedding.max()
                 else:
                     k = int(np.ceil(n_connected_components / 2))
                     base = np.hstack([np.eye(k), np.zeros((k, 2 - k))])
@@ -18070,16 +18085,10 @@ class SingleCell:
         embedding = spectral_layout(
             PCs, graph, random_state=np.random.RandomState(seed))
 
-        # Create the graph in COO format, equivalent to
-        # `head = graph.tocoo().row` and `tail = graph.tocoo().col`
-        head = np.repeat(np.arange(graph.shape[0], dtype=graph.indices.dtype),
-                         repeats=np.diff(graph.indptr))
-        tail = graph.indices
-
         # Optimize the embedding via stochastic gradient descent, in parallel
         # without locks if `hogwild=True`
         umap_optimize(
-            embedding=embedding, head=head, tail=tail,
+            embedding=embedding, indptr=graph.indptr, indices=graph.indices,
             weights=graph.data, num_iterations=num_iterations, a=a, b=b,
             gamma=gamma, initial_alpha=alpha,
             negative_sample_rate=negative_sample_rate, seed=seed,
