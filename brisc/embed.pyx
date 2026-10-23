@@ -297,12 +297,19 @@ cdef inline void sample_further_pairs_nearby(
     cdef unsigned i, j, k, count, further_pair_index, n = embedding.shape[0], \
         num_further_pairs = further_pairs.shape[1], \
         num_neighbors = neighbor_pairs.shape[1]
-    cdef unsigned long long state
+    cdef unsigned long long state, lookahead_state
+    cdef float dx, dy
 
     # Use a parallel loop even when single-threaded, to ensure identical
     # results regardless of the number of threads
     for i in prange(n, nogil=True, num_threads=num_threads):
         state = srand(seed + i)
+
+        # Draw candidates 16 ahead of `state` to prefetch their positions
+        lookahead_state = state
+        for k in range(16):
+            PREFETCH(&embedding[randint(n, &lookahead_state), 0])
+
         for j in range(num_further_pairs):
             # Give up after 100 trials, and keep the further pair as-is;
             # this corrects the original implementation's logic by counting
@@ -311,9 +318,17 @@ cdef inline void sample_further_pairs_nearby(
             for count in range(100):
                 # Sample a random cell...
                 further_pair_index = randint(n, &state)
+                PREFETCH(&embedding[randint(n, &lookahead_state), 0])
 
                 # ...that is not this cell...
                 if further_pair_index == i:
+                    continue
+
+                # ...nor farther than `max_distance` away (in embedding
+                # space), the most common reason for rejection...
+                dx = embedding[i, 0] - embedding[further_pair_index, 0]
+                dy = embedding[i, 1] - embedding[further_pair_index, 1]
+                if dx * dx + dy * dy > max_distance_squared:
                     continue
 
                 # ...nor one of its nearest neighbors...
@@ -321,27 +336,14 @@ cdef inline void sample_further_pairs_nearby(
                     if further_pair_index == neighbor_pairs[i, k]:
                         break
                 else:
-                    # ...nor a previously sampled cell...
+                    # ...nor a previously sampled cell
                     for k in range(j):
                         if further_pair_index == further_pairs[i, k]:
                             break
                     else:
-                        # ...nor a cell farther than `max_distance` away
-                        # (in embedding space)
-                        if (embedding[i, 0] -
-                                embedding[further_pair_index, 0]) * \
-                                (embedding[i, 0] -
-                                 embedding[further_pair_index, 0]) + \
-                                (embedding[i, 1] -
-                                 embedding[further_pair_index, 1]) * \
-                                (embedding[i, 1] -
-                                 embedding[further_pair_index, 1]) > \
-                                max_distance_squared:
-                            continue
-                        else:
-                            # Sampling successful - assign the further pair
-                            further_pairs[i, j] = further_pair_index
-                            break
+                        # Sampling successful - assign the further pair
+                        further_pairs[i, j] = further_pair_index
+                        break
 
 
 cdef inline void reformat_for_parallel(
@@ -349,47 +351,123 @@ cdef inline void reformat_for_parallel(
         unsigned[::1] pair_indices,
         unsigned[::1] pair_indptr,
         const unsigned num_threads) noexcept nogil:
-    cdef unsigned i, j, k, dest_index, num_pairs_per_cell = pairs.shape[1]
-    cdef unsigned long long index, num_cells = pairs.shape[0]
-    cdef uninitialized_vector[unsigned] dest_indices
+    cdef unsigned i, j, k, t, r, own, num_pairs_per_cell = pairs.shape[1]
+    cdef unsigned long long index, p, start, end, chunk_size, total, \
+        num_cells = pairs.shape[0], stride = num_threads + 16
+    cdef uninitialized_vector[unsigned] dest_indices, bucket_sources, \
+        bucket_targets
+    cdef uninitialized_vector[unsigned long long] cursors, range_offsets
     dest_indices.resize(num_cells)
 
+    # Each pair (i, j) appears in two cells' lists: i's, as part of
+    # `pairs[i]`, and j's, as a "reverse" pair. Each cell's list contains
+    # its pairs in the order they would be appended by going through `pairs`
+    # in order and appending j to i's list and i to j's list. This assumes no
+    # self-neighbors (checked earlier in `get_neighbor_pairs()`).
+
+    if num_threads == 1:
+        # Count how many pairs each cell is in, cumsum the counts in
+        # `pair_indptr`, then go through `pairs` in order
+        pair_indptr[0] = 0
+        pair_indptr[1:] = num_pairs_per_cell
+        for i in range(num_cells):
+            for k in range(num_pairs_per_cell):
+                pair_indptr[pairs[i, k] + 1] += 1
+        for i in range(2, pair_indptr.shape[0]):
+            pair_indptr[i] += pair_indptr[i - 1]
+        memcpy(dest_indices.data(), &pair_indptr[0],
+               num_cells * sizeof(unsigned))
+        for i in range(num_cells):
+            for k in range(num_pairs_per_cell):
+                j = pairs[i, k]
+                pair_indices[dest_indices[i]] = j
+                pair_indices[dest_indices[j]] = i
+                dest_indices[i] += 1
+                dest_indices[j] += 1
+        return
+
     # Perform first-touch NUMA page allocation for the outputs
-    if num_threads > 1:
-        for index in prange(pair_indices.shape[0], num_threads=num_threads):
-            pair_indices[index] = 0
-        for index in prange(pair_indptr.shape[0], num_threads=num_threads):
-            pair_indptr[index] = 0
+    for index in prange(pair_indices.shape[0], num_threads=num_threads):
+        pair_indices[index] = 0
+    for index in prange(pair_indptr.shape[0], num_threads=num_threads):
+        pair_indptr[index] = 0
 
-    # Tabulate how often each cell appears in pairs; at a minimum, it
-    # will appear `pairs.shape[1]` times (i.e. the number of
-    # neighbors), as the `i` in the pair, but it will also appear a
-    # variable number of times as the `j` in the pair.
+    # Split the cells into `num_threads` contiguous ranges of `chunk_size`
+    # cells. Bucket the reverse pairs by the range containing j, keeping them
+    # in order of i: count the pairs going from each range of i's to each
+    # range of j's, then lay out the buckets for each range of j's
+    # consecutively, ordered by range of i.
+    bucket_sources.resize(num_cells * num_pairs_per_cell)
+    bucket_targets.resize(num_cells * num_pairs_per_cell)
+    cursors.resize(num_threads * stride)
+    range_offsets.resize(num_threads + 1)
+    chunk_size = (num_cells + num_threads - 1) / num_threads
+    for t in prange(num_threads, num_threads=num_threads):
+        for r in range(num_threads):
+            cursors[t * stride + r] = 0
+        start = min(t * chunk_size, num_cells)
+        end = min(start + chunk_size, num_cells)
+        for i in range(start, end):
+            for k in range(num_pairs_per_cell):
+                r = pairs[i, k] / chunk_size
+                cursors[t * stride + r] += 1
+    total = 0
+    for r in range(num_threads):
+        range_offsets[r] = total
+        for t in range(num_threads):
+            p = cursors[t * stride + r]
+            cursors[t * stride + r] = total
+            total += p
+    range_offsets[num_threads] = total
+    for t in prange(num_threads, num_threads=num_threads):
+        start = min(t * chunk_size, num_cells)
+        end = min(start + chunk_size, num_cells)
+        for i in range(start, end):
+            for k in range(num_pairs_per_cell):
+                j = pairs[i, k]
+                r = j / chunk_size
+                p = cursors[t * stride + r]
+                cursors[t * stride + r] = p + 1
+                bucket_sources[p] = i
+                bucket_targets[p] = j
+
+    # Count how many pairs each cell is in (`pairs.shape[1]` as the i, plus
+    # its reverse pairs), then cumsum the counts in `pair_indptr`
     pair_indptr[0] = 0
-    pair_indptr[1:] = pairs.shape[1]
-    for i in range(num_cells):
-        for k in range(num_pairs_per_cell):
-            j = pairs[i, k]
-            pair_indptr[j + 1] += 1
-
-    # Cumsum the values in `pair_indptr`
+    for r in prange(num_threads, num_threads=num_threads):
+        start = min(r * chunk_size, num_cells)
+        end = min(start + chunk_size, num_cells)
+        for i in range(start, end):
+            pair_indptr[i + 1] = num_pairs_per_cell
+        for p in range(range_offsets[r], range_offsets[r + 1]):
+            pair_indptr[bucket_targets[p] + 1] += 1
     for i in range(2, pair_indptr.shape[0]):
         pair_indptr[i] += pair_indptr[i - 1]
 
-    # Now that we know how many pairs each cell is a part of, do a
-    # second pass over `pairs` to populate `pair_indices` with the
-    # pairs' indices. Use a temporary buffer, `dest_indices`, to keep
-    # track of the index within `pair_indptr` to write each cell's next
-    # pair to. Note: this logic assumes no self-neighbors (checked
-    # earlier in `get_neighbor_pairs()`).
-    memcpy(dest_indices.data(), &pair_indptr[0], num_cells * sizeof(unsigned))
-    for i in range(num_cells):
-        for k in range(num_pairs_per_cell):
-            j = pairs[i, k]
-            pair_indices[dest_indices[i]] = j
+    # Fill in each cell's list: each range goes through its reverse pairs in
+    # order of i, and appends each of its cells' own pairs, `pairs[own]`,
+    # just before the first reverse pair with i >= own
+    for r in prange(num_threads, num_threads=num_threads):
+        start = min(r * chunk_size, num_cells)
+        end = min(start + chunk_size, num_cells)
+        for i in range(start, end):
+            dest_indices[i] = pair_indptr[i]
+        own = start
+        for p in range(range_offsets[r], range_offsets[r + 1]):
+            i = bucket_sources[p]
+            while own < end and own <= i:
+                for k in range(num_pairs_per_cell):
+                    pair_indices[dest_indices[own]] = pairs[own, k]
+                    dest_indices[own] += 1
+                own = own + 1
+            j = bucket_targets[p]
             pair_indices[dest_indices[j]] = i
-            dest_indices[i] += 1
             dest_indices[j] += 1
+        while own < end:
+            for k in range(num_pairs_per_cell):
+                pair_indices[dest_indices[own]] = pairs[own, k]
+                dest_indices[own] += 1
+            own = own + 1
 
 
 cdef inline void get_gradients_fast(const float[:, ::1] embedding,
@@ -399,12 +477,19 @@ cdef inline void get_gradients_fast(const float[:, ::1] embedding,
                                     const float w_neighbors,
                                     const float w_mid_near,
                                     float[:, ::1] gradients):
-    cdef unsigned i, j, k, num_neighbors = neighbor_pairs.shape[1], \
+    cdef unsigned i, j, num_neighbors = neighbor_pairs.shape[1], \
         num_mid_near_pairs = mid_near_pairs.shape[1], \
         num_further_pairs = further_pairs.shape[1]
     cdef unsigned long long num_cells = neighbor_pairs.shape[0]
     cdef float embedding_i0, embedding_i1, gradients_i0, gradients_i1, \
         embedding_ij_0, embedding_ij_1, distance_ij, w
+    cdef const unsigned[::1] neighbor_pairs_flat = \
+        <unsigned[:num_cells * num_neighbors]> &neighbor_pairs[0, 0]
+    cdef const unsigned[::1] mid_near_pairs_flat = \
+        <unsigned[:num_cells * num_mid_near_pairs]> &mid_near_pairs[0, 0]
+    cdef const unsigned[::1] further_pairs_flat = \
+        <unsigned[:num_cells * num_further_pairs]> &further_pairs[0, 0]
+    cdef unsigned long long index
 
     gradients[:] = 0
     for i in range(num_cells):
@@ -414,8 +499,12 @@ cdef inline void get_gradients_fast(const float[:, ::1] embedding,
         gradients_i1 = 0
 
         # Nearest-neighbor pairs
-        for k in range(num_neighbors):
-            j = neighbor_pairs[i, k]
+        for index in range(<unsigned long long> i * num_neighbors,
+                           <unsigned long long> (i + 1) * num_neighbors):
+            if index + 8 < num_cells * num_neighbors:
+                PREFETCH(&embedding[neighbor_pairs_flat[index + 8], 0])
+                PREFETCH(&gradients[neighbor_pairs_flat[index + 8], 0])
+            j = neighbor_pairs_flat[index]
             embedding_ij_0 = embedding_i0 - embedding[j, 0]
             embedding_ij_1 = embedding_i1 - embedding[j, 1]
             distance_ij = <float> 1 + embedding_ij_0 * embedding_ij_0 + \
@@ -427,23 +516,34 @@ cdef inline void get_gradients_fast(const float[:, ::1] embedding,
             gradients_i1 += w * embedding_ij_1
             gradients[j, 1] -= w * embedding_ij_1
 
-        # Mid-near pairs
-        for k in range(num_mid_near_pairs):
-            j = mid_near_pairs[i, k]
-            embedding_ij_0 = embedding_i0 - embedding[j, 0]
-            embedding_ij_1 = embedding_i1 - embedding[j, 1]
-            distance_ij = <float> 1 + embedding_ij_0 * embedding_ij_0 + \
-                embedding_ij_1 * embedding_ij_1
-            w = w_mid_near * (<float> 20000 / ((<float> 10000 + distance_ij) *
-                                               (<float> 10000 + distance_ij)))
-            gradients_i0 += w * embedding_ij_0
-            gradients[j, 0] -= w * embedding_ij_0
-            gradients_i1 += w * embedding_ij_1
-            gradients[j, 1] -= w * embedding_ij_1
+        # Mid-near pairs (skipped in phase 3, where their weight is 0)
+        if w_mid_near:
+            for index in range(
+                    <unsigned long long> i * num_mid_near_pairs,
+                    <unsigned long long> (i + 1) * num_mid_near_pairs):
+                if index + 8 < num_cells * num_mid_near_pairs:
+                    PREFETCH(&embedding[mid_near_pairs_flat[index + 8], 0])
+                    PREFETCH(&gradients[mid_near_pairs_flat[index + 8], 0])
+                j = mid_near_pairs_flat[index]
+                embedding_ij_0 = embedding_i0 - embedding[j, 0]
+                embedding_ij_1 = embedding_i1 - embedding[j, 1]
+                distance_ij = <float> 1 + embedding_ij_0 * embedding_ij_0 + \
+                    embedding_ij_1 * embedding_ij_1
+                w = w_mid_near * (<float> 20000 / (
+                    (<float> 10000 + distance_ij) *
+                    (<float> 10000 + distance_ij)))
+                gradients_i0 += w * embedding_ij_0
+                gradients[j, 0] -= w * embedding_ij_0
+                gradients_i1 += w * embedding_ij_1
+                gradients[j, 1] -= w * embedding_ij_1
 
         # Further pairs
-        for k in range(num_further_pairs):
-            j = further_pairs[i, k]
+        for index in range(<unsigned long long> i * num_further_pairs,
+                           <unsigned long long> (i + 1) * num_further_pairs):
+            if index + 8 < num_cells * num_further_pairs:
+                PREFETCH(&embedding[further_pairs_flat[index + 8], 0])
+                PREFETCH(&gradients[further_pairs_flat[index + 8], 0])
+            j = further_pairs_flat[index]
             embedding_ij_0 = embedding_i0 - embedding[j, 0]
             embedding_ij_1 = embedding_i1 - embedding[j, 1]
             distance_ij = <float> 1 + embedding_ij_0 * embedding_ij_0 + \
@@ -462,18 +562,22 @@ cdef inline void get_gradients_fast(const float[:, ::1] embedding,
 cdef inline void get_scaled_gradients_fast(
         const float[:, ::1] embedding,
         const unsigned[:, ::1] neighbor_pairs,
-        const unsigned[:, ::1] mid_near_pairs,
         const unsigned[:, ::1] further_pairs,
-        const float w_neighbors,
-        const float w_mid_near,
         const float half_max_distance,
         float[:, ::1] gradients):
-    cdef unsigned i, j, k, num_neighbors = neighbor_pairs.shape[1], \
-        num_mid_near_pairs = mid_near_pairs.shape[1], \
+    # LocalMAP's phase-3 gradients, where `w_neighbors` is 1 and `w_mid_near`
+    # is 0 (so mid-near pairs are skipped), and nearest-neighbor forces are
+    # scaled by `half_max_distance / sqrt(distance_ij)`
+    cdef unsigned i, j, num_neighbors = neighbor_pairs.shape[1], \
         num_further_pairs = further_pairs.shape[1]
     cdef unsigned long long num_cells = neighbor_pairs.shape[0]
     cdef float embedding_i0, embedding_i1, gradients_i0, gradients_i1, \
         embedding_ij_0, embedding_ij_1, distance_ij, w
+    cdef const unsigned[::1] neighbor_pairs_flat = \
+        <unsigned[:num_cells * num_neighbors]> &neighbor_pairs[0, 0]
+    cdef const unsigned[::1] further_pairs_flat = \
+        <unsigned[:num_cells * num_further_pairs]> &further_pairs[0, 0]
+    cdef unsigned long long index
 
     gradients[:] = 0
     for i in range(num_cells):
@@ -483,38 +587,31 @@ cdef inline void get_scaled_gradients_fast(
         gradients_i1 = 0
 
         # Nearest-neighbor pairs
-        for k in range(num_neighbors):
-            j = neighbor_pairs[i, k]
+        for index in range(<unsigned long long> i * num_neighbors,
+                           <unsigned long long> (i + 1) * num_neighbors):
+            if index + 8 < num_cells * num_neighbors:
+                PREFETCH(&embedding[neighbor_pairs_flat[index + 8], 0])
+                PREFETCH(&gradients[neighbor_pairs_flat[index + 8], 0])
+            j = neighbor_pairs_flat[index]
             embedding_ij_0 = embedding_i0 - embedding[j, 0]
             embedding_ij_1 = embedding_i1 - embedding[j, 1]
             distance_ij = <float> 1 + embedding_ij_0 * embedding_ij_0 + \
                 embedding_ij_1 * embedding_ij_1
-            w = w_neighbors * (<float> 20 /
-                ((<float> 10 + distance_ij) * (<float> 10 + distance_ij)))
-            # this is the only line that differs from `get_gradients_fast()`
+            w = <float> 20 / ((<float> 10 + distance_ij) *
+                              (<float> 10 + distance_ij))
             w *= half_max_distance / sqrt(distance_ij)
             gradients_i0 += w * embedding_ij_0
             gradients[j, 0] -= w * embedding_ij_0
             gradients_i1 += w * embedding_ij_1
             gradients[j, 1] -= w * embedding_ij_1
 
-        # Mid-near pairs
-        for k in range(num_mid_near_pairs):
-            j = mid_near_pairs[i, k]
-            embedding_ij_0 = embedding_i0 - embedding[j, 0]
-            embedding_ij_1 = embedding_i1 - embedding[j, 1]
-            distance_ij = <float> 1 + embedding_ij_0 * embedding_ij_0 + \
-                embedding_ij_1 * embedding_ij_1
-            w = w_mid_near * (<float> 20000 / ((<float> 10000 + distance_ij) *
-                                               (<float> 10000 + distance_ij)))
-            gradients_i0 += w * embedding_ij_0
-            gradients[j, 0] -= w * embedding_ij_0
-            gradients_i1 += w * embedding_ij_1
-            gradients[j, 1] -= w * embedding_ij_1
-
         # Further pairs
-        for k in range(num_further_pairs):
-            j = further_pairs[i, k]
+        for index in range(<unsigned long long> i * num_further_pairs,
+                           <unsigned long long> (i + 1) * num_further_pairs):
+            if index + 8 < num_cells * num_further_pairs:
+                PREFETCH(&embedding[further_pairs_flat[index + 8], 0])
+                PREFETCH(&gradients[further_pairs_flat[index + 8], 0])
+            j = further_pairs_flat[index]
             embedding_ij_0 = embedding_i0 - embedding[j, 0]
             embedding_ij_1 = embedding_i1 - embedding[j, 1]
             distance_ij = <float> 1 + embedding_ij_0 * embedding_ij_0 + \
@@ -550,6 +647,8 @@ cdef inline void get_gradient(const float[:, ::1] embedding,
     # Nearest-neighbor pairs
     for k in range(neighbor_pair_indptr[i],
                    neighbor_pair_indptr[i + 1]):
+        if k + 8 < neighbor_pair_indices.shape[0]:
+            PREFETCH(&embedding[neighbor_pair_indices[k + 8], 0])
         j = neighbor_pair_indices[k]
         embedding_ij_0 = embedding_i0 - embedding[j, 0]
         embedding_ij_1 = embedding_i1 - embedding[j, 1]
@@ -560,22 +659,27 @@ cdef inline void get_gradient(const float[:, ::1] embedding,
         gradient_i0 = gradient_i0 + w * embedding_ij_0
         gradient_i1 = gradient_i1 + w * embedding_ij_1
 
-    # Mid-near pairs
-    for k in range(mid_near_pair_indptr[i],
-                   mid_near_pair_indptr[i + 1]):
-        j = mid_near_pair_indices[k]
-        embedding_ij_0 = embedding_i0 - embedding[j, 0]
-        embedding_ij_1 = embedding_i1 - embedding[j, 1]
-        distance_ij = <float> 1 + embedding_ij_0 * embedding_ij_0 + \
-            embedding_ij_1 * embedding_ij_1
-        w = w_mid_near * (<float> 20000 / ((<float> 10000 + distance_ij) *
-                                           (<float> 10000 + distance_ij)))
-        gradient_i0 = gradient_i0 + w * embedding_ij_0
-        gradient_i1 = gradient_i1 + w * embedding_ij_1
+    # Mid-near pairs (skipped in phase 3, where their weight is 0)
+    if w_mid_near:
+        for k in range(mid_near_pair_indptr[i],
+                       mid_near_pair_indptr[i + 1]):
+            if k + 8 < mid_near_pair_indices.shape[0]:
+                PREFETCH(&embedding[mid_near_pair_indices[k + 8], 0])
+            j = mid_near_pair_indices[k]
+            embedding_ij_0 = embedding_i0 - embedding[j, 0]
+            embedding_ij_1 = embedding_i1 - embedding[j, 1]
+            distance_ij = <float> 1 + embedding_ij_0 * embedding_ij_0 + \
+                embedding_ij_1 * embedding_ij_1
+            w = w_mid_near * (<float> 20000 / ((<float> 10000 + distance_ij) *
+                                               (<float> 10000 + distance_ij)))
+            gradient_i0 = gradient_i0 + w * embedding_ij_0
+            gradient_i1 = gradient_i1 + w * embedding_ij_1
 
     # Further pairs
     for k in range(further_pair_indptr[i],
                    further_pair_indptr[i + 1]):
+        if k + 8 < further_pair_indices.shape[0]:
+            PREFETCH(&embedding[further_pair_indices[k + 8], 0])
         j = further_pair_indices[k]
         embedding_ij_0 = embedding_i0 - embedding[j, 0]
         embedding_ij_1 = embedding_i1 - embedding[j, 1]
@@ -614,15 +718,14 @@ cdef inline void get_gradients_parallel(
 cdef inline void get_scaled_gradient(const float[:, ::1] embedding,
                                      const unsigned[::1] neighbor_pair_indices,
                                      const unsigned[::1] neighbor_pair_indptr,
-                                     const unsigned[::1] mid_near_pair_indices,
-                                     const unsigned[::1] mid_near_pair_indptr,
                                      const unsigned[::1] further_pair_indices,
                                      const unsigned[::1] further_pair_indptr,
-                                     const float w_neighbors,
-                                     const float w_mid_near,
                                      const float half_max_distance,
                                      float[:, ::1] gradients,
                                      const unsigned i) noexcept nogil:
+    # LocalMAP's phase-3 gradients, where `w_neighbors` is 1 and `w_mid_near`
+    # is 0 (so mid-near pairs are skipped), and nearest-neighbor forces are
+    # scaled by `half_max_distance / sqrt(distance_ij)`
     cdef unsigned j, k
     cdef unsigned long long num_cells = embedding.shape[0]
     cdef float embedding_ij_0, embedding_ij_1, distance_ij, w, \
@@ -632,34 +735,24 @@ cdef inline void get_scaled_gradient(const float[:, ::1] embedding,
     # Nearest-neighbor pairs
     for k in range(neighbor_pair_indptr[i],
                    neighbor_pair_indptr[i + 1]):
+        if k + 8 < neighbor_pair_indices.shape[0]:
+            PREFETCH(&embedding[neighbor_pair_indices[k + 8], 0])
         j = neighbor_pair_indices[k]
         embedding_ij_0 = embedding_i0 - embedding[j, 0]
         embedding_ij_1 = embedding_i1 - embedding[j, 1]
         distance_ij = <float> 1 + embedding_ij_0 * embedding_ij_0 + \
             embedding_ij_1 * embedding_ij_1
-        w = w_neighbors * (<float> 20 /
-            ((<float> 10 + distance_ij) * (<float> 10 + distance_ij)))
-        # this is the only line that differs from `get_gradient()`
+        w = <float> 20 / ((<float> 10 + distance_ij) *
+                          (<float> 10 + distance_ij))
         w *= half_max_distance / sqrt(distance_ij)
-        gradient_i0 = gradient_i0 + w * embedding_ij_0
-        gradient_i1 = gradient_i1 + w * embedding_ij_1
-
-    # Mid-near pairs
-    for k in range(mid_near_pair_indptr[i],
-                   mid_near_pair_indptr[i + 1]):
-        j = mid_near_pair_indices[k]
-        embedding_ij_0 = embedding_i0 - embedding[j, 0]
-        embedding_ij_1 = embedding_i1 - embedding[j, 1]
-        distance_ij = <float> 1 + embedding_ij_0 * embedding_ij_0 + \
-            embedding_ij_1 * embedding_ij_1
-        w = w_mid_near * (<float> 20000 / ((<float> 10000 + distance_ij) *
-                                           (<float> 10000 + distance_ij)))
         gradient_i0 = gradient_i0 + w * embedding_ij_0
         gradient_i1 = gradient_i1 + w * embedding_ij_1
 
     # Further pairs
     for k in range(further_pair_indptr[i],
                    further_pair_indptr[i + 1]):
+        if k + 8 < further_pair_indices.shape[0]:
+            PREFETCH(&embedding[further_pair_indices[k + 8], 0])
         j = further_pair_indices[k]
         embedding_ij_0 = embedding_i0 - embedding[j, 0]
         embedding_ij_1 = embedding_i1 - embedding[j, 1]
@@ -677,12 +770,8 @@ cdef inline void get_scaled_gradients_parallel(
         const float[:, ::1] embedding,
         const unsigned[::1] neighbor_pair_indices,
         const unsigned[::1] neighbor_pair_indptr,
-        const unsigned[::1] mid_near_pair_indices,
-        const unsigned[::1] mid_near_pair_indptr,
         const unsigned[::1] further_pair_indices,
         const unsigned[::1] further_pair_indptr,
-        const float w_neighbors,
-        const float w_mid_near,
         const float half_max_distance,
         float[:, ::1] gradients,
         const unsigned num_threads) noexcept nogil:
@@ -691,10 +780,9 @@ cdef inline void get_scaled_gradients_parallel(
 
     for i in prange(num_cells, num_threads=num_threads):
         get_scaled_gradient(embedding, neighbor_pair_indices,
-                            neighbor_pair_indptr, mid_near_pair_indices,
-                            mid_near_pair_indptr, further_pair_indices,
-                            further_pair_indptr, w_neighbors,
-                            w_mid_near, half_max_distance, gradients, i)
+                            neighbor_pair_indptr, further_pair_indices,
+                            further_pair_indptr, half_max_distance,
+                            gradients, i)
 
 
 cdef inline void update_cell_embedding_adam(
@@ -967,26 +1055,12 @@ def pacmap(const float[:, ::1] PCs,
                            num_phase_3_iterations, learning_rate)
     else:
         num_threads = min(num_threads, num_cells)
-        if num_threads < 3:
-            reformat_for_parallel(neighbor_pairs, neighbor_pair_indices,
-                                  neighbor_pair_indptr, num_threads)
-            reformat_for_parallel(mid_near_pairs, mid_near_pair_indices,
-                                  mid_near_pair_indptr, num_threads)
-            reformat_for_parallel(further_pairs, further_pair_indices,
-                                  further_pair_indptr, num_threads)
-        else:
-            for i in prange(3, nogil=True, num_threads=3):
-                if i == 0:
-                    reformat_for_parallel(neighbor_pairs,
-                                          neighbor_pair_indices,
-                                          neighbor_pair_indptr, num_threads)
-                elif i == 1:
-                    reformat_for_parallel(mid_near_pairs,
-                                          mid_near_pair_indices,
-                                          mid_near_pair_indptr, num_threads)
-                else:
-                    reformat_for_parallel(further_pairs, further_pair_indices,
-                                          further_pair_indptr, num_threads)
+        reformat_for_parallel(neighbor_pairs, neighbor_pair_indices,
+                              neighbor_pair_indptr, num_threads)
+        reformat_for_parallel(mid_near_pairs, mid_near_pair_indices,
+                              mid_near_pair_indptr, num_threads)
+        reformat_for_parallel(further_pairs, further_pair_indices,
+                              further_pair_indptr, num_threads)
         PyErr_CheckSignals()
 
         # Use the parallel implementation even when single-threaded, to
@@ -1039,16 +1113,12 @@ cdef inline void localmap_serial_fast(const float[:, ::1] PCs,
         elif iteration < num_phase_1_iterations + num_phase_2_iterations:
             w_mid_near = 3
             w_neighbors = 3
-        else:
-            w_mid_near = 0
-            w_neighbors = 1
 
         # Calculate gradients
         if iteration >= num_phase_1_iterations + num_phase_2_iterations:
             get_scaled_gradients_fast(embedding, neighbor_pairs,
-                                      mid_near_pairs, further_pairs,
-                                      w_neighbors, w_mid_near,
-                                      half_max_distance, gradients)
+                                      further_pairs, half_max_distance,
+                                      gradients)
         else:
             get_gradients_fast(embedding, neighbor_pairs, mid_near_pairs,
                                further_pairs, w_neighbors, w_mid_near,
@@ -1122,17 +1192,13 @@ cdef inline void localmap_parallel(const float[:, ::1] PCs,
             elif iteration < num_phase_1_iterations + num_phase_2_iterations:
                 w_mid_near = 3
                 w_neighbors = 3
-            else:
-                w_mid_near = 0
-                w_neighbors = 1
 
             # Calculate gradients
             if iteration >= num_phase_1_iterations + num_phase_2_iterations:
                 get_scaled_gradients_parallel(
                     embedding, neighbor_pair_indices, neighbor_pair_indptr,
-                    mid_near_pair_indices, mid_near_pair_indptr,
-                    further_pair_indices, further_pair_indptr, w_neighbors,
-                    w_mid_near, half_max_distance, gradients, num_threads)
+                    further_pair_indices, further_pair_indptr,
+                    half_max_distance, gradients, num_threads)
             else:
                 get_gradients_parallel(
                     embedding, neighbor_pair_indices, neighbor_pair_indptr,
@@ -1251,26 +1317,12 @@ def localmap(const float[:, ::1] PCs,
                              max_distance, seed)
     else:
         num_threads = min(num_threads, num_cells)
-        if num_threads < 3:
-            reformat_for_parallel(neighbor_pairs, neighbor_pair_indices,
-                                  neighbor_pair_indptr, num_threads)
-            reformat_for_parallel(mid_near_pairs, mid_near_pair_indices,
-                                  mid_near_pair_indptr, num_threads)
-            reformat_for_parallel(further_pairs, further_pair_indices,
-                                  further_pair_indptr, num_threads)
-        else:
-            for i in prange(3, nogil=True, num_threads=3):
-                if i == 0:
-                    reformat_for_parallel(neighbor_pairs,
-                                          neighbor_pair_indices,
-                                          neighbor_pair_indptr, num_threads)
-                elif i == 1:
-                    reformat_for_parallel(mid_near_pairs,
-                                          mid_near_pair_indices,
-                                          mid_near_pair_indptr, num_threads)
-                else:
-                    reformat_for_parallel(further_pairs, further_pair_indices,
-                                          further_pair_indptr, num_threads)
+        reformat_for_parallel(neighbor_pairs, neighbor_pair_indices,
+                              neighbor_pair_indptr, num_threads)
+        reformat_for_parallel(mid_near_pairs, mid_near_pair_indices,
+                              mid_near_pair_indptr, num_threads)
+        reformat_for_parallel(further_pairs, further_pair_indices,
+                              further_pair_indptr, num_threads)
         PyErr_CheckSignals()
 
         # Use the parallel implementation even when single-threaded, to
