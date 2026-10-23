@@ -12,20 +12,24 @@ def gene_mean_and_variance_csr(const numeric[::1] data,
                                const long long[::1] cell_indices,
                                const unsigned long long num_cells,
                                const unsigned num_dataset_genes,
+                               unsigned long long[:, :, ::1] thread_sums,
+                               unsigned long long[::1] counts_sum,
+                               unsigned long long[::1] squared_counts_sum,
                                float[::1] mean,
                                float[::1] var,
                                unsigned[::1] nonzero_count,
                                unsigned num_threads):
+    # `thread_sums[thread_index, gene]` holds the sum, squared sum and number
+    # of non-zero counts of each gene across the elements processed by each
+    # thread, interleaved so that each element updates a single cache line.
+    # It is allocated once by the caller and reused across batches.
 
     cdef unsigned gene, cell, thread_index
     cdef unsigned long long num_elements, i, j, value, chunk_size, start, \
         end, total_sum, total_sum_of_squares, total_nonzero_count
     cdef float inv_num_cells = <float> 1 / num_cells
     cdef double inv_num_pairs_of_cells = 1.0 / (num_cells * (num_cells - 1))
-    cdef vector[unsigned long long] sum_buffer, sum_of_squares_buffer
-    cdef vector[vector[unsigned long long]] thread_sum, thread_sum_of_squares
-    cdef vector[vector[unsigned]] thread_nonzero_counts
-    cdef unsigned long long[::1] sum, sum_of_squares
+    cdef unsigned long long[:, ::1] sums
 
     if cell_indices.shape[0] == 0:
         num_elements = indices.shape[0]
@@ -34,21 +38,20 @@ def gene_mean_and_variance_csr(const numeric[::1] data,
         num_threads = min(num_threads, num_cells)
 
     if num_threads <= 1:
-        sum_buffer.resize(num_dataset_genes)
-        sum = <unsigned long long[:num_dataset_genes]> sum_buffer.data()
-        sum_of_squares_buffer.resize(num_dataset_genes)
-        sum_of_squares = <unsigned long long[:num_dataset_genes]> \
-            sum_of_squares_buffer.data()
-        nonzero_count[:] = 0
+        sums = thread_sums[0]
+        for gene in range(num_dataset_genes):
+            sums[gene, 0] = 0
+            sums[gene, 1] = 0
+            sums[gene, 2] = 0
         if cell_indices.shape[0] == 0:
             # Iterate over all elements of the count matrix, ignoring which
             # cell they're from
             for i in range(num_elements):
                 gene = indices[i]
                 value = <unsigned long long> data[i]
-                sum[gene] += value
-                sum_of_squares[gene] += value * value
-                nonzero_count[gene] += 1
+                sums[gene, 0] += value
+                sums[gene, 1] += value * value
+                sums[gene, 2] += 1
         else:
             # Only iterate over the elements from cells in `cell_indices` (i.e.
             # cells in this batch, and/or passing QC)
@@ -58,20 +61,20 @@ def gene_mean_and_variance_csr(const numeric[::1] data,
                                <unsigned long long> indptr[cell + 1]):
                     gene = indices[i]
                     value = <unsigned long long> data[i]
-                    sum[gene] += value
-                    sum_of_squares[gene] += value * value
-                    nonzero_count[gene] += 1
+                    sums[gene, 0] += value
+                    sums[gene, 1] += value * value
+                    sums[gene, 2] += 1
 
         # Calculate means and variances from the sums and squared sums
         for gene in range(num_dataset_genes):
-            mean[gene] = sum[gene] * inv_num_cells
+            counts_sum[gene] = sums[gene, 0]
+            squared_counts_sum[gene] = sums[gene, 1]
+            nonzero_count[gene] = <unsigned> sums[gene, 2]
+            mean[gene] = counts_sum[gene] * inv_num_cells
             var[gene] = <float> (inv_num_pairs_of_cells * (
-                <double> num_cells * <double> sum_of_squares[gene] -
-                <double> sum[gene] * <double> sum[gene]))
+                <double> num_cells * <double> squared_counts_sum[gene] -
+                <double> counts_sum[gene] * <double> counts_sum[gene]))
     else:
-        thread_sum.resize(num_threads)
-        thread_sum_of_squares.resize(num_threads)
-        thread_nonzero_counts.resize(num_threads)
         with nogil:
             if cell_indices.shape[0] == 0:
                 # Partition the work by elements, not cells, for better
@@ -80,31 +83,28 @@ def gene_mean_and_variance_csr(const numeric[::1] data,
                 chunk_size = (num_elements + num_threads - 1) / num_threads
                 with parallel(num_threads=num_threads):
                     thread_index = threadid()
-                    thread_sum[thread_index].resize(num_dataset_genes)
-                    thread_sum_of_squares[thread_index].resize(
-                        num_dataset_genes)
-                    thread_nonzero_counts[thread_index].resize(
-                        num_dataset_genes)
+                    for gene in range(num_dataset_genes):
+                        thread_sums[thread_index, gene, 0] = 0
+                        thread_sums[thread_index, gene, 1] = 0
+                        thread_sums[thread_index, gene, 2] = 0
 
                     start = thread_index * chunk_size
                     end = min(start + chunk_size, num_elements)
                     for i in range(start, end):
                         gene = indices[i]
                         value = <unsigned long long> data[i]
-                        thread_sum[thread_index][gene] += value
-                        thread_sum_of_squares[thread_index][gene] += \
-                            value * value
-                        thread_nonzero_counts[thread_index][gene] += 1
+                        thread_sums[thread_index, gene, 0] += value
+                        thread_sums[thread_index, gene, 1] += value * value
+                        thread_sums[thread_index, gene, 2] += 1
             else:
                 # Partition the work by cells
                 chunk_size = (num_cells + num_threads - 1) / num_threads
                 with parallel(num_threads=num_threads):
                     thread_index = threadid()
-                    thread_sum[thread_index].resize(num_dataset_genes)
-                    thread_sum_of_squares[thread_index].resize(
-                        num_dataset_genes)
-                    thread_nonzero_counts[thread_index].resize(
-                        num_dataset_genes)
+                    for gene in range(num_dataset_genes):
+                        thread_sums[thread_index, gene, 0] = 0
+                        thread_sums[thread_index, gene, 1] = 0
+                        thread_sums[thread_index, gene, 2] = 0
 
                     start = thread_index * chunk_size
                     end = min(start + chunk_size, num_cells)
@@ -114,10 +114,9 @@ def gene_mean_and_variance_csr(const numeric[::1] data,
                                        <unsigned long long> indptr[cell + 1]):
                             gene = indices[i]
                             value = <unsigned long long> data[i]
-                            thread_sum[thread_index][gene] += value
-                            thread_sum_of_squares[thread_index][gene] += \
-                                value * value
-                            thread_nonzero_counts[thread_index][gene] += 1
+                            thread_sums[thread_index, gene, 0] += value
+                            thread_sums[thread_index, gene, 1] += value * value
+                            thread_sums[thread_index, gene, 2] += 1
 
             # Calculate means and variances by aggregating the sums and squared
             # sums across threads
@@ -126,17 +125,18 @@ def gene_mean_and_variance_csr(const numeric[::1] data,
                 total_sum_of_squares = 0
                 total_nonzero_count = 0
                 for thread_index in range(num_threads):
-                    total_sum = total_sum + \
-                        thread_sum[thread_index][gene]
+                    total_sum = total_sum + thread_sums[thread_index, gene, 0]
                     total_sum_of_squares = total_sum_of_squares + \
-                        thread_sum_of_squares[thread_index][gene]
+                        thread_sums[thread_index, gene, 1]
                     total_nonzero_count = total_nonzero_count + \
-                        thread_nonzero_counts[thread_index][gene]
+                        thread_sums[thread_index, gene, 2]
+                counts_sum[gene] = total_sum
+                squared_counts_sum[gene] = total_sum_of_squares
+                nonzero_count[gene] = <unsigned> total_nonzero_count
                 mean[gene] = total_sum * inv_num_cells
                 var[gene] = <float> (inv_num_pairs_of_cells * (
                     <double> num_cells * <double> total_sum_of_squares -
                     <double> total_sum * <double> total_sum))
-                nonzero_count[gene] = total_nonzero_count
 
 
 def gene_mean_and_variance_csc(const numeric[::1] data,
@@ -258,38 +258,33 @@ def clipped_sum_csr(const numeric[::1] data,
                     const unsigned num_dataset_genes,
                     const long long[::1] cell_indices,
                     const float[::1] clip_val,
+                    unsigned long long[:, :, ::1] thread_sums,
+                    const unsigned long long[::1] counts_sum,
+                    const unsigned long long[::1] squared_counts_sum,
                     float[::1] batch_counts_sum,
                     float[::1] squared_batch_counts_sum,
                     unsigned num_threads):
-    cdef unsigned cell, gene, thread_index, chunk_size, start, end
-    cdef unsigned long long i, j, value, total_batch_counts_sum, \
-        total_squared_batch_counts_sum, total_num_out_of_range
-    cdef vector[unsigned long long] batch_counts_sum_int_buffer, \
-        squared_batch_counts_sum_int_buffer, num_out_of_range_buffer
-    cdef vector[vector[unsigned long long]] thread_batch_counts_sum_int, \
-        thread_squared_batch_counts_sum_int, thread_num_out_of_range
+    cdef unsigned cell, gene, thread_index
+    cdef unsigned long long i, j, value, chunk_size, start, end, \
+        out_of_range_sum, squared_out_of_range_sum, num_out_of_range
     cdef pair[unsigned, unsigned] row_range
-    cdef unsigned long long[::1] batch_counts_sum_int, \
-        squared_batch_counts_sum_int, num_out_of_range
+    cdef unsigned long long[:, ::1] sums
 
     # Key insight: the things we're summing are integers except when
     # `value > clip_val[gene]`, in which case we are adding a (floating-point)
     # constant, so keep track of this case separately and add it at the end, to
-    # minimize floating-point error. Also, use an integer version of `clip_val`
-    # for these comparisons, to avoid any potential inconsistency in
-    # floating-point roundoff between code paths.
+    # minimize floating-point error. This case is rare, so only update
+    # `thread_sums` for these elements, and subtract them from the unclipped
+    # sums calculated by `gene_mean_and_variance_csr()`. Also, use an integer
+    # version of `clip_val` for these comparisons, to avoid any potential
+    # inconsistency in floating-point roundoff between code paths.
     num_threads = min(num_threads, num_cells)
     if num_threads <= 1:
-        batch_counts_sum_int_buffer.resize(num_dataset_genes)
-        batch_counts_sum_int = <unsigned long long[:num_dataset_genes]> \
-            batch_counts_sum_int_buffer.data()
-        squared_batch_counts_sum_int_buffer.resize(num_dataset_genes)
-        squared_batch_counts_sum_int = \
-            <unsigned long long[:num_dataset_genes]> \
-            squared_batch_counts_sum_int_buffer.data()
-        num_out_of_range_buffer.resize(num_dataset_genes)
-        num_out_of_range = <unsigned long long[:num_dataset_genes]> \
-            num_out_of_range_buffer.data()
+        sums = thread_sums[0]
+        for gene in range(num_dataset_genes):
+            sums[gene, 0] = 0
+            sums[gene, 1] = 0
+            sums[gene, 2] = 0
         if cell_indices.shape[0] == 0:
             for cell in range(num_cells):
                 for i in range(<unsigned long long> indptr[cell],
@@ -297,10 +292,9 @@ def clipped_sum_csr(const numeric[::1] data,
                     gene = indices[i]
                     value = <unsigned long long> data[i]
                     if value > clip_val[gene]:
-                        num_out_of_range[gene] += 1
-                    else:
-                        batch_counts_sum_int[gene] += value
-                        squared_batch_counts_sum_int[gene] += value * value
+                        sums[gene, 0] += value
+                        sums[gene, 1] += value * value
+                        sums[gene, 2] += 1
         else:
             for j in range(<unsigned long long> cell_indices.shape[0]):
                 cell = cell_indices[j]
@@ -309,31 +303,25 @@ def clipped_sum_csr(const numeric[::1] data,
                     gene = indices[i]
                     value = <unsigned long long> data[i]
                     if value > clip_val[gene]:
-                        num_out_of_range[gene] += 1
-                    else:
-                        batch_counts_sum_int[gene] += value
-                        squared_batch_counts_sum_int[gene] += value * value
+                        sums[gene, 0] += value
+                        sums[gene, 1] += value * value
+                        sums[gene, 2] += 1
         for gene in range(num_dataset_genes):
             batch_counts_sum[gene] = \
-                batch_counts_sum_int[gene] + \
-                num_out_of_range[gene] * clip_val[gene]
+                (counts_sum[gene] - sums[gene, 0]) + \
+                sums[gene, 2] * clip_val[gene]
             squared_batch_counts_sum[gene] = \
-                squared_batch_counts_sum_int[gene] + \
-                num_out_of_range[gene] * clip_val[gene] * clip_val[gene]
+                (squared_counts_sum[gene] - sums[gene, 1]) + \
+                sums[gene, 2] * clip_val[gene] * clip_val[gene]
     else:
-        thread_batch_counts_sum_int.resize(num_threads)
-        thread_squared_batch_counts_sum_int.resize(num_threads)
-        thread_num_out_of_range.resize(num_threads)
         with nogil:
             if cell_indices.shape[0] == 0:
                 with parallel(num_threads=num_threads):
                     thread_index = threadid()
-                    thread_batch_counts_sum_int[thread_index].resize(
-                        num_dataset_genes)
-                    thread_squared_batch_counts_sum_int[thread_index].resize(
-                        num_dataset_genes)
-                    thread_num_out_of_range[thread_index].resize(
-                        num_dataset_genes)
+                    for gene in range(num_dataset_genes):
+                        thread_sums[thread_index, gene, 0] = 0
+                        thread_sums[thread_index, gene, 1] = 0
+                        thread_sums[thread_index, gene, 2] = 0
 
                     row_range = get_thread_offset(indptr, thread_index,
                                                   num_threads)
@@ -343,23 +331,18 @@ def clipped_sum_csr(const numeric[::1] data,
                             gene = indices[i]
                             value = <unsigned long long> data[i]
                             if value > clip_val[gene]:
-                                thread_num_out_of_range[
-                                    thread_index][gene] += 1
-                            else:
-                                thread_batch_counts_sum_int[
-                                    thread_index][gene] += value
-                                thread_squared_batch_counts_sum_int[
-                                    thread_index][gene] += value * value
+                                thread_sums[thread_index, gene, 0] += value
+                                thread_sums[thread_index, gene, 1] += \
+                                    value * value
+                                thread_sums[thread_index, gene, 2] += 1
             else:
                 chunk_size = (num_cells + num_threads - 1) / num_threads
                 with parallel(num_threads=num_threads):
                     thread_index = threadid()
-                    thread_batch_counts_sum_int[thread_index].resize(
-                        num_dataset_genes)
-                    thread_squared_batch_counts_sum_int[thread_index].resize(
-                        num_dataset_genes)
-                    thread_num_out_of_range[thread_index].resize(
-                        num_dataset_genes)
+                    for gene in range(num_dataset_genes):
+                        thread_sums[thread_index, gene, 0] = 0
+                        thread_sums[thread_index, gene, 1] = 0
+                        thread_sums[thread_index, gene, 2] = 0
 
                     start = thread_index * chunk_size
                     end = min(start + chunk_size, num_cells)
@@ -370,36 +353,29 @@ def clipped_sum_csr(const numeric[::1] data,
                             gene = indices[i]
                             value = <unsigned long long> data[i]
                             if value > clip_val[gene]:
-                                thread_num_out_of_range[
-                                    thread_index][gene] += 1
-                            else:
-                                thread_batch_counts_sum_int[
-                                    thread_index][gene] += value
-                                thread_squared_batch_counts_sum_int[
-                                    thread_index][gene] += value * value
+                                thread_sums[thread_index, gene, 0] += value
+                                thread_sums[thread_index, gene, 1] += \
+                                    value * value
+                                thread_sums[thread_index, gene, 2] += 1
 
             for gene in prange(num_dataset_genes,
                                num_threads=num_threads):
-                total_batch_counts_sum = 0
-                total_squared_batch_counts_sum = 0
-                total_num_out_of_range = 0
+                out_of_range_sum = 0
+                squared_out_of_range_sum = 0
+                num_out_of_range = 0
                 for thread_index in range(num_threads):
-                    total_batch_counts_sum = \
-                        total_batch_counts_sum + \
-                        thread_batch_counts_sum_int[thread_index][gene]
-                    total_squared_batch_counts_sum = \
-                        total_squared_batch_counts_sum + \
-                        thread_squared_batch_counts_sum_int[thread_index][gene]
-                    total_num_out_of_range = \
-                        total_num_out_of_range + \
-                        thread_num_out_of_range[thread_index][gene]
+                    out_of_range_sum = out_of_range_sum + \
+                        thread_sums[thread_index, gene, 0]
+                    squared_out_of_range_sum = squared_out_of_range_sum + \
+                        thread_sums[thread_index, gene, 1]
+                    num_out_of_range = num_out_of_range + \
+                        thread_sums[thread_index, gene, 2]
                 batch_counts_sum[gene] = \
-                    total_batch_counts_sum + \
-                    total_num_out_of_range * clip_val[gene]
+                    (counts_sum[gene] - out_of_range_sum) + \
+                    num_out_of_range * clip_val[gene]
                 squared_batch_counts_sum[gene] = \
-                    total_squared_batch_counts_sum + \
-                    total_num_out_of_range * \
-                    clip_val[gene] * clip_val[gene]
+                    (squared_counts_sum[gene] - squared_out_of_range_sum) + \
+                    num_out_of_range * clip_val[gene] * clip_val[gene]
 
 
 def clipped_sum_csc(const numeric[::1] data,

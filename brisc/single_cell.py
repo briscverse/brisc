@@ -11385,6 +11385,12 @@ class SingleCell:
         norm_gene_vars = []
         total_nonzero_count = np.zeros(len(genes_in_all_datasets),
                                        dtype=np.uint64)
+        # For CSR, allocate the per-thread sums once and reuse them across
+        # batches, rather than reallocating them for every batch
+        if any(isinstance(dataset._X, csr_array) for dataset in datasets):
+            thread_sums = np.empty((num_threads, max(
+                dataset._X.shape[1] for dataset in datasets), 3),
+                dtype=np.uint64)
         for X, cell_mask, gene_indices in batches:
             num_dataset_genes = X.shape[1]
             mean = np.empty(num_dataset_genes, dtype=np.float32)
@@ -11400,10 +11406,15 @@ class SingleCell:
                 else:
                     cell_indices = cell_mask
                     num_cells = len(cell_indices)
+                counts_sum = np.empty(num_dataset_genes, dtype=np.uint64)
+                squared_counts_sum = np.empty(num_dataset_genes,
+                                              dtype=np.uint64)
                 gene_mean_and_variance_csr(
                     data=X.data, indices=X.indices, indptr=X.indptr,
                     cell_indices=cell_indices, num_cells=num_cells,
-                    num_dataset_genes=num_dataset_genes, mean=mean, var=var,
+                    num_dataset_genes=num_dataset_genes,
+                    thread_sums=thread_sums, counts_sum=counts_sum,
+                    squared_counts_sum=squared_counts_sum, mean=mean, var=var,
                     nonzero_count=nonzero_count, num_threads=num_threads)
             else:
                 if cell_mask is None:
@@ -11452,6 +11463,8 @@ class SingleCell:
                     data=X.data, indices=X.indices, indptr=X.indptr,
                     num_cells=num_cells, num_dataset_genes=num_dataset_genes,
                     cell_indices=cell_indices, clip_val=clip_val,
+                    thread_sums=thread_sums, counts_sum=counts_sum,
+                    squared_counts_sum=squared_counts_sum,
                     batch_counts_sum=batch_counts_sum,
                     squared_batch_counts_sum=squared_batch_counts_sum,
                     num_threads=num_threads)
