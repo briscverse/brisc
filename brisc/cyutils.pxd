@@ -267,50 +267,6 @@ cdef extern from * nogil:
 ctypedef unsigned unsigned_  # hack to get templates to work with unsigned
 
 
-cdef inline void bin_count_nogil(const integer[::1] arr,
-                                 unsigned[::1] counts,
-                                 unsigned num_threads) noexcept nogil:
-    cdef unsigned long long start, end, i, num_bins, chunk_size, \
-        num_elements = arr.shape[0]
-    cdef unsigned thread_index
-    cdef vector[vector[unsigned]] thread_counts
-    cdef unsigned* counts_pointer
-
-    num_threads = min(num_threads, num_elements)
-    if num_threads <= 1:
-        counts[:] = 0
-        for i in range(num_elements):
-            counts[arr[i]] += 1
-    else:
-        # Store counts for each thread in a temporary buffer, then aggregate at
-        # the end. As an optimization, put the counts for the last thread
-        # (`thread_index == num_threads - 1`) directly into the final `counts`
-        # array.
-        thread_counts.resize(num_threads - 1)
-        num_bins = counts.shape[0]
-        chunk_size = (num_elements + num_threads - 1) / num_threads
-        with parallel(num_threads=num_threads):
-            thread_index = threadid()
-            start = thread_index * chunk_size
-            if thread_index == num_threads - 1:
-                end = num_elements
-                counts[:] = 0
-                for i in range(start, end):
-                    counts[arr[i]] += 1
-            else:
-                thread_counts[thread_index].resize(num_bins)
-                counts_pointer = thread_counts[thread_index].data()
-                end = min(start + chunk_size, num_elements)
-                for i in range(start, end):
-                    counts_pointer[arr[i]] += 1
-
-        # Aggregate counts from all threads except the last
-        for thread_index in range(num_threads - 1):
-            counts_pointer = thread_counts[thread_index].data()
-            for i in range(num_bins):
-                counts[i] += counts_pointer[i]
-
-
 cdef inline pair[unsigned, unsigned] get_thread_offset(
         const signed_integer[::1] indptr,
         const unsigned thread_index,
