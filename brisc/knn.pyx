@@ -37,12 +37,14 @@ def knn_self(const float[:, ::1] X,
         num_cells_in_block, query_index_in_block, query_sorted, num_pairs, \
         pair_index, next_pair_index, query_in_cluster_index, \
         num_queries_in_cluster, max_cluster_size, cluster_start, \
-        cluster_size, neighbor_offset, num_dimensions = X.shape[1], \
+        cluster_size, neighbor_offset, block_offset, block_end, \
+        num_dimensions = X.shape[1], \
         num_clusters = centroids.shape[0], \
         num_chunks = (num_X + chunk_size_kmeans - 1) / chunk_size_kmeans, \
         num_blocks = (num_X + chunk_size_search - 1) / chunk_size_search
     cdef float norm, worst_distance, distance, query_norm, true_distance, \
-        partial_distance
+        block_min_distance
+    cdef const float* row
     cdef uninitialized_vector[unsigned] cluster_offsets_buffer
     cdef uninitialized_vector[float] centroid_norms_buffer, \
         temp_distances_buffer, query_X_buffer, block_distances_buffer
@@ -242,34 +244,25 @@ def knn_self(const float[:, ::1] X,
                     query_sorted = block_start + query_index_in_block
                     query_norm = cell_norms[query_sorted]
                     worst_distance = distances[query_sorted, 0]
-                    if not cluster_start <= query_sorted < \
-                            cluster_start + cluster_size:
-                        # Different cluster from the one the query cell is in;
-                        # leave out the self-neighbors check
-                        for neighbor_offset in range(cluster_size):
-                            neighbor = cluster_start + neighbor_offset
-                            partial_distance = block_distances[
-                                query_in_cluster_index * cluster_size +
-                                neighbor_offset]
-                            true_distance = query_norm + partial_distance
-                            if true_distance < worst_distance:
-                                max_heap_replace_top(
-                                    &neighbors[query_sorted, 0],
-                                    &distances[query_sorted, 0],
-                                    sorted_order[neighbor], true_distance,
-                                    num_neighbors)
-                                worst_distance = distances[query_sorted, 0]
-                    else:
-                        # Same cluster the query cell is in; check for
-                        # self-neighbors
-                        for neighbor_offset in range(cluster_size):
+                    row = &block_distances[
+                        query_in_cluster_index * cluster_size]
+                    # Skip blocks of 64 cells where even the nearest one
+                    # does not beat the current worst neighbor
+                    for block_offset in range(0, cluster_size, 64):
+                        block_end = min(block_offset + 64, cluster_size)
+                        block_min_distance = row[block_offset]
+                        for neighbor_offset in range(block_offset + 1,
+                                                     block_end):
+                            block_min_distance = min(block_min_distance,
+                                                     row[neighbor_offset])
+                        if query_norm + block_min_distance >= worst_distance:
+                            continue
+                        for neighbor_offset in range(block_offset,
+                                                     block_end):
                             neighbor = cluster_start + neighbor_offset
                             if query_sorted == neighbor:
                                 continue  # skip self-neighbors
-                            partial_distance = block_distances[
-                                query_in_cluster_index * cluster_size +
-                                neighbor_offset]
-                            true_distance = query_norm + partial_distance
+                            true_distance = query_norm + row[neighbor_offset]
                             if true_distance < worst_distance:
                                 max_heap_replace_top(
                                     &neighbors[query_sorted, 0],
@@ -458,37 +451,28 @@ def knn_self(const float[:, ::1] X,
                             query_sorted = block_start + query_index_in_block
                             query_norm = cell_norms[query_sorted]
                             worst_distance = distances[query_sorted, 0]
-                            if not cluster_start <= query_sorted < \
-                                    cluster_start + cluster_size:
-                                # Different cluster from the one the query cell
-                                # is in; leave out the self-neighbors check
-                                for neighbor_offset in range(cluster_size):
-                                    neighbor = cluster_start + neighbor_offset
-                                    partial_distance = thread_block_distances[
-                                        thread_index][query_in_cluster_index *
-                                            cluster_size + neighbor_offset]
-                                    true_distance = \
-                                        query_norm + partial_distance
-                                    if true_distance < worst_distance:
-                                        max_heap_replace_top(
-                                            &neighbors[query_sorted, 0],
-                                            &distances[query_sorted, 0],
-                                            sorted_order[neighbor],
-                                            true_distance, num_neighbors)
-                                        worst_distance = \
-                                            distances[query_sorted, 0]
-                            else:
-                                # Same cluster the query cell is in; check for
-                                # self-neighbors
-                                for neighbor_offset in range(cluster_size):
+                            row = \
+                                thread_block_distances[thread_index].data() + \
+                                query_in_cluster_index * cluster_size
+                            for block_offset in range(0, cluster_size, 64):
+                                block_end = \
+                                    min(block_offset + 64, cluster_size)
+                                block_min_distance = row[block_offset]
+                                for neighbor_offset in range(
+                                        block_offset + 1, block_end):
+                                    block_min_distance = min(
+                                        block_min_distance,
+                                        row[neighbor_offset])
+                                if query_norm + block_min_distance >= \
+                                        worst_distance:
+                                    continue
+                                for neighbor_offset in range(block_offset,
+                                                             block_end):
                                     neighbor = cluster_start + neighbor_offset
                                     if query_sorted == neighbor:
                                         continue  # skip self-neighbors
-                                    partial_distance = thread_block_distances[
-                                        thread_index][query_in_cluster_index *
-                                            cluster_size + neighbor_offset]
                                     true_distance = \
-                                        query_norm + partial_distance
+                                        query_norm + row[neighbor_offset]
                                     if true_distance < worst_distance:
                                         max_heap_replace_top(
                                             &neighbors[query_sorted, 0],
@@ -544,14 +528,16 @@ def knn_cross(const float[:, ::1] Y,
         num_cells_in_block, query_index_in_block, query_sorted, num_pairs, \
         pair_index, next_pair_index, query_in_cluster_index, \
         num_queries_in_cluster, max_cluster_size, cluster_start, \
-        cluster_size, neighbor_offset, num_dimensions = X.shape[1], \
+        cluster_size, neighbor_offset, block_offset, block_end, \
+        num_dimensions = X.shape[1], \
         num_clusters = centroids.shape[0], \
         num_chunks = (num_Y + chunk_size_kmeans - 1) / \
             chunk_size_kmeans, \
         num_blocks = (num_Y + chunk_size_search - 1) / \
             chunk_size_search
     cdef float norm, worst_distance, distance, query_norm, true_distance, \
-        partial_distance
+        block_min_distance
+    cdef const float* row
     cdef uninitialized_vector[unsigned] cluster_offsets_buffer
     cdef uninitialized_vector[float] centroid_norms_buffer, \
         temp_distances_buffer, query_Y_buffer, block_distances_buffer
@@ -743,18 +729,29 @@ def knn_cross(const float[:, ::1] Y,
                     query_sorted = block_start + query_index_in_block
                     query_norm = query_norms[query_sorted]
                     worst_distance = distances[query_sorted, 0]
-                    for neighbor_offset in range(cluster_size):
-                        neighbor = cluster_start + neighbor_offset
-                        partial_distance = block_distances[
-                            query_in_cluster_index * cluster_size +
-                            neighbor_offset]
-                        true_distance = query_norm + partial_distance
-                        if true_distance < worst_distance:
-                            max_heap_replace_top(&neighbors[query_sorted, 0],
-                                                 &distances[query_sorted, 0],
-                                                 neighbor, true_distance,
-                                                 num_neighbors)
-                            worst_distance = distances[query_sorted, 0]
+                    row = &block_distances[
+                        query_in_cluster_index * cluster_size]
+                    # Skip blocks of 64 cells where even the nearest one
+                    # does not beat the current worst neighbor
+                    for block_offset in range(0, cluster_size, 64):
+                        block_end = min(block_offset + 64, cluster_size)
+                        block_min_distance = row[block_offset]
+                        for neighbor_offset in range(block_offset + 1,
+                                                     block_end):
+                            block_min_distance = min(block_min_distance,
+                                                     row[neighbor_offset])
+                        if query_norm + block_min_distance >= worst_distance:
+                            continue
+                        for neighbor_offset in range(block_offset,
+                                                     block_end):
+                            neighbor = cluster_start + neighbor_offset
+                            true_distance = query_norm + row[neighbor_offset]
+                            if true_distance < worst_distance:
+                                max_heap_replace_top(
+                                    &neighbors[query_sorted, 0],
+                                    &distances[query_sorted, 0], neighbor,
+                                    true_distance, num_neighbors)
+                                worst_distance = distances[query_sorted, 0]
 
                 pair_index = next_pair_index
 
@@ -944,18 +941,34 @@ def knn_cross(const float[:, ::1] Y,
                             query_sorted = block_start + query_index_in_block
                             query_norm = query_norms[query_sorted]
                             worst_distance = distances[query_sorted, 0]
-                            for neighbor_offset in range(cluster_size):
-                                neighbor = cluster_start + neighbor_offset
-                                partial_distance = thread_block_distances[
-                                    thread_index][query_in_cluster_index *
-                                        cluster_size + neighbor_offset]
-                                true_distance = query_norm + partial_distance
-                                if true_distance < worst_distance:
-                                    max_heap_replace_top(
-                                        &neighbors[query_sorted, 0],
-                                        &distances[query_sorted, 0],
-                                        neighbor, true_distance, num_neighbors)
-                                    worst_distance = distances[query_sorted, 0]
+                            row = \
+                                thread_block_distances[thread_index].data() + \
+                                query_in_cluster_index * cluster_size
+                            for block_offset in range(0, cluster_size, 64):
+                                block_end = \
+                                    min(block_offset + 64, cluster_size)
+                                block_min_distance = row[block_offset]
+                                for neighbor_offset in range(
+                                        block_offset + 1, block_end):
+                                    block_min_distance = min(
+                                        block_min_distance,
+                                        row[neighbor_offset])
+                                if query_norm + block_min_distance >= \
+                                        worst_distance:
+                                    continue
+                                for neighbor_offset in range(block_offset,
+                                                             block_end):
+                                    neighbor = cluster_start + neighbor_offset
+                                    true_distance = \
+                                        query_norm + row[neighbor_offset]
+                                    if true_distance < worst_distance:
+                                        max_heap_replace_top(
+                                            &neighbors[query_sorted, 0],
+                                            &distances[query_sorted, 0],
+                                            neighbor, true_distance,
+                                            num_neighbors)
+                                        worst_distance = \
+                                            distances[query_sorted, 0]
 
                         pair_index = next_pair_index
 
