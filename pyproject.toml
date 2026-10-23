@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=61", "wheel", "Cython>=3.0", "numpy>=1.17.0", "scipy>=0.16.0"]
+requires = ["setuptools>=64", "setuptools-scm>=8", "wheel", "Cython>=3.0", "numpy>=1.17.0", "scipy>=0.16.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "brisc"
-version = "0.2.1"
+dynamic = ["version"]
 description = "Fast single-cell toolkit"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -38,6 +38,8 @@ include = ["brisc", "brisc.*"]
 
 [tool.setuptools.exclude-package-data]
 "*" = ["*.cpp", "*.c"]
+
+[tool.setuptools_scm]
 
 [tool.cibuildwheel]
 build = "cp39-* cp310-* cp311-* cp312-* cp313-* cp314-* cp315-*"
