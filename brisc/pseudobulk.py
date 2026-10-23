@@ -4,6 +4,7 @@ import os
 import polars as pl
 import re
 import shutil
+import sys
 from collections.abc import Iterable
 from itertools import islice, pairwise
 from pathlib import Path
@@ -4251,10 +4252,11 @@ class Pseudobulk:
 
         # Calculate norm factors
         norm_factors = np.empty(num_samples, dtype=np.float32)
+        is_win = sys.platform == 'win32'
         calc_norm_factors(X=X, logratio_trim=logratio_trim, sum_trim=sum_trim,
                           A_cutoff=A_cutoff, ref_sample=ref_sample,
                           norm_factors=norm_factors, library_size=library_size,
-                          num_threads=num_threads)
+                          num_threads=num_threads, is_win=is_win)
 
         return norm_factors  # this is actually `library_size * norm_factors`
 

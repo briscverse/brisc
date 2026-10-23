@@ -80,7 +80,8 @@ def calc_norm_factors(const numeric[:, ::1] X,
                       const unsigned ref_sample,
                       float[::1] norm_factors,
                       sum_type[::1] library_size,
-                      unsigned num_threads):
+                      unsigned num_threads,
+                      const bint is_win):
     cdef numeric ref_count, count
     cdef sum_type ref_library_size
     cdef unsigned i, j, n, loL, hiL, loS, hiS, thread_index, start_sample, \
@@ -125,9 +126,11 @@ def calc_norm_factors(const numeric[:, ::1] X,
         log_normalized_X_ref[j] = \
             log2(<float> count * inverse_ref_library_size)
 
-    # Calculate the normalization factor for each sample
+    # Calculate the normalization factor for each sample. Force the parallel
+    # path for Windows for floating-point consistency between 1 and multiple
+    # threads.
     num_threads = min(num_threads, num_samples)
-    if num_threads <= 1:
+    if num_threads <= 1 and not is_win:
         logR_buffer.resize(num_genes)
         absE_buffer.resize(num_genes)
         logR_rank_buffer.resize(num_genes)
