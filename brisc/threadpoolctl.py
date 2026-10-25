@@ -160,7 +160,10 @@ class _FlexiBLAS(_Library):
 
 class _MKL(_Library):
     name = 'mkl'
-    filename_prefixes = 'libmkl_rt', 'mkl_rt', 'libblas'
+    # Also match MKL's interface layers (e.g. `libmkl_intel_lp64()`), which
+    # export the threading functions when MKL is linked without libmkl_rt
+    filename_prefixes = \
+        'libmkl_rt', 'mkl_rt', 'libmkl_intel_', 'libmkl_gf_', 'libblas'
     check_symbols = 'MKL_Set_Num_Threads',
 
     def get(self):

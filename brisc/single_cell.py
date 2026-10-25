@@ -11391,103 +11391,111 @@ class SingleCell:
             thread_sums = np.empty((num_threads, max(
                 dataset._X.shape[1] for dataset in datasets), 3),
                 dtype=np.uint64)
-        for X, cell_mask, gene_indices in batches:
-            num_dataset_genes = X.shape[1]
-            mean = np.empty(num_dataset_genes, dtype=np.float32)
-            var = np.empty(num_dataset_genes, dtype=np.float32)
-            nonzero_count = np.empty(num_dataset_genes, dtype=np.uint32)
-            is_csr = isinstance(X, csr_array)
-            if is_csr:
-                # For CSR, `cell_mask` is either `None` (all cells) or a
-                # pre-computed int64 array of cell indices
-                if cell_mask is None:
-                    cell_indices = np.array([], dtype=np.int64)
-                    num_cells = X.shape[0]
+        with threadpool_limits(
+                1, user_api=None if num_threads == 1 else 'blas'):
+            for X, cell_mask, gene_indices in batches:
+                num_dataset_genes = X.shape[1]
+                mean = np.empty(num_dataset_genes, dtype=np.float32)
+                var = np.empty(num_dataset_genes, dtype=np.float32)
+                nonzero_count = np.empty(num_dataset_genes, dtype=np.uint32)
+                is_csr = isinstance(X, csr_array)
+                if is_csr:
+                    # For CSR, `cell_mask` is either `None` (all cells) or a
+                    # pre-computed int64 array of cell indices
+                    if cell_mask is None:
+                        cell_indices = np.array([], dtype=np.int64)
+                        num_cells = X.shape[0]
+                    else:
+                        cell_indices = cell_mask
+                        num_cells = len(cell_indices)
+                    counts_sum = np.empty(num_dataset_genes, dtype=np.uint64)
+                    squared_counts_sum = np.empty(num_dataset_genes,
+                                                  dtype=np.uint64)
+                    gene_mean_and_variance_csr(
+                        data=X.data, indices=X.indices, indptr=X.indptr,
+                        cell_indices=cell_indices, num_cells=num_cells,
+                        num_dataset_genes=num_dataset_genes,
+                        thread_sums=thread_sums, counts_sum=counts_sum,
+                        squared_counts_sum=squared_counts_sum, mean=mean,
+                        var=var, nonzero_count=nonzero_count,
+                        num_threads=num_threads)
                 else:
-                    cell_indices = cell_mask
-                    num_cells = len(cell_indices)
-                counts_sum = np.empty(num_dataset_genes, dtype=np.uint64)
-                squared_counts_sum = np.empty(num_dataset_genes,
-                                              dtype=np.uint64)
-                gene_mean_and_variance_csr(
-                    data=X.data, indices=X.indices, indptr=X.indptr,
-                    cell_indices=cell_indices, num_cells=num_cells,
-                    num_dataset_genes=num_dataset_genes,
-                    thread_sums=thread_sums, counts_sum=counts_sum,
-                    squared_counts_sum=squared_counts_sum, mean=mean, var=var,
-                    nonzero_count=nonzero_count, num_threads=num_threads)
-            else:
-                if cell_mask is None:
-                    cell_mask = np.array([], dtype=bool)
-                    num_cells = X.shape[0]
+                    if cell_mask is None:
+                        cell_mask = np.array([], dtype=bool)
+                        num_cells = X.shape[0]
+                    else:
+                        # The cast to int is necessary for floating-point
+                        # identical results: in NumPy ≥ 2.0, a Python int is a
+                        # "weak" scalar (int * float32 array -> float32) but a
+                        # NumPy integer is "strong" (np.int64 * float32 array
+                        # -> float64 since
+                        # `np.promote_types(int64, float32) == float64`).
+                        num_cells = int(cell_mask.sum())
+                    gene_mean_and_variance_csc(
+                        data=X.data, indices=X.indices, indptr=X.indptr,
+                        cell_mask=cell_mask, num_cells=num_cells,
+                        num_dataset_genes=num_dataset_genes, mean=mean,
+                        var=var, nonzero_count=nonzero_count,
+                        num_threads=num_threads)
+
+                not_constant = var > 0
+                y = np.log10(var[not_constant])
+                x = np.log10(mean[not_constant])
+                model = loess(x, y, span=span)
+                try:
+                    model.fit()
+                except ValueError as e:
+                    error_message = (
+                        f'LOESS model fitting failed; this typically happens '
+                        f'when there are very few cells (under ~1000), or '
+                        f'when batch_column is specified and certain batches '
+                        f'have very few cells')
+                    if batch_column is not None:
+                        error_message += \
+                            ': consider not specifying batch_column'
+                    raise ValueError(error_message) from e
+
+                estimated_variance = np.zeros(num_dataset_genes,
+                                              dtype=np.float32)
+                estimated_variance[not_constant] = model.outputs.fitted_values
+                estimated_stddev = np.sqrt(10 ** estimated_variance)
+                clip_val = mean + estimated_stddev * np.sqrt(num_cells,
+                                                             dtype=np.float32)
+                batch_counts_sum = np.empty(num_dataset_genes,
+                                            dtype=np.float32)
+                squared_batch_counts_sum = np.empty(num_dataset_genes,
+                                                    dtype=np.float32)
+                if is_csr:
+                    clipped_sum_csr(
+                        data=X.data, indices=X.indices, indptr=X.indptr,
+                        num_cells=num_cells,
+                        num_dataset_genes=num_dataset_genes,
+                        cell_indices=cell_indices, clip_val=clip_val,
+                        thread_sums=thread_sums, counts_sum=counts_sum,
+                        squared_counts_sum=squared_counts_sum,
+                        batch_counts_sum=batch_counts_sum,
+                        squared_batch_counts_sum=squared_batch_counts_sum,
+                        num_threads=num_threads)
                 else:
-                    # The cast to int is necessary for floating-point identical
-                    # results: in NumPy ≥ 2.0, a Python int is a "weak" scalar
-                    # (int * float32 array -> float32) but a NumPy integer is
-                    # "strong" (np.int64 * float32 array -> float64 since
-                    # `np.promote_types(int64, float32) == float64`).
-                    num_cells = int(cell_mask.sum())
-                gene_mean_and_variance_csc(
-                    data=X.data, indices=X.indices, indptr=X.indptr,
-                    cell_mask=cell_mask, num_cells=num_cells,
-                    num_dataset_genes=num_dataset_genes, mean=mean,
-                    var=var, nonzero_count=nonzero_count,
-                    num_threads=num_threads)
+                    clipped_sum_csc(
+                        data=X.data, indices=X.indices, indptr=X.indptr,
+                        cell_mask=cell_mask, clip_val=clip_val,
+                        batch_counts_sum=batch_counts_sum,
+                        squared_batch_counts_sum=squared_batch_counts_sum,
+                        num_threads=num_threads)
+                norm_gene_var = pl.Series(
+                    (1 / ((num_cells - 1) * np.square(estimated_stddev))) *
+                    ((num_cells * np.square(mean)) + squared_batch_counts_sum -
+                     2 * batch_counts_sum * mean))
 
-            not_constant = var > 0
-            y = np.log10(var[not_constant])
-            x = np.log10(mean[not_constant])
-            model = loess(x, y, span=span)
-            try:
-                model.fit()
-            except ValueError as e:
-                error_message = (
-                    f'LOESS model fitting failed; this typically happens when '
-                    f'there are very few cells (under ~1000), or when '
-                    f'batch_column is specified and certain batches have very '
-                    f'few cells')
-                if batch_column is not None:
-                    error_message += ': consider not specifying batch_column'
-                raise ValueError(error_message) from e
-
-            estimated_variance = np.zeros(num_dataset_genes, dtype=np.float32)
-            estimated_variance[not_constant] = model.outputs.fitted_values
-            estimated_stddev = np.sqrt(10 ** estimated_variance)
-            clip_val = mean + estimated_stddev * np.sqrt(num_cells,
-                                                         dtype=np.float32)
-            batch_counts_sum = np.empty(num_dataset_genes, dtype=np.float32)
-            squared_batch_counts_sum = np.empty(num_dataset_genes,
-                                                dtype=np.float32)
-            if is_csr:
-                clipped_sum_csr(
-                    data=X.data, indices=X.indices, indptr=X.indptr,
-                    num_cells=num_cells, num_dataset_genes=num_dataset_genes,
-                    cell_indices=cell_indices, clip_val=clip_val,
-                    thread_sums=thread_sums, counts_sum=counts_sum,
-                    squared_counts_sum=squared_counts_sum,
-                    batch_counts_sum=batch_counts_sum,
-                    squared_batch_counts_sum=squared_batch_counts_sum,
-                    num_threads=num_threads)
-            else:
-                clipped_sum_csc(
-                    data=X.data, indices=X.indices, indptr=X.indptr,
-                    cell_mask=cell_mask, clip_val=clip_val,
-                    batch_counts_sum=batch_counts_sum,
-                    squared_batch_counts_sum=squared_batch_counts_sum,
-                    num_threads=num_threads)
-            norm_gene_var = pl.Series(
-                (1 / ((num_cells - 1) * np.square(estimated_stddev))) *
-                ((num_cells * np.square(mean)) + squared_batch_counts_sum -
-                 2 * batch_counts_sum * mean))
-
-            # `norm_gene_var` and `nonzero_count` are with respect to the genes
-            # in `dataset.var_names`; if needed, map them to the genes in
-            # `genes_in_all_datasets`
-            if gene_indices is not None:
-                norm_gene_var = norm_gene_var[gene_indices]
-                nonzero_count = nonzero_count[gene_indices.to_numpy()]
-            norm_gene_vars.append(norm_gene_var)
-            total_nonzero_count += nonzero_count
+                # `norm_gene_var` and `nonzero_count` are with respect to the
+                # genes in `dataset.var_names`; if needed, map them to the
+                # genes in `genes_in_all_datasets`
+                if gene_indices is not None:
+                    norm_gene_var = norm_gene_var[gene_indices]
+                    nonzero_count = nonzero_count[gene_indices.to_numpy()]
+                norm_gene_vars.append(norm_gene_var)
+                total_nonzero_count += nonzero_count
 
         rank = pl.exclude('gene').rank('min', descending=True)
         final_rank = pl.struct(
