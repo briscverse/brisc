@@ -13333,7 +13333,7 @@ class SingleCell:
                   oversampling_factor: int | np.integer | float |
                                        np.floating = 1,
                   chunk_size_kmeans: int | np.integer | None = None,
-                  max_clustering_iterations: int | np.integer = 5,
+                  max_clustering_iterations: int | np.integer = 4,
                   block_proportion: int | float | np.integer |
                                     np.floating = 0.05,
                   tolerance: int | float | np.integer | np.floating = 0.01,
@@ -13355,52 +13355,12 @@ class SingleCell:
         multiple batches of the same dataset, with
         [Harmony2](https://github.com/immunogenomics/harmony).
 
-        Our implementation differs from the original Harmony2 implementation in
-        three key ways:
-
-        First, we parallelize Harmony via an innovative nested block strategy.
-        The original implementation partitions cells randomly into blocks, each
-        containing a fixed fraction (`block_proportion`, 5% by default) of the
-        total cells. It iterates over each block, subtracting the contribution
-        of the cells in the block to the observed and expected cluster-batch
-        co-occurence matrices `O` and `E`, re-calculating the soft-clustering
-        assignments `R` based on the residual `O` and `E`, then adding back the
-        contribution of the cells in the block to `O` and `E` based on the new
-        `R`. This approach resists straightforward parallelization because
-        updates to `R` for future blocks depend on updates to `O` and `E` from
-        previous blocks, leading to convergence failure if naively
-        parallelized. Instead, we parallelize within blocks by dividing them
-        into chunks of `chunk_size_Harmony` cells. We process each chunk in
-        parallel, subtracting only the `O` and `E` contributions of the chunk
-        itself, updating `R` for the chunk, and, after processing all chunks in
-        the block, add back the `O` and `E` contributions for all chunks based
-        on the updated `R`. Updating `O` and `E` at the end of each block
-        (rather than after processing every cell in the dataset) ensures
-        convergence, while the inner chunking enables parallelization without
-        disrupting convergence. To use the original implementation's strategy
-        of updating `R`, `O`, and `E` for each block as a whole, set
-        `chunk_size_Harmony` to at least the block size (`block_proportion`
-        times the total number of cells, rounded up to a multiple of 16), at
-        the cost of no longer parallelizing the update of `R`.
-
-        Second, we reduce the default number of clustering iterations
-        (Harmony's inner loop) from 20 to 5, but always complete all 5
-        iterations without early stopping based on convergence. In practice,
-        the largest changes to the Harmony objective function result from
-        updating the PCs (outer loop), not updating the soft-clustering
-        assignments (inner loop). Our implementation makes updating the PCs
-        sufficiently fast that there are rapidly diminishing returns from
-        performing lots of clustering updates, versus just skipping directly to
-        updating the PCs after a few clustering iterations. To use the original
-        implementation's default of 20 iterations with early stopping, specify
-        `early_stopping=True, max_clustering_iterations=20`.
-
-        Third, we use random k-means initialization, like version 1 of Harmony,
-        rather than Harmony2's kmeans++ initialization. We implement a parallel
-        version of kmeans++ called [k-means||](https://arxiv.org/abs/1203.6402),
-        but find it does not improve the accuracy of label transfer relative to
-        random initialization and increases runtime. kmeans|| initialization can
-        be enabled with `kmeans_barbar=True`.
+        Unlike Harmony2, our implementation parallelizes the clustering step
+        within each block of cells, by dividing each block into chunks of
+        `chunk_size_Harmony` cells that are updated in parallel. It also uses
+        random k-means initialization rather than k-means++ (initialization
+        with k-means||, a parallel version of k-means++, can be enabled with
+        `kmeans_barbar=True`).
 
         Args:
             others: the other SingleCell datasets to harmonize this one with.
@@ -13448,20 +13408,15 @@ class SingleCell:
                           30 and 3000 cells.
             max_iterations: the maximum number of iterations to run Harmony
                             for, if convergence is not achieved. Defaults to
-                            10, like the original Harmony R package,
-                            harmony-pytorch, and harmonypy. Set to `None` to
-                            use as many iterations as necessary to achieve
-                            convergence.
+                            10. Set to `None` to use as many iterations as
+                            necessary to achieve convergence.
             num_kmeans_iterations: the maximum number of iterations of
-                                   k-means clustering to perform before
-                                   starting the nearest-neighbor search,
-                                   stopping early if a relative convergence of
+                                   k-means clustering to perform to
+                                   initialize the cluster centroids, stopping
+                                   early if a relative convergence of
                                    `kmeans_tolerance` is reached. Defaults to
-                                   25, like the original Harmony R package,
-                                   harmony-pytorch, and harmonypy. However,
-                                   unlike these packages, only one
-                                   initialization is tried rather than 10 to
-                                   reduce runtime.
+                                   25, whereas Harmony2 always runs 10
+                                   iterations without early stopping.
             kmeans_tolerance: the relative change in inertia (the sum of
                               squared distances from each cell to its assigned
                               centroid) used to determine whether to stop
@@ -13504,19 +13459,13 @@ class SingleCell:
                                        clustering step within each Harmony
                                        iteration for, or the maximum number of
                                        iterations if `early_stopping=True`.
-                                       Unlike the original Harmony algorithm,
-                                       convergence of the clustering is not
+                                       Convergence of the clustering is not
                                        checked unless `early_stopping=True`.
-                                       Defaults to 5 iterations; this differs
-                                       from the 20 used by the original harmony
-                                       R package and harmonypy and the 200
-                                       iterations used by harmony-pytorch,
-                                       which do have convergence checks.
-                                       Must be 4 or more when
-                                       `early_stopping=True`, since Harmony's
-                                       clustering convergence check requires
-                                       knowing the errors from the past 3
-                                       iterations.
+                                       Defaults to 4 iterations. Must be 4 or
+                                       more when `early_stopping=True`, since
+                                       the clustering convergence check
+                                       requires knowing the errors from the
+                                       past 3 iterations.
             block_proportion: the proportion of cells to use in each batch
                               update in the clustering step; must be greater
                               than zero and less than or equal to 1
@@ -13525,8 +13474,7 @@ class SingleCell:
                        `max_iterations` iterations
             early_stopping: whether to stop clustering before
                             `max_clustering_iterations` iterations if
-                            convergence is reached, like in the original
-                            Harmony algorithm
+                            convergence is reached.
             clustering_tolerance: the relative tolerance used to determine
                                   whether to stop clustering before
                                   `max_clustering_iterations` iterations. Only

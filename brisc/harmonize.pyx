@@ -372,8 +372,7 @@ def harmony(const float[:, ::1] PCs,
     cdef float base, kmeans_error, entropy_term, norm, Rij, \
         diversity_penalty, prev_objective, total, Pr_bi, Eij, Oij, Rkj, \
         objective, last_two, old, new, ridge_lambda, factor, beta, \
-        two_over_sigma = <float> 2 / sigma, half_sigma = sigma / <float> 2, \
-        exp_neg_two_over_sigma = exp(-two_over_sigma)
+        two_over_sigma = <float> 2 / sigma, half_sigma = sigma / <float> 2
     cdef float past_clustering_objectives[3]
     cdef bint compute_objective, compute_Y, converged, cold_start
     cdef str metrics
@@ -471,8 +470,8 @@ def harmony(const float[:, ::1] PCs,
         if tau:
             for i in range(num_batches):
                 Pr_b[i] = <float> N_b[i] / num_cells
-                base = exp(-(<float> N_b[i]) / (num_clusters * tau))
-                theta_batch[i] = theta * (<float> 1 - base * base)
+                base = (<float> N_b[i]) / (num_clusters * tau)
+                theta_batch[i] = theta * (<float> 1 - exp(-base * base))
         else:
             for i in range(num_batches):
                 Pr_b[i] = <float> N_b[i] / num_cells
@@ -568,7 +567,9 @@ def harmony(const float[:, ::1] PCs,
                             kmeans_error = kmeans_error + Rij * (
                                 <float> 1 - half_sigma *
                                 distances[thread_index, i, j])
-                            entropy_term = entropy_term + Rij * log(Rij)
+                            # Skip entries of `R` that underflowed to 0
+                            if Rij > <float> 0:
+                                entropy_term = entropy_term + Rij * log(Rij)
                             distances[thread_index, i, j] = Rij
                     beta = piece > slab_piece_offsets[slab]
                     matrix_multiply(
@@ -667,11 +668,12 @@ def harmony(const float[:, ::1] PCs,
                 # then chunkwise within each block. Note that the full formula
                 # for `R` is: `((E + 1) / (O + E + 1)) ** theta *
                 #              exp(-2 / sigma * (1 - Z @ Y.T))`
-                # which we can calculate as `ratio * exp(distances)` where
-                # `ratio = exp(-2 / sigma) *
-                #          ((E + 1) / (O + E + 1)) ** theta` and
-                # `distances = 2 / sigma * Z @ Y.T`. Calculating `R` this way
-                # saves a few multiplications.
+                # which we calculate as `ratio * exp(distances - 2 / sigma)`
+                # where `ratio = ((E + 1) / (O + E + 1)) ** theta` and
+                # `distances = 2 / sigma * Z @ Y.T`. Since the rows of `Z` and
+                # `Y` have unit norm, the exponent is never positive, so
+                # `exp()` can underflow but never overflow, even when `sigma`
+                # is small.
                 #
                 # If we are done clustering or `early_stopping=True`, also
                 # compute the first two components of the objective function,
@@ -701,8 +703,7 @@ def harmony(const float[:, ::1] PCs,
 
                             # Get the chunk of `Z`, the normalized PCs, to
                             # process. Calculate the observed-to-expected ratio
-                            # `ratio = exp(-2 / sigma) *
-                            #          ((E + 1) / (O + E + 1)) ** theta`
+                            # `ratio = ((E + 1) / (O + E + 1)) ** theta`
                             # for the chunk, subtracting the chunk's own
                             # contributions to `E` and `O`: `Pr_b` times
                             # `R_sums[chunk_index]` and `delta_O[chunk_index]`,
@@ -727,11 +728,10 @@ def harmony(const float[:, ::1] PCs,
                                     Eij = E[i, j] - \
                                         Pr_bi * R_sums[chunk_index, j]
                                     Oij = O[i, j] + delta_O[chunk_index, i, j]
-                                    ratio[chunk_index, i, j] = \
-                                        exp_neg_two_over_sigma * \
-                                        pow((Eij + <float> 1) /
-                                            (Oij + Eij + <float> 1),
-                                            theta_batch[i])
+                                    ratio[chunk_index, i, j] = pow(
+                                        (Eij + <float> 1) /
+                                        (Oij + Eij + <float> 1),
+                                        theta_batch[i])
 
                             # Compute `distances = 2 / sigma * Z @ Y.T`
                             matrix_multiply(
@@ -758,7 +758,8 @@ def harmony(const float[:, ::1] PCs,
                                 norm = 0
                                 for j in range(num_clusters):
                                     R[k, j] = exp(distances[
-                                        thread_index, i, j]) * \
+                                        thread_index, i, j] -
+                                        two_over_sigma) * \
                                         ratio[chunk_index, batch_label, j]
                                     norm += R[k, j]
                                 norm = <float> 1 / norm
@@ -779,8 +780,11 @@ def harmony(const float[:, ::1] PCs,
                                         kmeans_error = kmeans_error + Rkj * (
                                             <float> 1 - half_sigma *
                                             distances[thread_index, i, j])
-                                        entropy_term = \
-                                            entropy_term + Rkj * log(Rkj)
+                                        # Skip entries of `R` that
+                                        # underflowed to 0
+                                        if Rkj > <float> 0:
+                                            entropy_term = entropy_term + \
+                                                Rkj * log(Rkj)
                                 kmeans_errors[slot] = kmeans_error
                                 entropy_terms[slot] = entropy_term
                             if compute_Y:
@@ -889,10 +893,12 @@ def harmony(const float[:, ::1] PCs,
                     with gil:
                         PyErr_CheckSignals()
 
-            # If Harmony has converged, this is the last iteration, so the
-            # embeddings are not normalized. Unless this is the last iteration,
-            # recompute `R`, `O`, and `E` from the corrected embeddings before
-            # the next round of clustering (a "cold start"), as Harmony2 does.
+            # Unless this is the last iteration (because we have converged or
+            # `max_iterations` has been reached), normalize the corrected
+            # embeddings and recompute `R`, `O`, and `E` from them before the
+            # next round of clustering (a "cold start"). On the last
+            # iteration, leave the embeddings unnormalized, so that the
+            # corrected PCs are returned either way.
             converged = prev_objective - objective < \
                 tolerance * abs(prev_objective)
             cold_start = not converged and iteration < max_iterations
@@ -991,10 +997,9 @@ def harmony(const float[:, ::1] PCs,
                             W[i, k, j] = factor * (
                                 W[i, k, j] - O[i, k] * intercepts[k, j])
 
-            # Correct `Z` slab by slab. Unless Harmony has converged, also
-            # normalize each row of `Z`. For a cold start, also recompute `R`,
-            # each slab's contributions to `O`, and each slab's partial sum of
-            # `R.T @ Z` for the next `Y`.
+            # Correct `Z` slab by slab. For a cold start, also normalize each
+            # row of `Z` and recompute `R`, each slab's contributions to `O`,
+            # and each slab's partial sum of `R.T @ Z` for the next `Y`.
             with parallel(num_threads=num_threads_or_chunks):
                 thread_index = threadid()
                 for slab in prange(num_slabs):
@@ -1014,7 +1019,7 @@ def harmony(const float[:, ::1] PCs,
                             W[batch_label], Z_chunk[thread_index],
                             transpose_A=False, transpose_B=False, alpha=-1,
                             beta=1)
-                        if not converged:
+                        if cold_start:
                             for i in range(end_row - start_row):
                                 norm = 0
                                 for j in range(num_PCs):
@@ -1025,7 +1030,6 @@ def harmony(const float[:, ::1] PCs,
                                 for j in range(num_PCs):
                                     Z_chunk[thread_index, i, j] = \
                                         Z_chunk[thread_index, i, j] * norm
-                        if cold_start:
                             matrix_multiply(
                                 Z_chunk[thread_index, :end_row - start_row],
                                 Y, distances[thread_index], transpose_A=False,
