@@ -52,7 +52,7 @@ sc = SingleCell('data.h5ad')\
   .neighbors()\
   .shared_neighbors()\
   .cluster(resolution=[0.25, 0.5, 1, 1.5, 2])\
-  .pacmap()
+  .localmap()
 ```
 
 ### Label transfer
