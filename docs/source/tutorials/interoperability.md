@@ -238,7 +238,7 @@ A common reason to bridge ecosystems is to use tools that only exist in one. For
 from brisc import SingleCell
 from ryp import r
 
-# start in Python: load and QC
+# start in Python
 sc = SingleCell('data.h5ad').skip_qc()
 
 # pass to R: annotate cell types with Azimuth

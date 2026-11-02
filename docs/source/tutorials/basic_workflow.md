@@ -6,7 +6,7 @@ This tutorial walks through a standard single-cell analysis from start to finish
 
 We use a ~10 million cell cytokine stimulation dataset from [Parse Biosciences](https://www.parsebiosciences.com/datasets/10-million-human-pbmcs-in-a-single-experiment). Peripheral blood mononuclear cells (PBMCs) from twelve healthy donors were treated with either one of 90 different cytokines or a phosphate-buffered saline (PBS) control for 24 hours, yielding (90 + 1) × 12 = 1,092 experimental conditions.
 
-Download the full single-cell object (~10M cells, 212 GB); the results shown below are for this dataset:
+Download the full single-cell object (~10M cells, 227 GB); the results shown below are for this dataset:
 
 ```python
 from subprocess import run
@@ -448,13 +448,13 @@ sc.plot_markers(top['gene'], 'cell_type', 'markers.png')
 
 {meth}`~brisc.SingleCell.save` writes to multiple supported formats: `.h5ad`, `.rds`, `.h5Seurat`, `.h5`, `.mtx`, or `.mtx.gz`. See [Interoperability](interoperability.md).
 
-It won't overwrite an existing file unless you pass `overwrite=True`.
-
 ```python
-sc.save('processed.h5ad', overwrite=True)
+sc.save('processed.h5ad')
 ```
 
-Because our QC didn't subset the data (`subset` defaults to `False`), the saved file includes every cell, with `passed_QC` flagging the ones that passed. To save only those cells, run {meth}`~brisc.SingleCell.qc` with `subset=True`, or filter the dataset first:
+Because our QC didn't subset the data (`subset` defaults to `False`), the saved file includes every cell, with `passed_QC` flagging the ones that passed. To save only those cells, run {meth}`~brisc.SingleCell.qc` with `subset=True`, or filter the dataset first.
+
+It won't overwrite an existing file unless you pass `overwrite=True`.
 
 ```python
 sc.filter_obs('passed_QC').save('processed.h5ad', overwrite=True)
@@ -465,7 +465,7 @@ sc.filter_obs('passed_QC').save('processed.h5ad', overwrite=True)
 Because each method returns a new dataset, the full pipeline chains together:
 
 ```python
-sc = SingleCell('Parse_10M_PBMC_cytokines.h5ad', num_threads=-1)\
+sc = SingleCell('Parse_10M_PBMC_cytokines.h5ad')\
     .qc(allow_float=True)\
     .hvg(batch_column='donor')\
     .normalize()\

@@ -347,7 +347,7 @@ from brisc import SingleCell
 import polars as pl
 
 sc = SingleCell(
-    'Parse_10M_PBMC_cytokines.h5ad', num_threads=-1,
+    'Parse_10M_PBMC_cytokines.h5ad',
     obs_columns=['sample', 'donor', 'cell_type', 'cytokine'])\
     .qc(custom_filter=pl.col('cytokine').is_in(['IFN-gamma', 'PBS']),
         allow_float=True)\
