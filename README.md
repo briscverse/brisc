@@ -35,7 +35,7 @@ conda install -c conda-forge brisc
 pip install brisc
 ```
 
-conda is recommended because it sets up the fast MKL BLAS and some of the R packages brisc uses. With pip, you'll need to handle those yourself: see the [installation guide](https://brisc.run/installation.html) for details, including optional R integration (for differential expression, Seurat, and SingleCellExperiment support) via [ryp](https://github.com/Wainberg/ryp).
+conda is recommended because it sets up the fast MKL BLAS and some of the R packages brisc uses. With pip, you'll need to handle those yourself: see the [installation guide](https://brisc.run/installation.html) for details, including optional R integration (for differential expression, Seurat, and SingleCellExperiment support) via [ryp](https://github.com/briscverse/ryp).
 
 ## Quick start
 
