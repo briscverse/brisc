@@ -11552,8 +11552,10 @@ class SingleCell:
         normalize each cell independently of the rest and log-transform the
         counts in some way, but differ in the details.
 
-        The simplest approach, `method='logCP10k'`, computes the log of the
-        counts per 10 thousand: `normalized_count = log(count / 10000 + 1)`.
+        The simplest approach, `method='logCP10k'`, computes the natural
+        logarithm of the number of counts that belong to the gene per 10,000
+        total counts in its cell, plus one:
+        normalized_count = log(count / total_counts * 10000 + 1).
         It matches the default settings of Seurat's
         [`NormalizeData()`](https://satijalab.org/seurat/reference/normalizedata)
         function, aside from differences in floating-point error. This method
