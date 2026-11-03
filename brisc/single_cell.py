@@ -9487,7 +9487,7 @@ class SingleCell:
                        `overwrite=True`.
             max_mito_fraction: if not `None`, filter to cells with ≤ this
                                fraction of mitochondrial counts (i.e. from
-                               genes starting with `'MT'`, case-insensitively.
+                               genes starting with `'MT-'`, case-insensitively.
                                The default of 5% matches Seurat's recommended
                                value.
             min_genes: if not `None`, filter to cells with ≥ this many genes
@@ -11021,8 +11021,8 @@ class SingleCell:
                           Series or 1D NumPy array. Each batch will be treated
                           as if it were a distinct dataset; this is exactly
                           equivalent to splitting the dataset with
-                          `split_by(batch_column)` and then passing each of the
-                          resulting datasets to `hvg()`. Variances will be
+                          `split_by_obs(batch_column)` and then passing each of
+                          the resulting datasets to `hvg()`. Variances will be
                           computed per batch and then aggregated (see `flavor`)
                           across batches. Cells where `batch_column` is `null`
                           will collectively be treated as a single batch. Set
@@ -11857,7 +11857,7 @@ class SingleCell:
             if not overwrite and PC_key in dataset._obsm:
                 error_message = (
                     f'PC_key {PC_key!r} is already a key of obsm{suffix}; did '
-                    f'you already run PCA()? Set overwrite=True to overwrite.')
+                    f'you already run pca()? Set overwrite=True to overwrite.')
                 raise ValueError(error_message)
 
         # Check that `X` is present for every dataset
@@ -11879,24 +11879,24 @@ class SingleCell:
             'var', datasets, hvg_column, 'hvg_column', pl.Boolean,
             custom_error=f'hvg_column {{}} is not a column of var{suffix}; '
                          f'did you forget to run hvg() (and possibly '
-                         f'normalize()) before PCA()?')
+                         f'normalize()) before pca()?')
 
         # Check that all datasets are normalized
         if not all(dataset._uns['normalized'] for dataset in datasets):
             error_message = (
-                f"PCA() requires normalized counts but uns['normalized'] is "
+                f"pca() requires normalized counts but uns['normalized'] is "
                 f"False{suffix}; did you forget to run normalize() before "
-                f"PCA()?")
+                f"pca()?")
             raise ValueError(error_message)
 
         # Raise an error if `X` is not float32 for every dataset
         for dataset in datasets:
             if dataset._X.dtype != np.float32:
                 error_message = (
-                    f'PCA() requires normalized counts with data type '
+                    f'pca() requires normalized counts with data type '
                     f'float32, but X has data type '
                     f'{str(dataset._X.dtype)!r}{suffix}; did you forget to '
-                    f'run normalize() before PCA()?')
+                    f'run normalize() before pca()?')
                 raise TypeError(error_message)
 
         # Check that `num_PCs` is a positive integer
@@ -12453,7 +12453,7 @@ class SingleCell:
             error_message = f'PC_key {PC_key!r} is not a key of obsm'
             if PC_key == 'pca':
                 error_message += \
-                    '; did you forget to run PCA() before neighbors()?'
+                    '; did you forget to run pca() before neighbors()?'
             raise ValueError(error_message)
 
         # Get PCs, and check that they are float32 and C-contiguous
@@ -12832,11 +12832,13 @@ class SingleCell:
             that are neighbors of at least one of `i` and `j`. Diagonal
             elements are omitted.
 
-            For instance, if 20 nearest neighbors have been calculated (i.e.
-            `obsm[neighbors_key].shape[1] == 20`) and 8 of the 20 cells in
-            `obsm[neighbors_key][i]` are also found in
-            `obsm[neighbors_key][j]`, then `obsp[shared_neighbors_key][i, j]`
-            will be 0.25 (`8 / (20 + 20 - 8)`).
+           For instance, if 20 nearest neighbors have been calculated (i.e.
+           `obsm[neighbors_key].shape[1] == 20`) and 7 of the 20 cells in
+           `obsm[neighbors_key][i]` are also found in
+           `obsm[neighbors_key][j]`, then `obsp[shared_neighbors_key][i, j]`
+           will be 0.2 (`7 / (21 + 21 - 7)`), where we use 21 instead of 20
+           in the denominator because each cell is counted as its own nearest
+           neighbor.
         """
         # Check that `shared_neighbors_key` is a string
         check_type(shared_neighbors_key, 'shared_neighbors_key', str,
@@ -13389,8 +13391,8 @@ class SingleCell:
                           Series or 1D NumPy array. Each batch will be treated
                           as if it were a distinct dataset; this is exactly
                           equivalent to splitting the dataset with
-                          `split_by(batch_column)` and then passing each of the
-                          resulting datasets to `harmonize()`. Cells where
+                          `split_by_obs(batch_column)` and then passing each of
+                          the resulting datasets to `harmonize()`. Cells where
                           `batch_column` is `null` will collectively be treated
                           as a single batch. Set to `None` to treat each
                           dataset as having a single batch. When `others` is
@@ -13402,8 +13404,8 @@ class SingleCell:
             PC_key: the key of `obsm` containing the principal components
                     calculated with `pca()`, to use as the input to Harmony
             Harmony_key: the key of `obsm` where the Harmony embeddings will be
-                         stored; will be added in-place to both `self` and each
-                         of the datasets in `others`!
+                         stored; will be added to both `self` and each of the
+                         datasets in `others`
             num_clusters: the number of clusters used in the Harmony algorithm,
                           including in the initial k-means clustering. If not
                           specified, use 100 clusters if ≥3000 cells, 1 cluster
@@ -13584,7 +13586,7 @@ class SingleCell:
         if not all(PC_key in dataset._obsm for dataset in datasets):
             error_message = (
                 f'PC_key {PC_key!r} is not a column of obs{suffix}; did you '
-                f'forget to run PCA() before harmonize()?')
+                f'forget to run pca() before harmonize()?')
             raise ValueError(error_message)
 
         # If `num_clusters` is not `None`, check that it is a positive integer
@@ -16923,7 +16925,7 @@ class SingleCell:
             error_message = f'PC_key {PC_key!r} is not a key of obsm'
             if PC_key == 'pca':
                 error_message += (
-                    '; did you forget to run PCA() (and possibly neighbors()) '
+                    '; did you forget to run pca() (and possibly neighbors()) '
                     'before pacmap()?')
             raise ValueError(error_message)
         PCs = self._obsm[PC_key]
@@ -17379,7 +17381,7 @@ class SingleCell:
             error_message = f'PC_key {PC_key!r} is not a key of obsm'
             if PC_key == 'pca':
                 error_message += (
-                    '; did you forget to run PCA() (and possibly neighbors()) '
+                    '; did you forget to run pca() (and possibly neighbors()) '
                     'before localmap()?')
             raise ValueError(error_message)
         PCs = self._obsm[PC_key]
@@ -17777,7 +17779,7 @@ class SingleCell:
             error_message = f'PC_key {PC_key!r} is not a key of obsm'
             if PC_key == 'pca':
                 error_message += (
-                    '; did you forget to run PCA() (and possibly neighbors()) '
+                    '; did you forget to run pca() (and possibly neighbors()) '
                     'before umap()?')
             raise ValueError(error_message)
         PCs = self._obsm[PC_key]
