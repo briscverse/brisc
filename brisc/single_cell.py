@@ -9487,8 +9487,9 @@ class SingleCell:
                        `overwrite=True`.
             max_mito_fraction: if not `None`, filter to cells with ≤ this
                                fraction of mitochondrial counts (i.e. from
-                               genes starting with `'MT'`. The default of 5%
-                               matches Seurat's recommended value.
+                               genes starting with `'MT'`, case-insensitively.
+                               The default of 5% matches Seurat's recommended
+                               value.
             min_genes: if not `None`, filter to cells with ≥ this many genes
                        detected (with non-zero count). The default of 100
                        matches Scanpy's recommended value, while Seurat
