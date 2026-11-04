@@ -5423,9 +5423,11 @@ class Pseudobulk:
                          sequence of names or indices to report DE with respect
                          to multiple coefficients. Negative indices work in the
                          usual Python way. If `None`, defaults to the first
-                         non-intercept column of the design matrix: column 1 if
-                         the design matrix has an intercept, or column 0 if it
-                         does not. Mutually exclusive with `contrasts`.
+                         non-intercept term of the formula; if this term is a
+                         factor with three or more levels, each non-reference
+                         level will be tested separately against the
+                         reference level. Mutually exclusive with
+                         `contrasts`.
             contrasts: an optional dictionary mapping contrast names to string
                        representations of R formulas specifying contrasts
                        between names of columns in the design matrix (e.g.
@@ -5563,12 +5565,26 @@ class Pseudobulk:
                     print(f'[{cell_type}] Validating coefficient...')
 
                 # If `coefficient` was not specified, default to the first
-                # non-intercept column of the design matrix: column 1 if the
-                # design matrix has an intercept (the usual case), or column 0
-                # if it does not (e.g. when the formula contains `~0` or `-1`)
+                # non-intercept term of the formula; this will usually be a
+                # single column unless the term is a factor with three or more
+                # levels, in which case each non-reference level will be
+                # tested separately against the reference level. Use the
+                # design matrix's `assign` attribute, which maps each column
+                # to the 1-based index of its term (0 for the intercept), to
+                # find these columns. If the formula has no non-intercept
+                # terms, fall back to column 1 if the design matrix has an
+                # intercept or column 0 if it does not, so the out-of-bounds
+                # check below reports the problem.
                 if coefficient is None:
-                    coefficient = (1,) \
-                        if '(Intercept)' in design_matrix_columns else (0,)
+                    assign = to_py(f'attr({prefix}.design.matrix, "assign")',
+                                   squeeze=False)
+                    non_intercept_terms = assign.filter(assign != 0)
+                    if len(non_intercept_terms) > 0:
+                        coefficient = tuple(design_matrix_columns.filter(
+                            assign == non_intercept_terms.min()))
+                    else:
+                        coefficient = (1,) \
+                            if '(Intercept)' in design_matrix_columns else (0,)
 
                 # Check that all string entries of `coefficient` are names of
                 # columns of the design matrix
@@ -6095,9 +6111,10 @@ class Pseudobulk:
         `library_size()` before this function.
 
         By default, DE is reported with respect to the first non-intercept
-        column of the design matrix, which is usually just the first term in
-        the formula. This can be changed via the `coefficient` and `contrasts`
-        arguments.
+        term in the formula. If that term is a factor with three or more
+        levels, it expands to several columns of the design matrix (one per
+        non-reference level), and DE is reported separately for each of them.
+        This can be changed via the `coefficient` and `contrasts` arguments.
 
         By default, voomByGroup is used instead of voom when reporting DE with
         respect to a categorical variable, e.g. when comparing disease cases to
@@ -6152,12 +6169,15 @@ class Pseudobulk:
                          the default for that cell type; each cell type in this
                          Pseudobulk dataset must be present. Negative indices
                          work in the usual Python way. If not specified, or set
-                         to `None` for a given cell type, defaults to the first
-                         non-intercept column of the design matrix: column 1 if
-                         the formula includes an intercept (the usual case), or
-                         column 0 if it does not (e.g. when the formula
-                         contains `~0` or `-1`). Mutually exclusive with
-                         `contrasts`.
+                         to `None` for a given cell type, defaults to all
+                         columns of the design matrix derived from the first
+                         non-intercept term of the formula: one column for a
+                         numeric variable or a two-level factor, or one column
+                         per non-reference level for a factor with three or
+                         more levels (e.g. `treatmentDrugA` and
+                         `treatmentDrugB` for `'~ treatment + sex'` with
+                         levels Control, DrugA and DrugB). Mutually
+                         exclusive with `contrasts`.
             contrasts: an optional dictionary mapping contrast names to string
                        representations of R formulas specifying contrasts
                        between names of columns in the design matrix (e.g.
@@ -6349,7 +6369,8 @@ class Pseudobulk:
         coefficient_is_dict = isinstance(coefficient, dict)
         if coefficient is None:
             # Leave `coefficients` as None; `_de()` will default it to the
-            # first non-intercept column of each cell type's design matrix
+            # design matrix columns of each cell type's first non-intercept
+            # term
             coefficients = None
         elif coefficient_is_dict:
             coefficients = {}
