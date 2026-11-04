@@ -122,6 +122,10 @@ html_js_files = [
     "js/details-anchor.js",
 ]
 html_show_sourcelink = False
+# Don't ship the raw .md/.rst sources under _sources/: nothing links to them
+# (no source link above), and they are duplicate copies of every page for
+# search engines to index.
+html_copy_source = False
 
 html_theme_options = {
     "navbar_end": ["theme-switcher", "navbar-icon-links"],
@@ -861,6 +865,151 @@ def _fix_prev_next(app, pagename, templatename, context, doctree):
     # Clear pydata's optional title overrides so our titles show.
     context["prev_title"] = context["next_title"] = ""
 
+# -- SEO: canonical URLs, descriptions, social cards, sitemap ----------------
+import html as _html
+import json as _json
+
+# Cloudflare Pages serves clean URLs: it strips `.html`, maps `index.html` to
+# its directory, and 308-redirects the suffixed forms. Sphinx builds each
+# page's canonical URL from the suffixed filename, so every canonical pointed
+# at a redirect. Build them in the served form instead (also used for og:url
+# and the sitemap).
+def _clean_url(pagename):
+    if pagename == "index":
+        return html_baseurl
+    if pagename.endswith("/index"):
+        return html_baseurl + pagename[:-len("index")]
+    return html_baseurl + pagename
+
+# Pages search engines should skip: the search page and global indexes, the
+# viewcode source dumps, and the per-category API pages (their autosummary
+# tables duplicate the class index page, which the sidebar links to instead).
+def _noindex(pagename):
+    if pagename in ("search", "genindex", "py-modindex"):
+        return True
+    if pagename.startswith("_modules/"):
+        return True
+    parts = pagename.split("/")
+    return (len(parts) == 2 and parts[0] in ("singlecell", "pseudobulk", "de")
+            and parts[1] in _CATEGORY_ANCHORS)
+
+# A hand-written `description` from the page's front matter (MyST) or
+# top-of-file field list (RST), else the page's first paragraph (for the
+# autosummary stubs, the method's docstring summary), cut to the ~160
+# characters search engines display.
+def _page_description(app, pagename, doctree):
+    text = app.env.metadata.get(pagename, {}).get("description")
+    if not text and doctree is not None:
+        for node in doctree.findall(nodes.paragraph):
+            if node.astext().strip():
+                text = node.astext()
+                break
+    if not text:
+        return None
+    text = " ".join(text.split())
+    if len(text) > 160:
+        text = text[:157].rsplit(" ", 1)[0] + "…"
+    return text
+
+_SITE_NAME = "brisc"
+_HOME_TITLE = "brisc: fast, reproducible single-cell analysis in Python"
+_SOCIAL_CARD = "_static/images/social_card.png"  # 1200 x 630
+
+def _json_ld(description):
+    data = {
+        "@context": "https://schema.org",
+        "@type": "SoftwareSourceCode",
+        "name": "brisc",
+        "description": description,
+        "url": html_baseurl,
+        "codeRepository": "https://github.com/briscverse/brisc",
+        "programmingLanguage": "Python",
+        "runtimePlatform": "Python 3.9+",
+        "license": "https://opensource.org/license/mit",
+        "keywords": ["single-cell", "scRNA-seq", "single-cell RNA-seq",
+                     "bioinformatics", "AnnData", "Scanpy", "Seurat"],
+        "author": [{"@type": "Person", "name": "Keon Arbabi"},
+                   {"@type": "Person", "name": "Michael Wainberg"}],
+        "sameAs": ["https://github.com/briscverse/brisc",
+                   "https://pypi.org/project/brisc/",
+                   "https://anaconda.org/conda-forge/brisc"],
+        "citation": {
+            "@type": "ScholarlyArticle",
+            "@id": "https://doi.org/10.64898/2026.11.03.764120",
+            "name": "brisc: a multithreaded CPU toolkit for single-cell "
+                    "analysis",
+            "author": [{"@type": "Person", "name": name} for name in (
+                "Keon Arbabi", "Tain Luquez", "Jaiz Jeeson", "Mingyau Lam",
+                "Hamed Heydari", "Gary D. Bader", "Vilas Menon",
+                "Michael Wainberg")],
+            "datePublished": "2026-11-04",
+            "publisher": {"@type": "Organization", "name": "bioRxiv"},
+        },
+    }
+    return ('<script type="application/ld+json">'
+            + _json.dumps(data).replace("</", "<\\/") + "</script>")
+
+def _seo_page_context(app, pagename, templatename, context, doctree):
+    url = _clean_url(pagename)
+    context["pageurl"] = url
+    if pagename == "index":
+        # The landing page's <title> was "brisc — brisc documentation"; make
+        # it say what brisc is (this is the text of the search result link).
+        # The H1 and everything in the body are untouched; the " — brisc
+        # documentation" suffix is dropped in _fix_home_title.
+        context["title"] = _HOME_TITLE
+    tags = []
+    if _noindex(pagename):
+        tags.append('<meta name="robots" content="noindex" />')
+    else:
+        desc = _page_description(app, pagename, doctree)
+        if pagename == "index":
+            og_title = _HOME_TITLE
+        else:
+            title = (app.env.titles[pagename].astext()
+                     if pagename in app.env.titles else context.get("title", ""))
+            og_title = f"{title.removeprefix('brisc.')} — {_SITE_NAME}"
+        if desc:
+            d = _html.escape(desc, quote=True)
+            tags += [f'<meta name="description" content="{d}" />',
+                     f'<meta property="og:description" content="{d}" />']
+        tags += [
+            f'<meta property="og:title" '
+            f'content="{_html.escape(og_title, quote=True)}" />',
+            '<meta property="og:type" content="website" />',
+            f'<meta property="og:url" content="{url}" />',
+            f'<meta property="og:site_name" content="{_SITE_NAME}" />',
+            f'<meta property="og:image" content="{html_baseurl}{_SOCIAL_CARD}" />',
+            '<meta property="og:image:width" content="1200" />',
+            '<meta property="og:image:height" content="630" />',
+            '<meta property="og:image:alt" content="brisc" />',
+            '<meta name="twitter:card" content="summary_large_image" />',
+        ]
+        if pagename == "index":
+            tags.append(_json_ld(desc))
+    context["metatags"] = context.get("metatags", "") + "".join(
+        f"    {tag}\n" for tag in tags)
+
+def _fix_home_title(app, exception):
+    if exception is not None or app.builder.name != "html":
+        return
+    index = Path(app.builder.outdir, "index.html")
+    text = index.read_text()
+    suffixed = f"<title>{_HOME_TITLE} &#8212; {html_title}</title>"
+    if suffixed in text:
+        index.write_text(text.replace(suffixed, f"<title>{_HOME_TITLE}</title>"))
+
+# sitemap.xml at the site root, listing every indexable page by its clean URL.
+def _write_sitemap(app, exception):
+    if exception is not None or app.builder.name != "html":
+        return
+    urls = sorted(_clean_url(d) for d in app.env.found_docs if not _noindex(d))
+    Path(app.builder.outdir, "sitemap.xml").write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+        + "".join(f"  <url><loc>{_html.escape(u)}</loc></url>\n" for u in urls)
+        + "</urlset>\n")
+
 def setup(app):
     app.add_directive("classdescription", _ClassDescription)
     app.add_role("codelink", _codelink_role)
@@ -868,4 +1017,7 @@ def setup(app):
     app.connect("autodoc-process-docstring", _md_to_rst_links)
     app.connect("autodoc-process-docstring", _drop_constructor_summary)
     app.connect("html-page-context", _fix_prev_next)
+    app.connect("html-page-context", _seo_page_context)
     app.connect("build-finished", _semantic_highlight, priority=901)
+    app.connect("build-finished", _write_sitemap)
+    app.connect("build-finished", _fix_home_title)

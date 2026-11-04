@@ -1,3 +1,7 @@
+---
+description: "Install brisc with conda or pip on Linux, macOS or Windows, add the optional R packages for differential expression and Seurat, and pick a fast BLAS."
+---
+
 # Installation
 
 brisc supports Linux, macOS, and Windows on Python 3.9+. Install it with conda or pip:
@@ -55,25 +59,25 @@ R -e 'if (!require("BiocManager", quietly = TRUE)) install.packages("BiocManager
 :::
 ::::
 
-## BLAS and threading
+## BLAS
 
-Several steps call BLAS and LAPACK: feature selection (its LOESS fit), PCA, nearest-neighbor search, harmonization, label transfer, and UMAP's spectral initialization. brisc parallelizes these steps with its own threads and runs BLAS single-threaded inside each, so it needs to recognize your BLAS library to cap its threads. brisc uses scipy to call BLAS, so which library you have depends on your platform and how you installed SciPy:
-
-- **MKL**: Intel's highly optimized BLAS, for x86 processors (most Linux and Windows machines, and old Macs that use Intel processors). Automatically installed when installing brisc through conda on x86, but can be installed manually with `conda install "libblas=*=*mkl" scipy`.
-- **Accelerate**: Apple's BLAS, built into macOS. Automatically installed when installing brisc through conda on Apple Silicon Macs, but can be installed manually with `conda install "libblas=*=*newaccelerate" scipy`. pip's SciPy also uses it on all Macs running macOS 14 or later.
-- **OpenBLAS**: a slower BLAS. Used by pip's SciPy on Linux, Windows, and Macs running macOS 13 or earlier, and by conda on Linux ARM machines. It only supports up to 64 threads, so brisc caps nearest-neighbor search, harmonization, and label transfer at 64 threads when using it.
-
-To check which BLAS brisc is using:
+brisc's speed depends on which BLAS library is installed. Check yours:
 
 ```python
 from brisc import brisc_blas
 print(brisc_blas())
 ```
 
-This prints `mkl`, `accelerate`, or `openblas` (or `blis` or `flexiblas` for less common setups). `None` means brisc can't identify the library and so can't cap its threads: each of brisc's threads then starts its own set of BLAS threads, and the steps above slow down sharply on machines with many cores. If you see `None`, install SciPy against one of the libraries above. (brisc can only detect Accelerate on macOS 15 and later; on older Macs, set the environment variable below instead.)
+- `mkl`: ideal. Only available on x86 processors (most Linux and Windows machines, and old Macs with Intel processors).
+- `accelerate`: ideal, but you must set `VECLIB_MAXIMUM_THREADS=1` (see warning box below).
+- `flexiblas` or `blis`: less common but acceptable.
+- `openblas`: slower, and 3 key steps (nearest-neighbor search, harmonization, and label transfer) will be capped to 64 threads. If your processor supports it, consider switching to a faster BLAS. This is straightforward with conda:
+    - x86 processors (most Linux and Windows machines, and old Macs): install MKL with `conda install "libblas=*=*mkl" scipy`
+    - Apple Silicon processors (new Macs): install Accelerate BLAS with `conda install "libblas=*=*newaccelerate" scipy`
+- `None`: brisc can't tell which BLAS you have. This may occur on macOS < 15 with Accelerate, in which case you must set `VECLIB_MAXIMUM_THREADS=1` (see warning box below). Otherwise, install a BLAS library brisc can recognize, like MKL or Accelerate (see the `openblas` bullet above), for fast, reproducible results.
 
 :::{important}
-**Mac users with Accelerate: set `VECLIB_MAXIMUM_THREADS=1`** for fast, reproducible results on the steps above. You can do this by:
+Mac users with Accelerate BLAS must set `VECLIB_MAXIMUM_THREADS=1` for fast, reproducible results. You can do this by:
 
 - Setting `os.environ['VECLIB_MAXIMUM_THREADS']='1'` before importing NumPy, SciPy or brisc
 - Adding `export VECLIB_MAXIMUM_THREADS=1` to your `~/.zshrc`

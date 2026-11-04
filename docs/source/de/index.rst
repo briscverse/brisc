@@ -1,3 +1,5 @@
+:description: API reference for the brisc DE class: differential expression results per cell type, with hit filtering and counting, saving and reloading.
+
 DE
 ==
 

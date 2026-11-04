@@ -1,3 +1,7 @@
+---
+description: "Reference for brisc dataset operations: inspecting, subsetting, editing metadata, working with the count matrix, combining datasets and pseudobulking."
+---
+
 # Data Manipulation
 
 This tutorial is a reference for the operations brisc provides on its datasets: inspecting a dataset, accessing its pieces, subsetting by cells or genes, editing cell and gene metadata, working with the count matrix, summarizing, combining datasets, and pseudobulking.

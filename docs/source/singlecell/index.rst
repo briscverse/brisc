@@ -1,3 +1,5 @@
+:description: API reference for the brisc SingleCell class: load and save single-cell data, QC, normalization, PCA, clustering, embedding, label transfer and pseudobulking.
+
 SingleCell
 ==========
 

@@ -1,3 +1,7 @@
+---
+description: "brisc is a fast, reproducible Python toolkit for single-cell RNA-seq analysis: standard workflows on millions of cells run in minutes on multi-core CPUs."
+---
+
 # brisc
 
 <div style="text-align: center; margin-bottom: 1.5rem;">
@@ -45,6 +49,16 @@ brisc is a high-performance library for analyzing single-cell data at scale. It 
 <p class="feature-desc">Features sensible defaults, strict type-checking, and solution-focused error messages.</p>
 </div>
 
+</div>
+
+<div class="manuscript-card">
+<div class="manuscript-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg></div>
+<div class="manuscript-text">
+<div class="manuscript-kicker">Preprint &middot; bioRxiv &middot; November 2026</div>
+<div class="manuscript-title"><a href="https://doi.org/10.64898/2026.11.03.764120">brisc: a multithreaded CPU toolkit for single-cell analysis</a></div>
+<div class="manuscript-authors">K. Arbabi, T. Luquez, J. Jeeson, M. Lam, H. Heydari, G. D. Bader, V. Menon, M. Wainberg</div>
+</div>
+<a class="manuscript-cta" href="https://doi.org/10.64898/2026.11.03.764120">Read the manuscript&nbsp;&rsaquo;</a>
 </div>
 
 <div class="showcase-chart">

@@ -1,4 +1,5 @@
 :orphan:
+:description: Type aliases used across the brisc API: SingleCellColumn, PseudobulkColumn, Scalar, UnsDict, UnsItem, Color and Indexer, with the types each one accepts.
 
 .. _typedefs:
 

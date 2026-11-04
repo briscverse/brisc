@@ -1,3 +1,7 @@
+---
+description: "A standard single-cell analysis in brisc from start to finish: loading, QC, feature selection, normalization, PCA, clustering, embedding and marker genes."
+---
+
 # Basic Workflow
 
 This tutorial walks through a standard single-cell analysis from start to finish: loading data, quality control, feature selection, normalization, dimensionality reduction, clustering, embedding, and marker gene identification.

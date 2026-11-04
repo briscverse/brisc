@@ -1,3 +1,5 @@
+:description: API reference for the brisc Pseudobulk class: sample-level counts per cell type, with QC, library-size normalization and limma-voom differential expression.
+
 Pseudobulk
 ==========
 

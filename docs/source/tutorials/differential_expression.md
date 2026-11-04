@@ -1,3 +1,7 @@
+---
+description: "Pseudobulk differential expression in brisc: sum each sample's counts per cell type, then test genes between conditions with limma-voom."
+---
+
 # Differential Expression
 
 This tutorial covers pseudobulk differential expression: summing each sample's counts across all cells of the same cell type, then testing genes for expression differences between conditions with [limma-voom](https://genomebiology.biomedcentral.com/articles/10.1186/gb-2014-15-2-r29). It uses the same ~10 million cell cytokine stimulation dataset as the other tutorials, comparing IFN-gamma-stimulated cells against phosphate-buffered saline (PBS) controls within each cell type. Download it from the [Basic Workflow](basic_workflow.md#dataset) tutorial — the full object, or a subsampled version to follow along on a laptop.

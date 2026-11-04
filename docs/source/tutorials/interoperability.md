@@ -1,3 +1,7 @@
+---
+description: "Read and write .h5ad, Seurat .rds and .h5Seurat, SingleCellExperiment and 10x files with brisc, and convert between AnnData, Seurat and SCE in memory."
+---
+
 # Interoperability
 
 This tutorial covers interoperability with the wider single-cell ecosystem: reading and writing the major on-disk formats — scverse/Scanpy `.h5ad`, Seurat `.rds`/`.h5Seurat`, Bioconductor SingleCellExperiment `.rds`, and raw 10x Genomics data — and converting between brisc, AnnData, Seurat, and SingleCellExperiment objects in memory, so you can interleave Python and R tools in a single analysis without writing intermediate files to disk.

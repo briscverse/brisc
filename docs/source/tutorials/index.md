@@ -1,3 +1,7 @@
+---
+description: "brisc tutorials: the basic single-cell workflow, integration and label transfer, pseudobulk differential expression, interoperability and data manipulation."
+---
+
 # Tutorials
 
 :::{list-table}
