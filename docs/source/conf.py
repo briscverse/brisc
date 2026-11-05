@@ -9,7 +9,10 @@ from pathlib import Path
 project = "brisc"
 author = "Keon Arbabi & Michael Wainberg"
 copyright = "2026, Keon Arbabi & Michael Wainberg"
-html_title = "brisc documentation"
+# Suffix of every page's <title> ("Basic Workflow — brisc"). Kept short: the
+# longer "brisc documentation" repeated the site name and Google rewrote the
+# titles. The navbar text is set separately (html_theme_options["logo"]).
+html_title = "brisc"
 # Canonical site URL — emits <link rel="canonical"> so search engines treat
 # https://brisc.run as authoritative regardless of which host served the page.
 html_baseurl = "https://brisc.run/"
@@ -990,14 +993,30 @@ def _seo_page_context(app, pagename, templatename, context, doctree):
     context["metatags"] = context.get("metatags", "") + "".join(
         f"    {tag}\n" for tag in tags)
 
-def _fix_home_title(app, exception):
+# Rewrite <title> tags only; nothing in any page body changes.
+#  - homepage: drop the " — brisc" suffix, leaving _HOME_TITLE.
+#  - API member pages: "brisc.SingleCell.pca — brisc" -> "SingleCell.pca — brisc",
+#    matching the signature shown on the page. Google was rewriting the
+#    mismatched titles into things like "SingleCell. - pca".
+_API_TITLE_RE = re.compile(r"<title>brisc\.((?:SingleCell|Pseudobulk|DE)\.[\w.]+)")
+
+def _fix_titles(app, exception):
     if exception is not None or app.builder.name != "html":
         return
-    index = Path(app.builder.outdir, "index.html")
+    outdir = Path(app.builder.outdir)
+    index = outdir / "index.html"
     text = index.read_text()
     suffixed = f"<title>{_HOME_TITLE} &#8212; {html_title}</title>"
     if suffixed in text:
         index.write_text(text.replace(suffixed, f"<title>{_HOME_TITLE}</title>"))
+    for html_file in outdir.rglob("*.html"):
+        rel = html_file.relative_to(outdir).as_posix()
+        if not rel.startswith(("singlecell/", "pseudobulk/", "de/")):
+            continue
+        text = html_file.read_text()
+        new = _API_TITLE_RE.sub(r"<title>\1", text, count=1)
+        if new != text:
+            html_file.write_text(new)
 
 # sitemap.xml at the site root, listing every indexable page by its clean URL.
 def _write_sitemap(app, exception):
@@ -1020,4 +1039,4 @@ def setup(app):
     app.connect("html-page-context", _seo_page_context)
     app.connect("build-finished", _semantic_highlight, priority=901)
     app.connect("build-finished", _write_sitemap)
-    app.connect("build-finished", _fix_home_title)
+    app.connect("build-finished", _fix_titles)
