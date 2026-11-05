@@ -168,7 +168,7 @@ _GUIDE_TUTORIALS = [
 ]
 html_context = {"guide_tutorials": _GUIDE_TUTORIALS}
 
-html_sidebars = {"**": ["sidebar-nav-bs"]}
+html_sidebars = {"**": ["sidebar-nav-bs"], "404": []}
 for _guide_page in ["installation", "tutorials/index",
                     *(doc for doc, _ in _GUIDE_TUTORIALS)]:
     html_sidebars[_guide_page] = ["guide-nav"]
@@ -888,7 +888,7 @@ def _clean_url(pagename):
 # viewcode source dumps, and the per-category API pages (their autosummary
 # tables duplicate the class index page, which the sidebar links to instead).
 def _noindex(pagename):
-    if pagename in ("search", "genindex", "py-modindex"):
+    if pagename in ("search", "genindex", "py-modindex", "404"):
         return True
     if pagename.startswith("_modules/"):
         return True
@@ -949,12 +949,15 @@ def _json_ld(description):
             "publisher": {"@type": "Organization", "name": "bioRxiv"},
         },
     }
-    return ('<script type="application/ld+json">'
-            + _json.dumps(data).replace("</", "<\\/") + "</script>")
+    site = {"@context": "https://schema.org", "@type": "WebSite",
+            "name": "brisc", "url": html_baseurl}
+    return "".join('<script type="application/ld+json">'
+                   + _json.dumps(block).replace("</", "<\\/") + "</script>"
+                   for block in (data, site))
 
 def _seo_page_context(app, pagename, templatename, context, doctree):
     url = _clean_url(pagename)
-    context["pageurl"] = url
+    context["pageurl"] = None if pagename == "404" else url
     if pagename == "index":
         # The landing page's <title> was "brisc — brisc documentation"; make
         # it say what brisc is (this is the text of the search result link).
@@ -1018,6 +1021,25 @@ def _fix_titles(app, exception):
         if new != text:
             html_file.write_text(new)
 
+# Cloudflare Pages serves the root 404.html, with status 404, for every path
+# that has no file. Sphinx writes it with root-relative links and asset paths
+# ("_static/...", "installation.html"), which break once the page is served at
+# a nested path like /tutorials/missing, so make them absolute. Runs after
+# _semantic_highlight (priority 901) so its rewritten hrefs are covered too.
+_RELATIVE_URL_RE = re.compile(
+    r'((?:href|src)=")(?!(?:https?:|//|/|#|mailto:|data:|javascript:))')
+
+def _fix_404(app, exception):
+    if exception is not None or app.builder.name != "html":
+        return
+    page = Path(app.builder.outdir, "404.html")
+    if not page.exists():
+        return
+    text = page.read_text()
+    text = _RELATIVE_URL_RE.sub(r"\1/", text)
+    text = text.replace('data-content_root="./"', 'data-content_root="/"', 1)
+    page.write_text(text)
+
 # sitemap.xml at the site root, listing every indexable page by its clean URL.
 def _write_sitemap(app, exception):
     if exception is not None or app.builder.name != "html":
@@ -1040,3 +1062,4 @@ def setup(app):
     app.connect("build-finished", _semantic_highlight, priority=901)
     app.connect("build-finished", _write_sitemap)
     app.connect("build-finished", _fix_titles)
+    app.connect("build-finished", _fix_404, priority=950)
