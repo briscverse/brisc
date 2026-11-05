@@ -346,6 +346,11 @@ footer.bd-footer-content,
    ===================================================================== */
 :root {
     --landing-width: 960px;
+    /* Two gap sizes, used everywhere on the landing page: minor between
+       cards inside one grid (feature cards, code cards), major between
+       sections (hero, features, manuscript, benchmarks, code examples). */
+    --landing-gap-minor: 1rem;
+    --landing-gap-major: 2rem;
 }
 
 /* Hide sidebars on DESKTOP only. On mobile, pydata's JS moves the primary
@@ -402,15 +407,15 @@ html:has(.showcase-chart) .bd-article div[style*="text-align:center"] img {
 }
 /* Spacing between landing sections */
 html:has(.showcase-chart) .showcase-chart {
-    margin-top: 2.5rem !important;
+    margin-top: var(--landing-gap-major) !important;
 }
 
 /* -------- Key features: 3x2 card grid -------- */
 .features-grid {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
-    gap: 1rem;
-    margin: 1.5rem auto 0;
+    gap: var(--landing-gap-minor);
+    margin: var(--landing-gap-major) auto 0;
 }
 @media (max-width: 900px) {
     .features-grid { grid-template-columns: repeat(2, 1fr); }
@@ -473,14 +478,14 @@ html:has(.showcase-chart) .bd-article .feature-desc {
 html[data-theme="light"] .feature-desc { color: #5b5353; }
 html[data-theme="dark"]  .feature-desc { color: #d7cfcd; }
 
-/* -------- Manuscript card: full landing width, reads as the feature
-   grid's last row (same card recipe, 1rem below the grid). -------- */
+/* -------- Manuscript card: full landing width, its own section (same
+   card recipe as the feature cards, a major gap above and below). -------- */
 .manuscript-card {
     display: flex;
     align-items: center;
     gap: 1.25rem;
     max-width: var(--landing-width);
-    margin: 1rem auto 0;
+    margin: var(--landing-gap-major) auto 0;
     padding: 1.1rem 1.5rem;
     border-radius: 0.4rem;
     background-color: #fefaf9;
@@ -577,14 +582,14 @@ html[data-theme="dark"]  .manuscript-authors { color: #d7cfcd; }
 .code-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    column-gap: 1.25rem;
-    row-gap: 1.25rem;
+    column-gap: var(--landing-gap-minor);
+    row-gap: var(--landing-gap-minor);
     max-width: var(--landing-width);
-    margin: 2rem auto 0;
+    margin: var(--landing-gap-major) auto 0;
 }
 .code-card {
     width: 100%;
-    max-width: calc((var(--landing-width) - 1.25rem) / 2);
+    max-width: calc((var(--landing-width) - var(--landing-gap-minor)) / 2);
     display: flex;
     flex-direction: column;
     background-color: #fefaf9;
@@ -683,7 +688,7 @@ html:has(.showcase-chart) .bd-container__inner::before {
     border: 1px solid var(--pst-color-border);
     box-shadow: 0 .2rem .5rem var(--pst-color-shadow),
                 0 0 .0625rem var(--pst-color-shadow);
-    margin: 2rem auto 0;
+    margin: var(--landing-gap-major) auto 0;
 }
 html[data-theme="light"] .showcase-chart { background-color: #fefaf9; }
 html[data-theme="dark"]  .showcase-chart {
