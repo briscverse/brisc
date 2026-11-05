@@ -915,7 +915,7 @@ def _page_description(app, pagename, doctree):
     return text
 
 _SITE_NAME = "brisc"
-_HOME_TITLE = "brisc: fast, reproducible single-cell analysis in Python"
+_HOME_TITLE = "brisc: a multithreaded CPU toolkit for single-cell analysis"
 _SOCIAL_CARD = "_static/images/social_card.png"  # 1200 x 630
 
 def _json_ld(description):

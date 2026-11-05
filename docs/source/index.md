@@ -1,5 +1,5 @@
 ---
-description: "brisc is a fast, reproducible Python toolkit for single-cell RNA-seq analysis: standard workflows on millions of cells run in minutes on multi-core CPUs."
+description: "On datasets of millions of cells, brisc cuts the runtime of common workflows from hours to minutes."
 ---
 
 # brisc
