@@ -35,7 +35,7 @@ import_cython({
     'doublets': ('call_doublets', 'compute_cxds', 'compute_obs', 'compute_S',
                  'get_hvgs', 'get_simulated_doublets_max_nnz',
                  'simulate_doublets'),
-    'embed': ('localmap', 'pacmap', 'umap_fuzzy_weights', 'umap_optimize'),
+    'embed': ('localmap', 'pacmap', 'umap'),
     'harmonize': ('label_transfer', 'harmony', 'normalize_rows'),
     'hdf5': 'read_all_datasets',
     'hvg': ('clipped_sum_csc', 'clipped_sum_csr', 'gene_mean_and_variance_csc',
@@ -17679,21 +17679,25 @@ class SingleCell:
              alpha: int | float | np.integer | np.floating = 1,
              gamma: int | float | np.integer | np.floating = 1,
              negative_sample_rate: int = 5,
+             negative_window: int | np.integer = 200_000,
              a: int | float | np.integer | np.floating | None = None,
              b: int | float | np.integer | np.floating | None = None,
              spread: float = 1,
              min_dist: float = 0.5,
              seed: int | np.integer = 0,
              overwrite: bool = False,
-             hogwild: bool = False,
              num_threads: int | np.integer | None = None) -> SingleCell:
         """
         Calculate a two-dimensional embedding of this SingleCell dataset with
         UMAP (Uniform Manifold Approximation and Projection), suitable for
         plotting with `plot_embedding()`.
 
-        Use `hogwild=True` to run in parallel. Results will not be
-        reproducible!
+        Follows the new initialization and optimizer introduced in umap-learn
+        0.6 (with `compatibility_layout=False`): the embedding is initialized
+        by recursively laying out coarser and coarser versions of the
+        nearest-neighbor graph, then optimized with Adam, updating every
+        cell's position in parallel each iteration. Results are identical
+        regardless of the number of threads.
 
         This function is intended to be run after `pca()` and `neighbors()`. By
         default, it uses `obsm['pca']`, `obsm['neighbors']`, and
@@ -17728,8 +17732,19 @@ class SingleCell:
                             larger than 10,000 elements.
             alpha: the initial learning rate for optimization
             gamma: the weight applied to negative samples during optimization
-            negative_sample_rate: the number of negative samples per positive
-                                  sample
+            negative_sample_rate: controls the number of negative samples per
+                                  positive sample; as in umap-learn 0.6, the
+                                  actual number is `negative_sample_rate / 1.5`
+                                  on average
+            negative_window: when there are more than `negative_window`
+                             cells, draw each cell's negative samples from a
+                             window of `negative_window` cells near it in a
+                             random 1D projection of the embedding
+                             (re-randomized each iteration), rather than from
+                             all cells. These "hard negatives" make negative
+                             sampling more effective for large datasets; set
+                             `negative_window` to at least the number of cells
+                             to disable them.
             a: UMAP curve parameter; if `None`, will be fit based on the values
                of `spread` and `min_dist`. Either both or neither of `a` and
                `b` must be `None`.
@@ -17743,19 +17758,11 @@ class SingleCell:
             seed: the random seed to use for UMAP
             overwrite: if `True`, overwrite `embedding_key` if already present
                        in `obsm`, instead of raising an error
-            hogwild: if `True`, go [Hogwild!](https://arxiv.org/abs/1106.5730)
-                     and optimize the embedding in parallel. Results will not
-                     be reproducible!
             num_threads: the number of threads to use when running `umap()`.
-                         Cannot be specified when `hogwild=False`. When
-                         `hogwild=True`, must be explicitly specified and
-                         greater than 1 unless `self.num_threads` is greater
-                         than 1, in which case it can be left unset. Set
-                         `num_threads=-1` to use all available cores, as
+                         Set `num_threads=-1` to use all available cores, as
                          determined by
                          [`os.cpu_count()`](https://docs.python.org/3/library/os.html#os.cpu_count),
-                         or leave unset to use `self.num_threads` cores when
-                         `hogwild=True` and one core when `hogwild=False`. Does
+                         or leave unset to use `self.num_threads` cores. Does
                          not affect the returned SingleCell dataset's
                          `num_threads`; this will always be the same as the
                          original dataset's `num_threads`.
@@ -17890,34 +17897,17 @@ class SingleCell:
                        'a non-negative number')
             check_bounds(min_dist, 'min_dist', 0)
 
-        # Check that `hogwild` is Boolean
-        check_type(hogwild, 'hogwild', bool, 'Boolean')
+        # Check that `negative_window` is a positive integer
+        check_type(negative_window, 'negative_window', int,
+                   'a positive integer')
+        check_bounds(negative_window, 'negative_window', 1)
 
-        # Check that `num_threads` is valid. When `hogwild=False`,
-        # `num_threads` cannot be specified and defaults to 1. When
-        # `hogwild=True`, `num_threads` must be explicitly specified and
-        # greater than 1 unless `self.num_threads` is greater than 1, in which
-        # case it can be left unset. If `num_threads` is -1, use all available
-        # cores.
-        if not hogwild:
-            if num_threads is not None:
-                error_message = \
-                    'num_threads cannot be specified when hogwild=False'
-                raise ValueError(error_message)
-            num_threads = 1
-        elif num_threads is None:
-            if self._num_threads <= 1:
-                error_message = (
-                    'when hogwild=True and self.num_threads is 1, num_threads '
-                    'must be explicitly specified and greater than 1')
-                raise ValueError(error_message)
-            num_threads = self._num_threads
-        else:
-            num_threads = self._process_num_threads(num_threads)
-            if num_threads == 1:
-                error_message = \
-                    'num_threads must be greater than 1 when hogwild=True'
-                raise ValueError(error_message)
+        # Check that `seed` is an integer
+        check_type(seed, 'seed', int, 'an integer')
+
+        # Check that `num_threads` is a positive integer, -1 or `None`; if
+        # `None`, set to `self.num_threads`, and if -1, set to `os.cpu_count()`
+        num_threads = self._process_num_threads(num_threads)
 
         # Subset PCs and nearest-neighbor indices to QCed cells only, if
         # `QC_column` is not `None`
@@ -17927,12 +17917,17 @@ class SingleCell:
             neighbors = neighbors[QC_column_NumPy]
             distances = distances[QC_column_NumPy]
 
-        # Check that there are at least 4 cells (for `eigsh(k=3)` below)
+        # Check that there are at least 2 cells and 2 PCs
         num_cells = len(PCs)
-        if num_cells < 4:
+        if num_cells < 2:
             error_message = (
-                f'there are fewer than 4 cells, so the embedding cannot be '
+                f'there are fewer than 2 cells, so the embedding cannot be '
                 f'calculated')
+            raise ValueError(error_message)
+        if PCs.shape[1] < 2:
+            error_message = (
+                f'obsm[{PC_key!r}] has fewer than 2 columns, so the embedding '
+                f'cannot be calculated')
             raise ValueError(error_message)
 
         # If `a` and `b` are `None`, select them based on `spread` and
@@ -17947,126 +17942,22 @@ class SingleCell:
             a, b = curve_fit(
                 lambda x, a, b: 1.0 / (1.0 + a * x ** (2 * b)), xv, yv)[0]
 
-        def fuzzy_simplicial_set(neighbors, distances, num_threads):
-            N, K = neighbors.shape
-            if num_threads == 1:
-                data = np.empty(neighbors.size, dtype=np.float32)
-            else:
-                data = numa_zeros(neighbors.size, dtype=np.float32)
-            if N * K <= np.iinfo(np.int32).max:
-                indices = neighbors.ravel().view(np.int32)
-                indptr = np.arange(0, (N + 1) * K, K, dtype=np.int32)
-            else:
-                indices = neighbors.ravel().astype(np.int64)
-                indptr = np.arange(0, (N + 1) * K, K, dtype=np.int64)
-            umap_fuzzy_weights(distances, data, num_threads)
-            result = csr_array((data, indices, indptr), shape=(N, N))
-            result = result + result.T - result * result.T
-            return result
-
-        graph = fuzzy_simplicial_set(neighbors, distances, num_threads)
+        # Run UMAP. Like umap-learn, prune graph edges whose weights are less
+        # than `1 / num_pruning_iterations` of the maximum weight, since they
+        # would be sampled less than once during optimization.
         num_pruning_iterations = num_iterations if num_iterations > 10 else \
             500 if num_cells <= 10_000 else 200
-        graph.data[graph.data <
-                   graph.data.max() / num_pruning_iterations] = 0
-        graph.eliminate_zeros()
-
-        def spectral_layout(data, graph, random_state):
-            from scipy.linalg import eigh
-            from scipy.sparse.csgraph import connected_components
-            from scipy.sparse.linalg import eigsh
-            from scipy.spatial.distance import cdist
-            n_connected_components, component_labels = \
-                connected_components(graph)
-            if n_connected_components > 1:
-                # Multi-component layout
-                result = np.empty((graph.shape[0], 2), dtype=np.float32)
-                if n_connected_components > 4:
-                    component_centroids = \
-                        np.empty((n_connected_components, data.shape[1]))
-                    for label in range(n_connected_components):
-                        component_centroids[label] = \
-                            data[component_labels == label].mean(axis=0)
-                    distance_matrix = \
-                        cdist(component_centroids, component_centroids)
-                    affinity_matrix = np.exp(-(distance_matrix ** 2))
-                    # Spectral embedding of the affinity matrix
-                    np.fill_diagonal(affinity_matrix, 0)
-                    sqrt_degree = np.sqrt(affinity_matrix.sum(axis=1))
-                    isolated = sqrt_degree == 0
-                    sqrt_degree[isolated] = 1
-                    normalized_affinity_matrix = \
-                        affinity_matrix / sqrt_degree[:, None] / \
-                        sqrt_degree[None, :]
-                    normalized_affinity_matrix[isolated, isolated] = 1
-                    eigenvectors = eigh(normalized_affinity_matrix)[1]
-                    # skip trivial largest eigenvector, reorder largest to
-                    # smallest, just take the next-largest two
-                    meta_embedding = \
-                        eigenvectors[:, [-2, -3]] / sqrt_degree[:, None]
-                    meta_embedding *= np.sign(meta_embedding[
-                        np.abs(meta_embedding).argmax(axis=0), [0, 1]])
-                    meta_embedding /= meta_embedding.max()
-                else:
-                    k = int(np.ceil(n_connected_components / 2))
-                    base = np.hstack([np.eye(k), np.zeros((k, 2 - k))])
-                    meta_embedding = \
-                        np.vstack([base, -base])[:n_connected_components]
-
-                for label in range(n_connected_components):
-                    mask = component_labels == label
-                    component_graph = graph[np.ix_(mask, mask)]
-                    distances = cdist(meta_embedding[label:label + 1],
-                                      meta_embedding)
-                    data_range = distances[distances > 0].min() / 2
-                    if component_graph.shape[0] < 4:
-                        result[component_labels == label] = \
-                            random_state.uniform(
-                                low=-data_range, high=data_range,
-                                size=(component_graph.shape[0], 2)) + \
-                                     meta_embedding[label]
-                    else:
-                        component_embedding = spectral_layout(
-                            data=None, graph=component_graph,
-                            random_state=random_state)
-                        expansion = \
-                            data_range / np.abs(component_embedding).max()
-                        component_embedding *= expansion
-                        result[component_labels == label] = \
-                            component_embedding + meta_embedding[label]
-                return result
-
-            # UMAP originally took the smallest-magnitude eigenvalues
-            # (`which='SM'`) of `I - D @ graph @ D` where
-            # `D = diag(inv_sqrt_degree)`, but this is equivalent to taking the
-            # most positive eigenvalues (`which='LA'`) of `D @ graph @ D`,
-            # which converges faster. Similarly, use the trivial eigenvector as
-            # an initial guess via `v0=sqrt_degree` to speed up convergence,
-            # rather than the original's `v0=np.ones(L.shape[0])`.
-            sqrt_degree = np.sqrt(graph.sum(axis=1).ravel())
-            inv_sqrt_degree = 1 / sqrt_degree
-            normalized_graph = graph\
-                .multiply(inv_sqrt_degree[:, None])\
-                .multiply(inv_sqrt_degree[None, :])
-            with threadpool_limits(
-                    1, user_api=None if num_threads == 1 else 'blas'):
-                eigenvalues, eigenvectors = eigsh(normalized_graph, k=3,
-                                                  which='LA', tol=1e-4,
-                                                  v0=sqrt_degree)
-            # skip trivial largest eigenvector, reorder largest to smallest
-            return np.ascontiguousarray(eigenvectors[:, [1, 0]])
-
-        embedding = spectral_layout(
-            PCs, graph, random_state=np.random.RandomState(seed))
-
-        # Optimize the embedding via stochastic gradient descent, in parallel
-        # without locks if `hogwild=True`
-        umap_optimize(
-            embedding=embedding, indptr=graph.indptr, indices=graph.indices,
-            weights=graph.data, num_iterations=num_iterations, a=a, b=b,
-            gamma=gamma, initial_alpha=alpha,
-            negative_sample_rate=negative_sample_rate, seed=seed,
-            num_threads=num_threads)
+        if num_threads == 1:
+            embedding = np.empty((num_cells, 2), dtype=np.float32)
+        else:
+            embedding = numa_zeros((num_cells, 2), dtype=np.float32)
+        umap(embedding=embedding, PCs=PCs, neighbors=neighbors,
+             distances=distances, num_iterations=num_iterations,
+             num_pruning_iterations=num_pruning_iterations, a=a, b=b,
+             alpha=alpha, gamma=gamma,
+             negative_sample_rate=negative_sample_rate,
+             negative_window=negative_window, seed=seed,
+             neighbors_key=neighbors_key, num_threads=num_threads)
 
         # If `QC_column` was specified, back-project from QCed cells to all
         # cells, filling with `NaN`
