@@ -1352,7 +1352,7 @@ def localmap(const float[:, ::1] PCs,
 # TEMPORARY BENCHMARKING: variant flags and per-phase timings
 cdef bint umap_prefetch_neighbors = False, umap_gather = False, \
     umap_batch_negatives = False, umap_counting_sort = False, \
-    umap_unfused = False
+    umap_unfused = False, umap_rank_order = False
 cdef double umap_timings[16]
 cdef unsigned umap_timing_offset = 0
 
@@ -1361,14 +1361,16 @@ def umap_set_variant(const bint prefetch_neighbors,
                      const bint gather,
                      const bint batch_negatives,
                      const bint counting_sort,
-                     const bint unfused):
+                     const bint unfused,
+                     const bint rank_order=False):
     global umap_prefetch_neighbors, umap_gather, umap_batch_negatives, \
-        umap_counting_sort, umap_unfused
+        umap_counting_sort, umap_unfused, umap_rank_order
     umap_prefetch_neighbors = prefetch_neighbors
     umap_gather = gather
     umap_batch_negatives = batch_negatives
     umap_counting_sort = counting_sort
     umap_unfused = unfused
+    umap_rank_order = rank_order
 
 
 def umap_get_timings():
@@ -2131,8 +2133,8 @@ cdef void umap_layout(float[:, ::1] embedding,
     # how much weaker the repulsion from window negatives is than from
     # uniformly sampled negatives.
 
-    cdef unsigned epoch, u, thread_index, window_start, \
-        num_cells = embedding.shape[0], max_degree = 0
+    cdef unsigned epoch, u, thread_index, window_start, start, end, \
+        position, num_cells = embedding.shape[0], max_degree = 0
     cdef long long i, num_edges = indptr[num_cells]
     cdef unsigned long long state
     cdef bint use_window
@@ -2298,12 +2300,27 @@ cdef void umap_layout(float[:, ::1] embedding,
             thread_index = threadid()
             negative_buffer = negative_buffers.data() + thread_index * (
                 <unsigned> (max_degree * negative_sample_rate) + 16)
-            for u in range(thread_offsets[thread_index],
-                           thread_offsets[thread_index + 1]):
-                if use_window:
+            # With `umap_rank_order`, process cells in projection order, so
+            # consecutive cells' windows overlap and stay in cache
+            if use_window and umap_rank_order:
+                start = <unsigned> (<unsigned long long> thread_index *
+                                    num_cells / num_threads)
+                end = <unsigned> (<unsigned long long> (thread_index + 1) *
+                                  num_cells / num_threads)
+            else:
+                start = thread_offsets[thread_index]
+                end = thread_offsets[thread_index + 1]
+            for position in range(start, end):
+                if use_window and umap_rank_order:
+                    u = order[position]
+                    window_start = min(position - min(position, window / 2),
+                                       num_cells - window)
+                elif use_window:
+                    u = position
                     window_start = min(rank[u] - min(rank[u], window / 2),
                                        num_cells - window)
                 else:
+                    u = position
                     window_start = 0
                 gradient_x = 0
                 gradient_y = 0
