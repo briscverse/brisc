@@ -11,9 +11,9 @@ from libcpp.cmath cimport atan2, cos, exp, log, log2, log10, pow, sin, sqrt, \
     tanh
 from libcpp.vector cimport vector
 from openmp cimport omp_get_wtime
-from .cyutils cimport PREFETCH, atomic_or, max_heap_replace_top, \
-    max_heap_sort, randint, random_normal, random_uniform, srand, \
-    uninitialized_vector
+from .cyutils cimport PREFETCH, advise_huge_pages, atomic_or, \
+    max_heap_replace_top, max_heap_sort, randint, random_normal, \
+    random_uniform, srand, uninitialized_vector
 
 
 cdef inline void get_neighbor_pairs(const float[:, ::1] X,
@@ -1538,6 +1538,7 @@ cdef void umap_fuzzy_graph(const unsigned[:, ::1] neighbors,
     # each chunk of target cells.
     directed_buffer.resize(num_edges)
     directed = directed_buffer.data()
+    advise_huge_pages(directed, num_edges * sizeof(float))
     counts.resize(<unsigned long long> num_threads * stride)
     with nogil, parallel(num_threads=num_threads):
         thread_index = threadid()
@@ -2222,6 +2223,11 @@ cdef void umap_layout(float[:, ::1] embedding,
     next = next_buffer.data()
     momentum = momentum_buffer.data()
     velocity = velocity_buffer.data()
+    advise_huge_pages(next, 2 * <unsigned long long> num_cells * sizeof(float))
+    advise_huge_pages(momentum,
+                      2 * <unsigned long long> num_cells * sizeof(float))
+    advise_huge_pages(velocity,
+                      2 * <unsigned long long> num_cells * sizeof(float))
     with nogil, parallel(num_threads=num_threads):
         thread_index = threadid()
         for u in range(thread_offsets[thread_index],
@@ -2248,9 +2254,16 @@ cdef void umap_layout(float[:, ::1] embedding,
         histograms.resize(<unsigned long long> num_threads * 2048)
         log_ratios.resize(128)
         order = order_buffer.data()
+        advise_huge_pages(keys.data(), num_cells * sizeof(unsigned))
+        advise_huge_pages(keys_buffer.data(), num_cells * sizeof(unsigned))
+        advise_huge_pages(order, num_cells * sizeof(unsigned))
+        advise_huge_pages(order_buffer_2.data(), num_cells * sizeof(unsigned))
+        advise_huge_pages(rank.data(), num_cells * sizeof(unsigned))
         if umap_gather:
             window_embedding_buffer.resize(2 * <unsigned long long> num_cells)
             window_embedding = window_embedding_buffer.data()
+            advise_huge_pages(window_embedding, 2 *
+                              <unsigned long long> num_cells * sizeof(float))
     negative_buffers.resize(
         num_threads * (<unsigned> (max_degree * negative_sample_rate) + 16))
 
@@ -2616,6 +2629,7 @@ cdef void umap_init_level(const unsigned long long[::1] indptr,
     # other nodes unlabeled (`UINT_MAX`)
     labels_buffer.resize(num_nodes)
     labels = labels_buffer.data()
+    advise_huge_pages(labels, num_nodes * sizeof(unsigned))
     for i in range(num_nodes):
         labels[i] = UINT_MAX
     for e in range(num_nodes - num_parts, num_nodes):
@@ -2638,6 +2652,7 @@ cdef void umap_init_level(const unsigned long long[::1] indptr,
     timer = omp_get_wtime()
     new_labels_buffer.resize(num_nodes)
     new_labels = new_labels_buffer.data()
+    advise_huge_pages(new_labels, num_nodes * sizeof(unsigned))
     vote_labels_buffer.resize(level_threads * (max_degree + 16))
     vote_weights_buffer.resize(level_threads * (max_degree + 16))
     previous_unlabeled = num_nodes - num_parts

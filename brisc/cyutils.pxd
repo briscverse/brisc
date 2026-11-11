@@ -70,6 +70,38 @@ cdef extern from * nogil:
     void PREFETCH(const void *addr)
 
 
+# Ask Linux to back a large, not-yet-touched array with transparent huge pages,
+# to reduce TLB misses when the array is accessed randomly. This matters when
+# the system's THP mode is "madvise" (common on servers), where only memory
+# that asks for huge pages gets them. Like `numa_zeros()` in utils.py, only
+# arrays of at least 32 MB are advised. Call after allocating (e.g. after
+# `uninitialized_vector.resize()`) and before first touch.
+cdef extern from * nogil:
+    """
+    #ifdef __linux__
+    #include <stdint.h>
+    #include <sys/mman.h>
+    #endif
+    static inline void advise_huge_pages(void* data, size_t num_bytes) {
+    #ifdef __linux__
+        uintptr_t start, end;
+        if (num_bytes < 33554432) {
+            return;
+        }
+        start = ((uintptr_t) data + 4095) & ~(uintptr_t) 4095;
+        end = ((uintptr_t) data + num_bytes) & ~(uintptr_t) 4095;
+        if (end > start) {
+            madvise((void*) start, end - start, MADV_HUGEPAGE);
+        }
+    #else
+        (void) data;
+        (void) num_bytes;
+    #endif
+    }
+    """
+    void advise_huge_pages(void* data, size_t num_bytes)
+
+
 # A drop-in replacement for Cython's `vector` that does not automatically
 # zero-initialize
 
