@@ -6,14 +6,14 @@ from libc.float cimport FLT_MAX
 from libc.limits cimport UINT_MAX
 from libc.math cimport M_PI
 from libc.string cimport memcpy
-from libcpp.algorithm cimport lower_bound, min_element, nth_element, sort
+from libcpp.algorithm cimport min_element, nth_element, sort
 from libcpp.cmath cimport atan2, cos, exp, log, log2, log10, pow, sin, sqrt, \
     tanh
 from libcpp.vector cimport vector
 from openmp cimport omp_get_wtime
 from .cyutils cimport PREFETCH, advise_huge_pages, atomic_or, \
-    max_heap_replace_top, max_heap_sort, randint, random_normal, \
-    random_uniform, srand, uninitialized_vector
+    get_thread_offsets, max_heap_replace_top, max_heap_sort, randint, \
+    random_normal, random_uniform, srand, uninitialized_vector
 
 
 cdef inline void get_neighbor_pairs(const float[:, ::1] X,
@@ -1382,28 +1382,6 @@ def umap_reset_timings():
 # END TEMPORARY BENCHMARKING
 
 
-cdef inline void get_balanced_offsets(const unsigned long long* indptr,
-                                      const unsigned num_rows,
-                                      unsigned* offsets,
-                                      const unsigned num_threads) \
-        noexcept nogil:
-    # A variant of `get_thread_offsets()` for an `unsigned long long` `indptr`
-    # of length `num_rows + 1`: split the rows into `num_threads` contiguous
-    # ranges with about the same number of elements each, where thread `t`
-    # works on rows `offsets[t]` to `offsets[t + 1]`
-
-    cdef unsigned thread_index
-    cdef unsigned long long num_elements_per_thread = \
-        indptr[num_rows] / num_threads
-
-    offsets[0] = 0
-    for thread_index in range(1, num_threads):
-        offsets[thread_index] = min(<unsigned> (lower_bound(
-            indptr, indptr + num_rows + 1,
-            thread_index * num_elements_per_thread) - indptr), num_rows)
-    offsets[num_threads] = num_rows
-
-
 cdef inline void umap_fuzzy_weights(const float* distances,
                                     float* weights,
                                     const unsigned num_neighbors,
@@ -1450,17 +1428,6 @@ cdef inline void umap_fuzzy_weights(const float* distances,
         weights[j] = exp(-(d / mid))
 
 
-cdef inline unsigned find_neighbor(const unsigned* neighbors_i,
-                                   const unsigned num_neighbors,
-                                   const unsigned j) noexcept nogil:
-    # Return the position of `j` in `neighbors_i`, or `num_neighbors` if absent
-
-    cdef unsigned k = 0
-    while k < num_neighbors and neighbors_i[k] != j:
-        k += 1
-    return k
-
-
 cdef inline void umap_union_weights(const unsigned* neighbors_i,
                                     const float* directed,
                                     const unsigned long long* reverse,
@@ -1475,15 +1442,19 @@ cdef inline void umap_union_weights(const unsigned* neighbors_i,
     # reverse_end]` holds the flat indices `j * num_neighbors + k` of every
     # directed edge pointing to `i`.
 
-    cdef unsigned k
+    cdef unsigned k, j
     cdef unsigned long long p, e
     cdef float w
 
     for k in range(num_neighbors):
-        forward_weights[k] = directed[<unsigned long long> i * num_neighbors + k]
+        forward_weights[k] = \
+            directed[<unsigned long long> i * num_neighbors + k]
     for p in range(reverse_start, reverse_end):
         e = reverse[p]
-        k = find_neighbor(neighbors_i, num_neighbors, e / num_neighbors)
+        j = <unsigned> (e / num_neighbors)
+        k = 0
+        while k < num_neighbors and neighbors_i[k] != j:
+            k += 1
         if k < num_neighbors:
             w = directed[e]
             forward_weights[k] = \
@@ -1493,7 +1464,7 @@ cdef inline void umap_union_weights(const unsigned* neighbors_i,
 cdef void umap_fuzzy_graph(const unsigned[:, ::1] neighbors,
                            const float[:, ::1] distances,
                            const unsigned num_pruning_iterations,
-                           uninitialized_vector[unsigned long long]& indptr,
+                           uninitialized_vector[long long]& indptr,
                            uninitialized_vector[unsigned]& indices,
                            uninitialized_vector[float]& weights,
                            bint& too_large,
@@ -1650,9 +1621,11 @@ cdef void umap_fuzzy_graph(const unsigned[:, ::1] neighbors,
                     w = forward_weights[k]
             for p in range(reverse_indptr[i], reverse_indptr[i + 1]):
                 e = reverse[p]
-                if find_neighbor(&neighbors[i, 0], num_neighbors,
-                                 e / num_neighbors) == num_neighbors and \
-                        directed[e] > w:
+                j = <unsigned> (e / num_neighbors)
+                k = 0
+                while k < num_neighbors and neighbors[i, k] != j:
+                    k = k + 1
+                if k == num_neighbors and directed[e] > w:
                     w = directed[e]
         thread_max_weights[thread_index * 16] = w
     max_weight = 0
@@ -1681,9 +1654,11 @@ cdef void umap_fuzzy_graph(const unsigned[:, ::1] neighbors,
                     count = count + 1
             for p in range(reverse_indptr[i], reverse_indptr[i + 1]):
                 e = reverse[p]
-                if find_neighbor(&neighbors[i, 0], num_neighbors,
-                                 e / num_neighbors) == num_neighbors and \
-                        directed[e] >= threshold:
+                j = <unsigned> (e / num_neighbors)
+                k = 0
+                while k < num_neighbors and neighbors[i, k] != j:
+                    k = k + 1
+                if k == num_neighbors and directed[e] >= threshold:
                     count = count + 1
             q = q + count
             indptr[i + 1] = q
@@ -1722,26 +1697,14 @@ cdef void umap_fuzzy_graph(const unsigned[:, ::1] neighbors,
                     q = q + 1
             for p in range(reverse_indptr[i], reverse_indptr[i + 1]):
                 e = reverse[p]
-                if find_neighbor(&neighbors[i, 0], num_neighbors,
-                                 e / num_neighbors) == num_neighbors and \
-                        directed[e] >= threshold:
-                    indices[q] = <unsigned> (e / num_neighbors)
+                j = <unsigned> (e / num_neighbors)
+                k = 0
+                while k < num_neighbors and neighbors[i, k] != j:
+                    k = k + 1
+                if k == num_neighbors and directed[e] >= threshold:
+                    indices[q] = j
                     weights[q] = directed[e]
                     q = q + 1
-
-
-cdef inline unsigned umap_projection_key(const float x,
-                                         const float y,
-                                         const float cos_angle,
-                                         const float sin_angle) noexcept nogil:
-    # Map a cell's projection onto the direction (`cos_angle`, `sin_angle`) to
-    # an unsigned integer with the same sort order, by flipping the sign bit
-    # of non-negative floats and all bits of negative floats
-
-    cdef float projection = x * cos_angle + y * sin_angle
-    cdef unsigned bits
-    memcpy(&bits, &projection, sizeof(unsigned))
-    return bits ^ ((<unsigned> 0 - (bits >> 31)) | 0x80000000u)
 
 
 cdef void radix_pass(const unsigned* keys,
@@ -1778,9 +1741,9 @@ cdef void radix_pass(const unsigned* keys,
     total = 0
     for digit in range(2048):
         for thread_index in range(num_threads):
-            count = histograms[<unsigned long long> thread_index * 2048 + digit]
-            histograms[<unsigned long long> thread_index * 2048 + digit] = \
-                total
+            position = <unsigned long long> thread_index * 2048 + digit
+            count = histograms[position]
+            histograms[position] = total
             total += count
     with parallel(num_threads=num_threads):
         thread_index = threadid()
@@ -1816,7 +1779,7 @@ cdef void umap_projection_order(const float* embedding,
     # the projections' bits, or (if `umap_counting_sort`) a single pass on the
     # projections quantized to 2048 equal-width bins.
 
-    cdef unsigned i, thread_index, start, end
+    cdef unsigned i, thread_index, start, end, bits
     cdef float minimum, maximum, projection, scale
 
     if umap_counting_sort:
@@ -1862,9 +1825,15 @@ cdef void umap_projection_order(const float* embedding,
             end = <unsigned> (<unsigned long long> (thread_index + 1) *
                               num_cells / num_threads)
             for i in range(start, end):
-                keys[i] = umap_projection_key(
-                    embedding[2 * i], embedding[2 * i + 1], cos_angle,
-                    sin_angle)
+                # Map each projection to an unsigned integer with the same
+                # sort order, by flipping the sign bit of non-negative floats
+                # and all bits of negative floats. (`bits` is assigned before
+                # `memcpy()` so Cython makes it thread-private.)
+                projection = embedding[2 * i] * cos_angle + \
+                    embedding[2 * i + 1] * sin_angle
+                bits = 0
+                memcpy(&bits, &projection, sizeof(unsigned))
+                keys[i] = bits ^ ((<unsigned> 0 - (bits >> 31)) | 0x80000000u)
         radix_pass(keys, keys_buffer, NULL, order, histograms, 0, False,
                    num_cells, num_threads)
         radix_pass(keys_buffer, keys, order, order_buffer, histograms, 11,
@@ -1957,7 +1926,8 @@ cdef float umap_negative_force_ratio(const float* embedding,
         global_resultant = sqrt(global_x * global_x + global_y * global_y)
         if local_resultant > <float> 0 and \
                 global_resultant > <float> 0:
-            log_ratios[num_valid] = log(global_resultant) - log(local_resultant)
+            log_ratios[num_valid] = \
+                log(global_resultant) - log(local_resultant)
             num_valid += 1
     if num_valid == 0:
         return <float> 1
@@ -2028,10 +1998,10 @@ cdef inline void umap_cell_gradient(
         const float* embedding,
         const float* window_embedding,
         const unsigned u,
-        const unsigned long long* indptr,
+        const long long* indptr,
         const unsigned* indices,
         const float* weights,
-        const unsigned long long num_edges,
+        const long long num_edges,
         const float max_weight,
         const float a,
         const float b,
@@ -2058,7 +2028,7 @@ cdef inline void umap_cell_gradient(
     # Like umap-learn, only `u`'s position is updated, not its neighbors' or
     # negative samples'.
 
-    cdef unsigned long long i
+    cdef long long i
     cdef unsigned k, v, num_accepted = 0, num_negatives
     cdef float ux = embedding[2 * u], uy = embedding[2 * u + 1], dx, dy, \
         dist_squared, dist_b_minus_1, scale, gx = 0, gy = 0, \
@@ -2132,7 +2102,7 @@ cdef inline void umap_cell_gradient(
 
 
 cdef void umap_layout(float[:, ::1] embedding,
-                      const unsigned long long[::1] indptr,
+                      const long long[::1] indptr,
                       const unsigned[::1] indices,
                       const float[::1] weights,
                       const unsigned num_epochs,
@@ -2163,7 +2133,8 @@ cdef void umap_layout(float[:, ::1] embedding,
 
     cdef unsigned epoch, u, thread_index, window_start, \
         num_cells = embedding.shape[0], max_degree = 0
-    cdef unsigned long long i, state, num_edges = indptr[num_cells]
+    cdef long long i, num_edges = indptr[num_cells]
+    cdef unsigned long long state
     cdef bint use_window
     cdef float alpha, learning_rate, epsilon, max_weight, angle, \
         attraction_constant, repulsion_constant, clip_constant, \
@@ -2191,8 +2162,7 @@ cdef void umap_layout(float[:, ::1] embedding,
     # into contiguous ranges with about the same number of edges per thread.
     num_threads = max(1, min(num_threads, num_cells / 1024))
     thread_offsets.resize(num_threads + 1)
-    get_balanced_offsets(&indptr[0], num_cells, thread_offsets.data(),
-                         num_threads)
+    get_thread_offsets(indptr, thread_offsets.data(), num_threads)
 
     # Get the maximum edge weight and degree
     thread_floats.resize(num_threads * 16)
@@ -2518,7 +2488,7 @@ cdef void umap_align(float* positions,
         positions[2 * i + 1] = y * cos_angle - x * sin_angle
 
 
-cdef void umap_init_level(const unsigned long long[::1] indptr,
+cdef void umap_init_level(const long long[::1] indptr,
                           const unsigned[::1] indices,
                           const float[::1] label_weights,
                           const float[::1] summed_weights,
@@ -2554,8 +2524,10 @@ cdef void umap_init_level(const unsigned long long[::1] indptr,
     global umap_timing_offset
     cdef unsigned i, j, k, p, q, label, best_label, num_votes, \
         num_unlabeled, previous_unlabeled, iteration, num_coarse_edges, \
-        thread_index, num_iterations, window, num_nodes = anchor.shape[0], max_degree = 0, level_threads
-    cdef unsigned long long e, m, position, total, count, \
+        thread_index, num_iterations, window, level_threads, \
+        num_nodes = anchor.shape[0], max_degree = 0
+    cdef long long e, total
+    cdef unsigned long long m, position, count, \
         level_seed = seed + (<unsigned long long> depth << 40)
     cdef unsigned long long state
     cdef bint found, use_share = depth > 1
@@ -2568,8 +2540,11 @@ cdef void umap_init_level(const unsigned long long[::1] indptr,
     cdef float* vote_weights
     cdef unsigned long long* keys
     cdef vector[unsigned] stack
-    cdef uninitialized_vector[unsigned long long] keys_buffer, \
-        part_indptr, part_work, coarse_indptr, thread_totals, cursors
+    cdef uninitialized_vector[unsigned long long] keys_buffer, part_indptr, \
+        cursors
+    cdef uninitialized_vector[long long] part_work, coarse_indptr, \
+        thread_totals
+    cdef long long[::1] part_work_view
     cdef uninitialized_vector[unsigned] labels_buffer, new_labels_buffer, \
         vote_labels_buffer, thread_offsets, thread_unsigneds, members, \
         coarse_indices
@@ -2597,8 +2572,7 @@ cdef void umap_init_level(const unsigned long long[::1] indptr,
     num_parts = max(2, min(num_parts, num_nodes / 2))
     level_threads = max(1, min(num_threads, num_nodes / 1024))
     thread_offsets.resize(level_threads + 1)
-    get_balanced_offsets(&indptr[0], num_nodes, thread_offsets.data(),
-                         level_threads)
+    get_thread_offsets(indptr, thread_offsets.data(), level_threads)
 
     # Select the `num_parts` highest-degree nodes as hubs, breaking ties by
     # index. Encode each node's degree (whose bits sort like unsigned
@@ -2616,9 +2590,13 @@ cdef void umap_init_level(const unsigned long long[::1] indptr,
             w = 0
             for e in range(indptr[i], indptr[i + 1]):
                 w = w + label_weights[e]
+            # Assign `label` before `memcpy()` so Cython makes it
+            # thread-private
+            label = 0
             memcpy(&label, &w, sizeof(unsigned))
             keys[i] = (<unsigned long long> label << 32) | i
-            max_degree = max(max_degree, <unsigned> (indptr[i + 1] - indptr[i]))
+            max_degree = \
+                max(max_degree, <unsigned> (indptr[i + 1] - indptr[i]))
         thread_unsigneds[thread_index * 16] = max_degree
     max_degree = 0
     for thread_index in range(level_threads):
@@ -2767,8 +2745,8 @@ cdef void umap_init_level(const unsigned long long[::1] indptr,
     # same part. Each thread appends its parts' edges to its own buffers,
     # which are concatenated at the end.
     thread_offsets.resize(level_threads + 1)
-    get_balanced_offsets(part_work.data(), num_parts, thread_offsets.data(),
-                         level_threads)
+    part_work_view = <long long[:num_parts + 1]> part_work.data()
+    get_thread_offsets(part_work_view, thread_offsets.data(), level_threads)
     coarse_indptr.resize(num_parts + 1)
     out_weights.resize(num_parts)
     thread_keys.resize(level_threads)
@@ -2831,13 +2809,10 @@ cdef void umap_init_level(const unsigned long long[::1] indptr,
                        thread_offsets[thread_index + 1]):
             total = total + coarse_indptr[p + 1]
             coarse_indptr[p + 1] = total
-        position = 0
-        for e in range(thread_totals[thread_index],
-                       thread_totals[thread_index] +
-                       thread_out_indices[thread_index].size()):
+        for position in range(thread_out_indices[thread_index].size()):
+            e = thread_totals[thread_index] + <long long> position
             coarse_indices[e] = thread_out_indices[thread_index][position]
             coarse_summed[e] = thread_out_weights[thread_index][position]
-            position = position + 1
     thread_keys.clear()
     thread_weights.clear()
     thread_out_indices.clear()
@@ -2872,7 +2847,7 @@ cdef void umap_init_level(const unsigned long long[::1] indptr,
     # epochs
     coarse_layout.resize(2 * num_parts)
     umap_init_level(
-        <unsigned long long[:num_parts + 1]> coarse_indptr.data(),
+        <long long[:num_parts + 1]> coarse_indptr.data(),
         <unsigned[:num_coarse_edges]> coarse_indices.data(),
         <float[:num_coarse_edges]> coarse_label_weights.data(),
         <float[:num_coarse_edges]> coarse_summed.data(),
@@ -2890,7 +2865,7 @@ cdef void umap_init_level(const unsigned long long[::1] indptr,
     timer = omp_get_wtime()
     umap_timing_offset = 3
     umap_layout(<float[:num_parts, :2]> coarse_layout.data(),
-                <unsigned long long[:num_parts + 1]> coarse_indptr.data(),
+                <long long[:num_parts + 1]> coarse_indptr.data(),
                 <unsigned[:num_coarse_edges]> coarse_indices.data(),
                 <float[:num_coarse_edges]> coarse_label_weights.data(),
                 num_epochs, a, b, 4, <float> 0.5, 1, max(1, window),
@@ -2903,8 +2878,7 @@ cdef void umap_init_level(const unsigned long long[::1] indptr,
     # the anchor
     timer = omp_get_wtime()
     thread_offsets.resize(level_threads + 1)
-    get_balanced_offsets(&indptr[0], num_nodes, thread_offsets.data(),
-                         level_threads)
+    get_thread_offsets(indptr, thread_offsets.data(), level_threads)
     with nogil, parallel(num_threads=level_threads):
         thread_index = threadid()
         for i in range(thread_offsets[thread_index],
@@ -2932,7 +2906,7 @@ cdef void umap_init_level(const unsigned long long[::1] indptr,
 
 cdef void umap_embed(float[:, ::1] embedding,
                      const float[:, ::1] PCs,
-                     const unsigned long long[::1] indptr,
+                     const long long[::1] indptr,
                      const unsigned[::1] indices,
                      const float[::1] weights,
                      const unsigned num_iterations,
@@ -3014,7 +2988,7 @@ def umap(float[:, ::1] embedding,
     cdef bint too_large = False, self_neighbors = False
     cdef double timer
     cdef str error_message
-    cdef uninitialized_vector[unsigned long long] indptr
+    cdef uninitialized_vector[long long] indptr
     cdef uninitialized_vector[unsigned] indices
     cdef uninitialized_vector[float] weights
 
@@ -3047,7 +3021,7 @@ def umap(float[:, ::1] embedding,
     # Embed
     num_edges = indices.size()
     umap_embed(embedding, PCs,
-               <unsigned long long[:embedding.shape[0] + 1]> indptr.data(),
+               <long long[:embedding.shape[0] + 1]> indptr.data(),
                <unsigned[:num_edges]> indices.data(),
                <float[:num_edges]> weights.data(), num_iterations, a, b,
                alpha, gamma, negative_sample_rate, negative_window, seed,
@@ -3057,7 +3031,7 @@ def umap(float[:, ::1] embedding,
 # TEMPORARY BENCHMARKING: run UMAP on a graph built with scipy
 def umap_from_graph(float[:, ::1] embedding,
                     const float[:, ::1] PCs,
-                    const unsigned long long[::1] indptr,
+                    const long long[::1] indptr,
                     const unsigned[::1] indices,
                     const float[::1] weights,
                     const unsigned num_iterations,
