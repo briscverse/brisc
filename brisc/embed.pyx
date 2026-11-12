@@ -2422,9 +2422,9 @@ cdef void umap_init_level(const long long[::1] indptr,
 
     cdef unsigned i, j, k, p, q, label, best_label, num_votes, \
         num_unlabeled, previous_unlabeled, iteration, num_coarse_edges, \
-        thread_index, num_iterations, window, level_threads, \
-        num_nodes = anchor.shape[0], max_degree = 0
-    cdef long long e, total
+        thread_index, num_iterations, window, level_threads, slot, \
+        hash_table_size, num_nodes = anchor.shape[0], max_degree = 0
+    cdef long long e, total, max_part_work
     cdef unsigned long long m, position, count, \
         level_seed = seed + (<unsigned long long> depth << 40)
     cdef unsigned long long state
@@ -2434,6 +2434,8 @@ cdef void umap_init_level(const long long[::1] indptr,
     cdef unsigned* labels
     cdef unsigned* new_labels
     cdef unsigned* vote_labels
+    cdef unsigned* vote_slots
+    cdef unsigned* hash_table
     cdef float* vote_weights
     cdef unsigned long long* keys
     cdef vector[unsigned] stack
@@ -2443,12 +2445,12 @@ cdef void umap_init_level(const long long[::1] indptr,
         thread_totals
     cdef long long[::1] part_work_view
     cdef uninitialized_vector[unsigned] labels_buffer, new_labels_buffer, \
-        vote_labels_buffer, thread_offsets, thread_unsigneds, members, \
+        vote_labels_buffer, vote_slots_buffer, hash_table_buffer, \
+        thread_offsets, thread_unsigneds, members, \
         coarse_indices
     cdef uninitialized_vector[float] vote_weights_buffer, coarse_summed, \
         coarse_label_weights, out_weights, coarse_anchor, coarse_layout
-    cdef vector[vector[unsigned long long]] thread_keys
-    cdef vector[vector[float]] thread_weights, thread_out_weights
+    cdef vector[vector[float]] thread_out_weights
     cdef vector[vector[unsigned]] thread_out_indices
 
     # Base case: place nodes at their (centered) anchor positions, scaled to
@@ -2522,11 +2524,25 @@ cdef void umap_init_level(const long long[::1] indptr,
     # least 1 (at the top level) or 10% of the node's total edge weight
     # (below the top level, where weights are normalized). Stop early if no
     # nodes became labeled over the last 5 iterations.
+    #
+    # Tally each node's votes in order of first appearance in `vote_labels`
+    # and `vote_weights`, using a per-thread open-addressing hash table of
+    # `hash_table_size` slots (a power of 2 at least twice the maximum
+    # degree) mapping labels to their positions in `vote_labels`. Empty slots
+    # hold `UINT_MAX`; after each node, reset just the slots it used, which
+    # are recorded in `vote_slots`.
     new_labels_buffer.resize(num_nodes)
     new_labels = new_labels_buffer.data()
     advise_huge_pages(new_labels, num_nodes * sizeof(unsigned))
     vote_labels_buffer.resize(level_threads * (max_degree + 16))
     vote_weights_buffer.resize(level_threads * (max_degree + 16))
+    vote_slots_buffer.resize(level_threads * (max_degree + 16))
+    hash_table_size = 16
+    while hash_table_size < 2 * max_degree:
+        hash_table_size *= 2
+    hash_table_buffer.resize(level_threads * hash_table_size)
+    for e in range(level_threads * hash_table_size):
+        hash_table_buffer[e] = UINT_MAX
     previous_unlabeled = num_nodes - num_parts
     for iteration in range(100):
         with nogil, parallel(num_threads=level_threads):
@@ -2535,6 +2551,10 @@ cdef void umap_init_level(const long long[::1] indptr,
                 vote_labels_buffer.data() + thread_index * (max_degree + 16)
             vote_weights = \
                 vote_weights_buffer.data() + thread_index * (max_degree + 16)
+            vote_slots = \
+                vote_slots_buffer.data() + thread_index * (max_degree + 16)
+            hash_table = \
+                hash_table_buffer.data() + thread_index * hash_table_size
             num_unlabeled = 0
             for i in range(thread_offsets[thread_index],
                            thread_offsets[thread_index + 1]):
@@ -2544,24 +2564,32 @@ cdef void umap_init_level(const long long[::1] indptr,
                 total_weight = 0
                 num_votes = 0
                 for e in range(indptr[i], indptr[i + 1]):
+                    # Prefetch the label of the neighbor 8 edges ahead
+                    if e + 8 < indptr[num_nodes]:
+                        PREFETCH(&labels[indices[e + 8]])
                     w = label_weights[e]
                     total_weight = total_weight + w
                     label = labels[indices[e]]
-                    k = 0
-                    while k < num_votes and vote_labels[k] != label:
-                        k = k + 1
-                    if k == num_votes:
-                        vote_labels[k] = label
-                        vote_weights[k] = w
+                    if label == UINT_MAX:
+                        continue
+                    slot = (label * 2654435761u) & (hash_table_size - 1)
+                    while hash_table[slot] != UINT_MAX and \
+                            vote_labels[hash_table[slot]] != label:
+                        slot = (slot + 1) & (hash_table_size - 1)
+                    if hash_table[slot] == UINT_MAX:
+                        hash_table[slot] = num_votes
+                        vote_slots[num_votes] = slot
+                        vote_labels[num_votes] = label
+                        vote_weights[num_votes] = w
                         num_votes = num_votes + 1
                     else:
-                        vote_weights[k] += w
+                        vote_weights[hash_table[slot]] += w
                 max_vote = \
                     <float> 0.1 * total_weight if use_share else <float> 1
                 best_label = UINT_MAX
                 for k in range(num_votes):
-                    if vote_labels[k] != UINT_MAX and \
-                            vote_weights[k] >= max_vote:
+                    hash_table[vote_slots[k]] = UINT_MAX
+                    if vote_weights[k] >= max_vote:
                         max_vote = vote_weights[k]
                         best_label = vote_labels[k]
                 new_labels[i] = best_label
@@ -2630,53 +2658,63 @@ cdef void umap_init_level(const long long[::1] indptr,
     cursors.shrink_to_fit()
 
     # Build the coarse graph, omitting edges within parts: for each part,
-    # sort the edges from its members by the part they point to (and then by
-    # order of appearance), and sum the weights of edges pointing to the
-    # same part. Each thread appends its parts' edges to its own buffers,
-    # which are concatenated at the end.
+    # sum the weights of the edges from its members to each other part, in
+    # order of first appearance, using a per-thread open-addressing hash
+    # table (like the one for label propagation) that maps parts to their
+    # positions in this part's row. Each thread appends its parts' edges to
+    # its own buffers, which are concatenated at the end.
+    max_part_work = 0
+    for p in range(num_parts):
+        max_part_work = max(max_part_work, part_work[p + 1] - part_work[p])
+    hash_table_size = 16
+    while hash_table_size < 2 * max_part_work:
+        hash_table_size *= 2
+    hash_table_buffer.resize(level_threads * hash_table_size)
+    for e in range(level_threads * hash_table_size):
+        hash_table_buffer[e] = UINT_MAX
+    vote_slots_buffer.resize(level_threads * (max_part_work + 16))
     thread_offsets.resize(level_threads + 1)
     part_work_view = <long long[:num_parts + 1]> part_work.data()
     get_thread_offsets(part_work_view, thread_offsets.data(), level_threads)
     coarse_indptr.resize(num_parts + 1)
     out_weights.resize(num_parts)
-    thread_keys.resize(level_threads)
-    thread_weights.resize(level_threads)
     thread_out_indices.resize(level_threads)
     thread_out_weights.resize(level_threads)
     with nogil, parallel(num_threads=level_threads):
         thread_index = threadid()
+        hash_table = \
+            hash_table_buffer.data() + thread_index * hash_table_size
+        vote_slots = vote_slots_buffer.data() + \
+            thread_index * (<unsigned> max_part_work + 16)
         for p in range(thread_offsets[thread_index],
                        thread_offsets[thread_index + 1]):
-            thread_keys[thread_index].clear()
-            thread_weights[thread_index].clear()
+            position = thread_out_indices[thread_index].size()
+            count = 0
+            total_weight = 0
             for m in range(part_indptr[p], part_indptr[p + 1]):
                 i = members[m]
                 for e in range(indptr[i], indptr[i + 1]):
                     q = labels[indices[e]]
-                    if q != p:
-                        thread_keys[thread_index].push_back(
-                            (<unsigned long long> q << 32) |
-                            thread_weights[thread_index].size())
-                        thread_weights[thread_index].push_back(
-                            summed_weights[e])
-            sort(thread_keys[thread_index].begin(),
-                 thread_keys[thread_index].end())
-            count = 0
-            total_weight = 0
-            label = UINT_MAX
-            for position in range(thread_keys[thread_index].size()):
-                q = <unsigned> (thread_keys[thread_index][position] >> 32)
-                w = thread_weights[thread_index][
-                    <unsigned> thread_keys[thread_index][position]]
-                total_weight = total_weight + w
-                if q == label:
-                    thread_out_weights[thread_index][
-                        thread_out_weights[thread_index].size() - 1] += w
-                else:
-                    thread_out_indices[thread_index].push_back(q)
-                    thread_out_weights[thread_index].push_back(w)
-                    count = count + 1
-                    label = q
+                    if q == p:
+                        continue
+                    w = summed_weights[e]
+                    total_weight = total_weight + w
+                    slot = (q * 2654435761u) & (hash_table_size - 1)
+                    while hash_table[slot] != UINT_MAX and \
+                            thread_out_indices[thread_index][
+                                position + hash_table[slot]] != q:
+                        slot = (slot + 1) & (hash_table_size - 1)
+                    if hash_table[slot] == UINT_MAX:
+                        hash_table[slot] = <unsigned> count
+                        vote_slots[count] = slot
+                        thread_out_indices[thread_index].push_back(q)
+                        thread_out_weights[thread_index].push_back(w)
+                        count = count + 1
+                    else:
+                        thread_out_weights[thread_index][
+                            position + hash_table[slot]] += w
+            for k in range(count):
+                hash_table[vote_slots[k]] = UINT_MAX
             coarse_indptr[p + 1] = count
             out_weights[p] = total_weight
 
@@ -2703,8 +2741,6 @@ cdef void umap_init_level(const long long[::1] indptr,
             e = thread_totals[thread_index] + <long long> position
             coarse_indices[e] = thread_out_indices[thread_index][position]
             coarse_summed[e] = thread_out_weights[thread_index][position]
-    thread_keys.clear()
-    thread_weights.clear()
     thread_out_indices.clear()
     thread_out_weights.clear()
 
@@ -2771,6 +2807,9 @@ cdef void umap_init_level(const long long[::1] indptr,
             sum_y = 0
             total_weight = 0
             for e in range(indptr[i], indptr[i + 1]):
+                # Prefetch the label of the neighbor 8 edges ahead
+                if e + 8 < indptr[num_nodes]:
+                    PREFETCH(&labels[indices[e + 8]])
                 w = label_weights[e]
                 total_weight = total_weight + w
                 p = labels[indices[e]]
