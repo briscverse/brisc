@@ -2153,7 +2153,7 @@ cdef void umap_layout(float[:, ::1] embedding,
     # samples of the current and next cells
     buffer_size = max_degree + 16 + \
         <unsigned> (max_degree * negatives_per_edge) + 16
-    cell_buffers.resize(num_threads * 2 * buffer_size)
+    cell_buffers.resize(<unsigned long long> num_threads * 2 * buffer_size)
     state = srand(seed - 1)
 
     for epoch in range(num_epochs):
@@ -2199,7 +2199,8 @@ cdef void umap_layout(float[:, ::1] embedding,
         with nogil, parallel(num_threads=num_threads):
             thread_index = threadid()
             neighbor_buffer = \
-                cell_buffers.data() + thread_index * 2 * buffer_size
+                cell_buffers.data() + \
+                <unsigned long long> thread_index * 2 * buffer_size
             negative_buffer = neighbor_buffer + max_degree + 16
             next_neighbor_buffer = neighbor_buffer + buffer_size
             next_negative_buffer = negative_buffer + buffer_size
@@ -2534,27 +2535,37 @@ cdef void umap_init_level(const long long[::1] indptr,
     new_labels_buffer.resize(num_nodes)
     new_labels = new_labels_buffer.data()
     advise_huge_pages(new_labels, num_nodes * sizeof(unsigned))
-    vote_labels_buffer.resize(level_threads * (max_degree + 16))
-    vote_weights_buffer.resize(level_threads * (max_degree + 16))
-    vote_slots_buffer.resize(level_threads * (max_degree + 16))
+    vote_labels_buffer.resize(
+        <unsigned long long> level_threads * (max_degree + 16))
+    vote_weights_buffer.resize(
+        <unsigned long long> level_threads * (max_degree + 16))
+    vote_slots_buffer.resize(
+        <unsigned long long> level_threads * (max_degree + 16))
     hash_table_size = 16
     while hash_table_size < 2 * max_degree:
         hash_table_size *= 2
-    hash_table_buffer.resize(level_threads * hash_table_size)
-    for e in range(level_threads * hash_table_size):
-        hash_table_buffer[e] = UINT_MAX
+    hash_table_buffer.resize(
+        <unsigned long long> level_threads * hash_table_size)
+    with nogil:
+        for e in prange(<long long> level_threads * hash_table_size,
+                        num_threads=level_threads):
+            hash_table_buffer[e] = UINT_MAX
     previous_unlabeled = num_nodes - num_parts
     for iteration in range(100):
         with nogil, parallel(num_threads=level_threads):
             thread_index = threadid()
             vote_labels = \
-                vote_labels_buffer.data() + thread_index * (max_degree + 16)
+                vote_labels_buffer.data() + \
+                <unsigned long long> thread_index * (max_degree + 16)
             vote_weights = \
-                vote_weights_buffer.data() + thread_index * (max_degree + 16)
+                vote_weights_buffer.data() + \
+                <unsigned long long> thread_index * (max_degree + 16)
             vote_slots = \
-                vote_slots_buffer.data() + thread_index * (max_degree + 16)
+                vote_slots_buffer.data() + \
+                <unsigned long long> thread_index * (max_degree + 16)
             hash_table = \
-                hash_table_buffer.data() + thread_index * hash_table_size
+                hash_table_buffer.data() + \
+                <unsigned long long> thread_index * hash_table_size
             num_unlabeled = 0
             for i in range(thread_offsets[thread_index],
                            thread_offsets[thread_index + 1]):
@@ -2666,13 +2677,20 @@ cdef void umap_init_level(const long long[::1] indptr,
     max_part_work = 0
     for p in range(num_parts):
         max_part_work = max(max_part_work, part_work[p + 1] - part_work[p])
+    # A part's edges point to at most `num_parts - 1` other parts, which is
+    # far fewer than its number of edges for large parts
+    max_part_work = min(max_part_work, <long long> num_parts)
     hash_table_size = 16
     while hash_table_size < 2 * max_part_work:
         hash_table_size *= 2
-    hash_table_buffer.resize(level_threads * hash_table_size)
-    for e in range(level_threads * hash_table_size):
-        hash_table_buffer[e] = UINT_MAX
-    vote_slots_buffer.resize(level_threads * (max_part_work + 16))
+    hash_table_buffer.resize(
+        <unsigned long long> level_threads * hash_table_size)
+    with nogil:
+        for e in prange(<long long> level_threads * hash_table_size,
+                        num_threads=level_threads):
+            hash_table_buffer[e] = UINT_MAX
+    vote_slots_buffer.resize(
+        <unsigned long long> level_threads * (max_part_work + 16))
     thread_offsets.resize(level_threads + 1)
     part_work_view = <long long[:num_parts + 1]> part_work.data()
     get_thread_offsets(part_work_view, thread_offsets.data(), level_threads)
@@ -2683,9 +2701,10 @@ cdef void umap_init_level(const long long[::1] indptr,
     with nogil, parallel(num_threads=level_threads):
         thread_index = threadid()
         hash_table = \
-            hash_table_buffer.data() + thread_index * hash_table_size
+            hash_table_buffer.data() + \
+                <unsigned long long> thread_index * hash_table_size
         vote_slots = vote_slots_buffer.data() + \
-            thread_index * (<unsigned> max_part_work + 16)
+            <unsigned long long> thread_index * (max_part_work + 16)
         for p in range(thread_offsets[thread_index],
                        thread_offsets[thread_index + 1]):
             position = thread_out_indices[thread_index].size()
