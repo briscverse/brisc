@@ -10,7 +10,6 @@ from libcpp.algorithm cimport min_element, nth_element, sort
 from libcpp.cmath cimport atan2, cos, exp, log, log2, log10, pow, sin, sqrt, \
     tanh
 from libcpp.vector cimport vector
-from openmp cimport omp_get_wtime
 from .cyutils cimport PREFETCH, advise_huge_pages, atomic_or, \
     get_thread_offsets, max_heap_replace_top, max_heap_sort, randint, \
     random_normal, random_uniform, srand, uninitialized_vector
@@ -1349,41 +1348,6 @@ def localmap(const float[:, ::1] PCs,
 # its own position, and all random numbers are drawn from per-cell streams, the
 # results do not depend on the number of threads.
 
-# TEMPORARY BENCHMARKING: variant flags and per-phase timings
-cdef bint umap_prefetch_neighbors = False, umap_gather = False, \
-    umap_batch_negatives = False, umap_counting_sort = False, \
-    umap_unfused = False, umap_rank_order = False
-cdef double umap_timings[16]
-cdef unsigned umap_timing_offset = 0
-
-
-def umap_set_variant(const bint prefetch_neighbors,
-                     const bint gather,
-                     const bint batch_negatives,
-                     const bint counting_sort,
-                     const bint unfused,
-                     const bint rank_order=False):
-    global umap_prefetch_neighbors, umap_gather, umap_batch_negatives, \
-        umap_counting_sort, umap_unfused, umap_rank_order
-    umap_prefetch_neighbors = prefetch_neighbors
-    umap_gather = gather
-    umap_batch_negatives = batch_negatives
-    umap_counting_sort = counting_sort
-    umap_unfused = unfused
-    umap_rank_order = rank_order
-
-
-def umap_get_timings():
-    return [umap_timings[i] for i in range(16)]
-
-
-def umap_reset_timings():
-    cdef unsigned i
-    for i in range(16):
-        umap_timings[i] = 0
-# END TEMPORARY BENCHMARKING
-
-
 cdef inline void umap_fuzzy_weights(const float* distances,
                                     float* weights,
                                     const unsigned num_neighbors,
@@ -1709,67 +1673,11 @@ cdef void umap_fuzzy_graph(const unsigned[:, ::1] neighbors,
                     q = q + 1
 
 
-cdef void radix_pass(const unsigned* keys,
-                     unsigned* keys_out,
-                     const unsigned* order,
-                     unsigned* order_out,
-                     unsigned long long* histograms,
-                     const unsigned shift,
-                     const bint last_pass,
-                     const unsigned num_cells,
-                     const unsigned num_threads) noexcept nogil:
-    # One stable counting-sort pass of a least-significant-digit radix sort on
-    # 11-bit digits. Each thread histograms the digits of one contiguous chunk
-    # of the input, then scatters its chunk to the output, so the output is
-    # the same for any number of threads. If `order` is `NULL`, the input is
-    # taken to be in its original order. On the last pass, the keys are not
-    # needed, so are not written.
-
-    cdef unsigned i, digit, thread_index, start, end
-    cdef unsigned long long count, total, position
-    cdef unsigned long long* histogram
-
-    with parallel(num_threads=num_threads):
-        thread_index = threadid()
-        histogram = histograms + <unsigned long long> thread_index * 2048
-        for digit in range(2048):
-            histogram[digit] = 0
-        start = <unsigned> (<unsigned long long> thread_index * num_cells /
-                            num_threads)
-        end = <unsigned> (<unsigned long long> (thread_index + 1) * num_cells /
-                          num_threads)
-        for i in range(start, end):
-            histogram[(keys[i] >> shift) & 2047] += 1
-    total = 0
-    for digit in range(2048):
-        for thread_index in range(num_threads):
-            position = <unsigned long long> thread_index * 2048 + digit
-            count = histograms[position]
-            histograms[position] = total
-            total += count
-    with parallel(num_threads=num_threads):
-        thread_index = threadid()
-        histogram = histograms + <unsigned long long> thread_index * 2048
-        start = <unsigned> (<unsigned long long> thread_index * num_cells /
-                            num_threads)
-        end = <unsigned> (<unsigned long long> (thread_index + 1) * num_cells /
-                          num_threads)
-        for i in range(start, end):
-            digit = (keys[i] >> shift) & 2047
-            position = histogram[digit]
-            histogram[digit] = position + 1
-            order_out[position] = i if order == NULL else order[i]
-            if not last_pass:
-                keys_out[position] = keys[i]
-
-
 cdef void umap_projection_order(const float* embedding,
                                 const float cos_angle,
                                 const float sin_angle,
-                                unsigned* keys,
-                                unsigned* keys_buffer,
+                                unsigned* bins,
                                 unsigned* order,
-                                unsigned* order_buffer,
                                 unsigned* rank,
                                 unsigned long long* histograms,
                                 float* thread_extremes,
@@ -1777,79 +1685,83 @@ cdef void umap_projection_order(const float* embedding,
                                 const unsigned num_threads) noexcept nogil:
     # Sort cells by their projection onto the direction (`cos_angle`,
     # `sin_angle`), storing the sorted order in `order` and each cell's
-    # position in the sorted order in `rank`. Uses a three-pass radix sort on
-    # the projections' bits, or (if `umap_counting_sort`) a single pass on the
-    # projections quantized to 2048 equal-width bins.
+    # position in the sorted order in `rank`. Unlike umap-learn, which sorts
+    # the projections exactly, quantize them into 2048 equal-width bins and
+    # counting-sort the bins, which takes a single pass. Ties are broken by
+    # index; since bins are much narrower than the windows negative samples
+    # are drawn from, this barely changes the windows. Each thread counts and
+    # then scatters one contiguous chunk of cells, so the result does not
+    # depend on the number of threads.
 
-    cdef unsigned i, thread_index, start, end, bits
+    cdef unsigned i, bin, thread_index, start, end
+    cdef unsigned long long count, total, position
+    cdef unsigned long long* histogram
     cdef float minimum, maximum, projection, scale
 
-    if umap_counting_sort:
-        with parallel(num_threads=num_threads):
-            thread_index = threadid()
-            start = <unsigned> (<unsigned long long> thread_index * num_cells /
-                                num_threads)
-            end = <unsigned> (<unsigned long long> (thread_index + 1) *
-                              num_cells / num_threads)
-            minimum = FLT_MAX
-            maximum = -FLT_MAX
-            for i in range(start, end):
-                projection = embedding[2 * i] * cos_angle + \
-                    embedding[2 * i + 1] * sin_angle
-                minimum = min(minimum, projection)
-                maximum = max(maximum, projection)
-            thread_extremes[thread_index * 16] = minimum
-            thread_extremes[thread_index * 16 + 1] = maximum
-        minimum = FLT_MAX
-        maximum = -FLT_MAX
-        for thread_index in range(num_threads):
-            minimum = min(minimum, thread_extremes[thread_index * 16])
-            maximum = max(maximum, thread_extremes[thread_index * 16 + 1])
-        scale = <float> 2048 / (maximum - minimum) if maximum > minimum else 0
-        with parallel(num_threads=num_threads):
-            thread_index = threadid()
-            start = <unsigned> (<unsigned long long> thread_index * num_cells /
-                                num_threads)
-            end = <unsigned> (<unsigned long long> (thread_index + 1) *
-                              num_cells / num_threads)
-            for i in range(start, end):
-                projection = embedding[2 * i] * cos_angle + \
-                    embedding[2 * i + 1] * sin_angle
-                keys[i] = min(<unsigned> ((projection - minimum) * scale),
-                              <unsigned> 2047)
-        radix_pass(keys, keys_buffer, NULL, order, histograms, 0, True,
-                   num_cells, num_threads)
-    else:
-        with parallel(num_threads=num_threads):
-            thread_index = threadid()
-            start = <unsigned> (<unsigned long long> thread_index * num_cells /
-                                num_threads)
-            end = <unsigned> (<unsigned long long> (thread_index + 1) *
-                              num_cells / num_threads)
-            for i in range(start, end):
-                # Map each projection to an unsigned integer with the same
-                # sort order, by flipping the sign bit of non-negative floats
-                # and all bits of negative floats. (`bits` is assigned before
-                # `memcpy()` so Cython makes it thread-private.)
-                projection = embedding[2 * i] * cos_angle + \
-                    embedding[2 * i + 1] * sin_angle
-                bits = 0
-                memcpy(&bits, &projection, sizeof(unsigned))
-                keys[i] = bits ^ ((<unsigned> 0 - (bits >> 31)) | 0x80000000u)
-        radix_pass(keys, keys_buffer, NULL, order, histograms, 0, False,
-                   num_cells, num_threads)
-        radix_pass(keys_buffer, keys, order, order_buffer, histograms, 11,
-                   False, num_cells, num_threads)
-        radix_pass(keys, keys_buffer, order_buffer, order, histograms, 22,
-                   True, num_cells, num_threads)
+    # Find the range of the projections
     with parallel(num_threads=num_threads):
         thread_index = threadid()
         start = <unsigned> (<unsigned long long> thread_index * num_cells /
                             num_threads)
-        end = <unsigned> (<unsigned long long> (thread_index + 1) * num_cells /
-                          num_threads)
+        end = <unsigned> (<unsigned long long> (thread_index + 1) *
+                          num_cells / num_threads)
+        minimum = FLT_MAX
+        maximum = -FLT_MAX
         for i in range(start, end):
-            rank[order[i]] = i
+            projection = embedding[2 * i] * cos_angle + \
+                embedding[2 * i + 1] * sin_angle
+            minimum = min(minimum, projection)
+            maximum = max(maximum, projection)
+        thread_extremes[thread_index * 16] = minimum
+        thread_extremes[thread_index * 16 + 1] = maximum
+    minimum = FLT_MAX
+    maximum = -FLT_MAX
+    for thread_index in range(num_threads):
+        minimum = min(minimum, thread_extremes[thread_index * 16])
+        maximum = max(maximum, thread_extremes[thread_index * 16 + 1])
+    scale = <float> 2048 / (maximum - minimum) if maximum > minimum else \
+        <float> 0
+
+    # Bin each cell's projection, and count each thread's cells in each bin
+    with parallel(num_threads=num_threads):
+        thread_index = threadid()
+        histogram = histograms + <unsigned long long> thread_index * 2048
+        for bin in range(2048):
+            histogram[bin] = 0
+        start = <unsigned> (<unsigned long long> thread_index * num_cells /
+                            num_threads)
+        end = <unsigned> (<unsigned long long> (thread_index + 1) *
+                          num_cells / num_threads)
+        for i in range(start, end):
+            projection = embedding[2 * i] * cos_angle + \
+                embedding[2 * i + 1] * sin_angle
+            bin = min(<unsigned> ((projection - minimum) * scale),
+                      <unsigned> 2047)
+            bins[i] = bin
+            histogram[bin] += 1
+
+    # Convert the counts to each thread's first position in each bin
+    total = 0
+    for bin in range(2048):
+        for thread_index in range(num_threads):
+            position = <unsigned long long> thread_index * 2048 + bin
+            count = histograms[position]
+            histograms[position] = total
+            total += count
+
+    # Scatter cells to their sorted positions
+    with parallel(num_threads=num_threads):
+        thread_index = threadid()
+        histogram = histograms + <unsigned long long> thread_index * 2048
+        start = <unsigned> (<unsigned long long> thread_index * num_cells /
+                            num_threads)
+        end = <unsigned> (<unsigned long long> (thread_index + 1) *
+                          num_cells / num_threads)
+        for i in range(start, end):
+            position = histogram[bins[i]]
+            histogram[bins[i]] = position + 1
+            order[position] = i
+            rank[i] = <unsigned> position
 
 
 cdef inline void umap_adaptation_repulsion(const float* embedding,
@@ -2013,21 +1925,20 @@ cdef inline void umap_cell_gradient(
         const float inverse_gamma,
         const float negatives_per_edge,
         const unsigned num_cells,
-        const bint use_window,
         const unsigned window,
         const unsigned window_start,
-        const unsigned* order,
         unsigned* negative_buffer,
         unsigned long long state,
-        float& gradient_x,
-        float& gradient_y) noexcept nogil:
-    # Calculate the gradient on cell `u`'s position. Sample each of `u`'s
-    # edges with probability proportional to its weight, and attract `u`
-    # towards the neighbor at the other end of each sampled edge. Then repel
-    # `u` from `negatives_per_edge` negative samples per sampled edge (rounded
-    # randomly), drawn uniformly from `u`'s window of `window` cells in the
-    # current projection order if `use_window`, or from all cells otherwise.
-    # Like umap-learn, only `u`'s position is updated, not its neighbors' or
+        float* gradient) noexcept nogil:
+    # Calculate the gradient on cell `u`'s position, storing it in
+    # `gradient`. Sample each of `u`'s edges with probability proportional to
+    # its weight, and attract `u` towards the neighbor at the other end of
+    # each sampled edge. Then repel `u` from `negatives_per_edge` negative
+    # samples per sampled edge (rounded randomly). If `window_embedding` is
+    # not `NULL`, draw negative samples from the `window` cells starting at
+    # position `window_start` of `window_embedding` (the embedding, sorted by
+    # a random projection); otherwise, draw them from all cells. Like
+    # umap-learn, only `u`'s position is updated, not its neighbors' or
     # negative samples'.
 
     cdef long long i
@@ -2036,10 +1947,11 @@ cdef inline void umap_cell_gradient(
         dist_squared, dist_b_minus_1, scale, gx = 0, gy = 0, \
         b_minus_1 = b - <float> 1
     cdef const float* negative_embedding = \
-        window_embedding if use_window and umap_gather else embedding
+        window_embedding if window_embedding != NULL else embedding
 
     for i in range(indptr[u], indptr[u + 1]):
-        if umap_prefetch_neighbors and i + 8 < num_edges:
+        # Prefetch the position of the neighbor 8 edges ahead
+        if i + 8 < num_edges:
             PREFETCH(&embedding[2 * indices[i + 8]])
 
         # Drop the edge with probability `1 - weight / max_weight`
@@ -2059,48 +1971,27 @@ cdef inline void umap_cell_gradient(
             gx += scale * dx
             gy += scale * dy
 
-    # Repulsive gradients from negative samples
+    # Repulsive gradients from negative samples. Draw all the negative
+    # samples first, prefetching each one's position, so that their cache
+    # misses overlap rather than each waiting behind the previous one's
+    # gradient calculation; then calculate their gradients.
     num_negatives = <unsigned> (num_accepted * negatives_per_edge +
                                 random_uniform(&state))
-    if umap_batch_negatives:
-        # Draw all the negative samples first, prefetching each one, then
-        # calculate their gradients
-        for k in range(num_negatives):
-            if use_window:
-                v = window_start + randint(window, &state)
-                if umap_gather:
-                    PREFETCH(&window_embedding[2 * v])
-                else:
-                    PREFETCH(&order[v])
-            else:
-                v = randint(num_cells, &state)
-                PREFETCH(&embedding[2 * v])
-            negative_buffer[k] = v
-        if use_window and not umap_gather:
-            for k in range(num_negatives):
-                v = order[negative_buffer[k]]
-                PREFETCH(&embedding[2 * v])
-                negative_buffer[k] = v
-        for k in range(num_negatives):
-            v = negative_buffer[k]
-            umap_repulsion(ux, uy, negative_embedding[2 * v],
-                           negative_embedding[2 * v + 1], a, b,
-                           repulsion_constant, clip_constant, inverse_gamma,
-                           gx, gy)
-    else:
-        for k in range(num_negatives):
-            if use_window:
-                v = window_start + randint(window, &state)
-                if not umap_gather:
-                    v = order[v]
-            else:
-                v = randint(num_cells, &state)
-            umap_repulsion(ux, uy, negative_embedding[2 * v],
-                           negative_embedding[2 * v + 1], a, b,
-                           repulsion_constant, clip_constant, inverse_gamma,
-                           gx, gy)
-    gradient_x = gx
-    gradient_y = gy
+    for k in range(num_negatives):
+        if window_embedding != NULL:
+            v = window_start + randint(window, &state)
+        else:
+            v = randint(num_cells, &state)
+        PREFETCH(&negative_embedding[2 * v])
+        negative_buffer[k] = v
+    for k in range(num_negatives):
+        v = negative_buffer[k]
+        umap_repulsion(ux, uy, negative_embedding[2 * v],
+                       negative_embedding[2 * v + 1], a, b,
+                       repulsion_constant, clip_constant, inverse_gamma, gx,
+                       gy)
+    gradient[0] = gx
+    gradient[1] = gy
 
 
 cdef void umap_layout(float[:, ::1] embedding,
@@ -2118,11 +2009,11 @@ cdef void umap_layout(float[:, ::1] embedding,
                       const unsigned long long seed,
                       unsigned num_threads):
     # Optimize `embedding` with umap-learn 0.6's Adam optimizer. Each epoch,
-    # every cell calculates the gradient on its position from the previous
-    # epoch's positions (stored in `current`), then takes an Adam step,
-    # writing its new position to `next`. Cell `u`'s random numbers in epoch
-    # `epoch` come from the stream `srand(seed + epoch * num_cells + u)`, so
-    # results do not depend on the number of threads.
+    # every cell calculates the gradient on its position from the current
+    # positions, then every cell takes an Adam step. Cell `u`'s random
+    # numbers in epoch `epoch` come from the stream
+    # `srand(seed + epoch * num_cells + u)`, so results do not depend on the
+    # number of threads.
     #
     # When `window` is less than the number of cells (and there are more than
     # 1024 cells), negative samples are "hard negatives" drawn from each
@@ -2133,30 +2024,27 @@ cdef void umap_layout(float[:, ::1] embedding,
     # how much weaker the repulsion from window negatives is than from
     # uniformly sampled negatives.
 
-    cdef unsigned epoch, u, thread_index, window_start, start, end, \
-        position, num_cells = embedding.shape[0], max_degree = 0
+    cdef unsigned epoch, u, thread_index, window_start, \
+        negative_buffer_size, num_cells = embedding.shape[0], max_degree = 0
     cdef long long i, num_edges = indptr[num_cells]
     cdef unsigned long long state
     cdef bint use_window
-    cdef float alpha, learning_rate, epsilon, max_weight, angle, \
-        attraction_constant, repulsion_constant, clip_constant, \
-        inverse_gamma, negatives_per_edge, negative_scale, scale_prior, \
-        scale_anchor = -1, force_ratio, raw_scale, log_change, gradient_x, \
-        gradient_y, beta1 = <float> 0.9, beta2 = <float> 0.99
-    cdef double timer
-    cdef float* current = &embedding[0, 0]
-    cdef float* next
-    cdef float* swap
-    cdef float* momentum
-    cdef float* velocity
+    cdef float alpha, epsilon, max_weight, angle, attraction_constant, \
+        repulsion_constant, clip_constant, inverse_gamma, \
+        negatives_per_edge, negative_scale, scale_prior, scale_anchor = -1, \
+        force_ratio, raw_scale, log_change, beta1 = <float> 0.9, \
+        beta2 = <float> 0.99
+    cdef float* positions = &embedding[0, 0]
+    cdef float* gradients
     cdef float* window_embedding = NULL
     cdef unsigned* order = NULL
+    cdef unsigned* rank = NULL
     cdef unsigned* negative_buffer
-    cdef uninitialized_vector[float] next_buffer, momentum_buffer, \
+    cdef float[:, ::1] gradients_view, momentum, velocity
+    cdef uninitialized_vector[float] gradients_buffer, momentum_buffer, \
         velocity_buffer, window_embedding_buffer, thread_floats, log_ratios
     cdef uninitialized_vector[unsigned] thread_offsets, thread_unsigneds, \
-        keys, keys_buffer, order_buffer, order_buffer_2, rank, \
-        negative_buffers
+        bins_buffer, order_buffer, rank_buffer, negative_buffers
     cdef uninitialized_vector[unsigned long long] histograms
 
     # Use at most one thread per 1024 cells, since each thread's work per
@@ -2187,29 +2075,28 @@ cdef void umap_layout(float[:, ::1] embedding,
         max_weight = max(max_weight, thread_floats[thread_index * 16])
         max_degree = max(max_degree, thread_unsigneds[thread_index * 16])
 
-    # Initialize the buffer holding the next epoch's positions and Adam's
-    # momentum and velocity, in parallel for NUMA first-touch reasons
-    next_buffer.resize(2 * <unsigned long long> num_cells)
+    # Allocate the gradients and Adam's momentum and velocity, initializing
+    # the latter two in parallel (with the same schedule as
+    # `update_embedding_adam_parallel()`) for NUMA first-touch reasons
+    gradients_buffer.resize(2 * <unsigned long long> num_cells)
     momentum_buffer.resize(2 * <unsigned long long> num_cells)
     velocity_buffer.resize(2 * <unsigned long long> num_cells)
-    next = next_buffer.data()
-    momentum = momentum_buffer.data()
-    velocity = velocity_buffer.data()
-    advise_huge_pages(next, 2 * <unsigned long long> num_cells * sizeof(float))
-    advise_huge_pages(momentum,
+    advise_huge_pages(gradients_buffer.data(),
                       2 * <unsigned long long> num_cells * sizeof(float))
-    advise_huge_pages(velocity,
+    advise_huge_pages(momentum_buffer.data(),
                       2 * <unsigned long long> num_cells * sizeof(float))
-    with nogil, parallel(num_threads=num_threads):
-        thread_index = threadid()
-        for u in range(thread_offsets[thread_index],
-                       thread_offsets[thread_index + 1]):
-            next[2 * u] = 0
-            next[2 * u + 1] = 0
-            momentum[2 * u] = 0
-            momentum[2 * u + 1] = 0
-            velocity[2 * u] = 0
-            velocity[2 * u + 1] = 0
+    advise_huge_pages(velocity_buffer.data(),
+                      2 * <unsigned long long> num_cells * sizeof(float))
+    gradients = gradients_buffer.data()
+    gradients_view = <float[:num_cells, :2]> gradients
+    momentum = <float[:num_cells, :2]> momentum_buffer.data()
+    velocity = <float[:num_cells, :2]> velocity_buffer.data()
+    with nogil:
+        for u in prange(num_cells, num_threads=num_threads):
+            momentum[u, 0] = 0
+            momentum[u, 1] = 0
+            velocity[u, 0] = 0
+            velocity[u, 1] = 0
 
     # Set up hard-negative windows, if used
     window = min(num_cells, max(200, window))
@@ -2218,26 +2105,20 @@ cdef void umap_layout(float[:, ::1] embedding,
         if use_window else <float> 1
     scale_prior = negative_scale
     if use_window:
-        keys.resize(num_cells)
-        keys_buffer.resize(num_cells)
+        bins_buffer.resize(num_cells)
         order_buffer.resize(num_cells)
-        order_buffer_2.resize(num_cells)
-        rank.resize(num_cells)
+        rank_buffer.resize(num_cells)
+        window_embedding_buffer.resize(2 * <unsigned long long> num_cells)
+        advise_huge_pages(bins_buffer.data(), num_cells * sizeof(unsigned))
+        advise_huge_pages(order_buffer.data(), num_cells * sizeof(unsigned))
+        advise_huge_pages(rank_buffer.data(), num_cells * sizeof(unsigned))
+        advise_huge_pages(window_embedding_buffer.data(),
+                          2 * <unsigned long long> num_cells * sizeof(float))
+        order = order_buffer.data()
+        rank = rank_buffer.data()
+        window_embedding = window_embedding_buffer.data()
         histograms.resize(<unsigned long long> num_threads * 2048)
         log_ratios.resize(128)
-        order = order_buffer.data()
-        advise_huge_pages(keys.data(), num_cells * sizeof(unsigned))
-        advise_huge_pages(keys_buffer.data(), num_cells * sizeof(unsigned))
-        advise_huge_pages(order, num_cells * sizeof(unsigned))
-        advise_huge_pages(order_buffer_2.data(), num_cells * sizeof(unsigned))
-        advise_huge_pages(rank.data(), num_cells * sizeof(unsigned))
-        if umap_gather:
-            window_embedding_buffer.resize(2 * <unsigned long long> num_cells)
-            window_embedding = window_embedding_buffer.data()
-            advise_huge_pages(window_embedding, 2 *
-                              <unsigned long long> num_cells * sizeof(float))
-    negative_buffers.resize(
-        num_threads * (<unsigned> (max_degree * negative_sample_rate) + 16))
 
     # Like umap-learn, use half-strength attraction for graphs with at most
     # 1024 cells, and draw `negative_sample_rate / 1.5` negative samples per
@@ -2247,39 +2128,35 @@ cdef void umap_layout(float[:, ::1] embedding,
     clip_constant = min(gamma, <float> 16)
     inverse_gamma = <float> 1 / gamma
     negatives_per_edge = negative_sample_rate / <float> 1.5
+    negative_buffer_size = \
+        <unsigned> (max_degree * negatives_per_edge) + 16
+    negative_buffers.resize(num_threads * negative_buffer_size)
     state = srand(seed - 1)
 
     for epoch in range(num_epochs):
-        # Get the learning rate, folding in Adam's bias correction
+        # Get the learning rate, and scale Adam's epsilon to match
+        # umap-learn's placement of it after bias correction
         alpha = umap_learning_rate(epoch, num_epochs, initial_alpha,
                                    good_initialization)
-        learning_rate = alpha * \
-            sqrt(<float> 1 - pow(beta2, <float> (epoch + 1))) / \
-            (<float> 1 - pow(beta1, <float> (epoch + 1)))
         epsilon = <float> 1e-4 * \
             sqrt(<float> 1 - pow(beta2, <float> (epoch + 1)))
 
-        # Sort cells by their projection onto a random direction, and adapt
-        # the scale of the repulsion from window negatives
+        # Sort cells by their projection onto a random direction, gather the
+        # embedding into this order so each cell's window is contiguous, and
+        # adapt the scale of the repulsion from window negatives
         if use_window:
-            timer = omp_get_wtime()
             angle = <float> 2 * <float> M_PI * random_uniform(&state)
             with nogil:
                 umap_projection_order(
-                    current, cos(angle), sin(angle), keys.data(),
-                    keys_buffer.data(), order, order_buffer_2.data(),
-                    rank.data(), histograms.data(), thread_floats.data(),
+                    positions, cos(angle), sin(angle), bins_buffer.data(),
+                    order, rank, histograms.data(), thread_floats.data(),
                     num_cells, num_threads)
-                if umap_gather:
-                    for u in prange(num_cells, num_threads=num_threads):
-                        window_embedding[2 * u] = current[2 * order[u]]
-                        window_embedding[2 * u + 1] = \
-                            current[2 * order[u] + 1]
-            umap_timings[8 + umap_timing_offset] += omp_get_wtime() - timer
+                for u in prange(num_cells, num_threads=num_threads):
+                    window_embedding[2 * u] = positions[2 * order[u]]
+                    window_embedding[2 * u + 1] = positions[2 * order[u] + 1]
             if 10 <= epoch <= num_epochs / 2 and epoch % 10 == 0:
-                timer = omp_get_wtime()
                 force_ratio = umap_negative_force_ratio(
-                    current, order, num_cells, window, a, b, gamma, &state,
+                    positions, order, num_cells, window, a, b, gamma, &state,
                     log_ratios.data())
                 if scale_anchor < <float> 0:
                     scale_anchor = negative_scale / force_ratio
@@ -2290,88 +2167,37 @@ cdef void umap_layout(float[:, ::1] embedding,
                     log_change = min(max(log(raw_scale / negative_scale),
                                          log(<float> 0.9)), log(<float> 1.1))
                     negative_scale *= exp(<float> 0.1 * log_change)
-                umap_timings[9 + umap_timing_offset] += \
-                    omp_get_wtime() - timer
         repulsion_constant = <float> 2 * gamma * b * negative_scale
 
-        # Update each cell's position
-        timer = omp_get_wtime()
+        # Calculate the gradient on each cell's position
         with nogil, parallel(num_threads=num_threads):
             thread_index = threadid()
-            negative_buffer = negative_buffers.data() + thread_index * (
-                <unsigned> (max_degree * negative_sample_rate) + 16)
-            # With `umap_rank_order`, process cells in projection order, so
-            # consecutive cells' windows overlap and stay in cache
-            if use_window and umap_rank_order:
-                start = <unsigned> (<unsigned long long> thread_index *
-                                    num_cells / num_threads)
-                end = <unsigned> (<unsigned long long> (thread_index + 1) *
-                                  num_cells / num_threads)
-            else:
-                start = thread_offsets[thread_index]
-                end = thread_offsets[thread_index + 1]
-            for position in range(start, end):
-                if use_window and umap_rank_order:
-                    u = order[position]
-                    window_start = min(position - min(position, window / 2),
-                                       num_cells - window)
-                elif use_window:
-                    u = position
+            negative_buffer = \
+                negative_buffers.data() + thread_index * negative_buffer_size
+            for u in range(thread_offsets[thread_index],
+                           thread_offsets[thread_index + 1]):
+                if use_window:
                     window_start = min(rank[u] - min(rank[u], window / 2),
                                        num_cells - window)
                 else:
-                    u = position
                     window_start = 0
-                gradient_x = 0
-                gradient_y = 0
                 umap_cell_gradient(
-                    current, window_embedding, u, &indptr[0], &indices[0],
+                    positions, window_embedding, u, &indptr[0], &indices[0],
                     &weights[0], num_edges, max_weight, a, b,
                     attraction_constant, repulsion_constant, clip_constant,
-                    inverse_gamma, negatives_per_edge, num_cells, use_window,
-                    window, window_start, order, negative_buffer,
+                    inverse_gamma, negatives_per_edge, num_cells, window,
+                    window_start, negative_buffer,
                     srand(seed + <unsigned long long> epoch * num_cells + u),
-                    gradient_x, gradient_y)
-                if umap_unfused:
-                    next[2 * u] = gradient_x
-                    next[2 * u + 1] = gradient_y
-                    continue
+                    &gradients[2 * u])
 
-                # Take an Adam step. Like umap-learn, skip dimensions with a
-                # gradient of exactly zero (e.g. when no edges were sampled).
-                next[2 * u] = current[2 * u]
-                next[2 * u + 1] = current[2 * u + 1]
-                if gradient_x != <float> 0:
-                    update_cell_embedding_adam(
-                        next[2 * u], gradient_x, momentum[2 * u],
-                        velocity[2 * u], beta1, beta2, learning_rate,
-                        epsilon)
-                if gradient_y != <float> 0:
-                    update_cell_embedding_adam(
-                        next[2 * u + 1], gradient_y, momentum[2 * u + 1],
-                        velocity[2 * u + 1], beta1, beta2, learning_rate,
-                        epsilon)
-        if umap_unfused:
+        # Take an Adam step
+        with nogil:
             update_embedding_adam_parallel(
-                embedding, <float[:num_cells, :2]> next,
-                <float[:num_cells, :2]> momentum,
-                <float[:num_cells, :2]> velocity, num_cells, beta1, beta2,
-                alpha, epsilon, epoch, num_threads)
-        else:
-            swap = current
-            current = next
-            next = swap
-        umap_timings[10 + umap_timing_offset] += omp_get_wtime() - timer
+                embedding, gradients_view, momentum, velocity, num_cells,
+                beta1, beta2, alpha, epsilon, epoch, num_threads)
 
         # Check for KeyboardInterrupts
         PyErr_CheckSignals()
-
-    # Copy the final positions to `embedding`, if they are not already there
-    if current != &embedding[0, 0]:
-        with nogil:
-            for u in prange(num_cells, num_threads=num_threads):
-                embedding[u, 0] = current[2 * u]
-                embedding[u, 1] = current[2 * u + 1]
 
 
 cdef void umap_center(float* positions,
@@ -2538,7 +2364,6 @@ cdef void umap_init_level(const long long[::1] indptr,
     #    weighted average of its neighbors' parts' positions, then center and
     #    rotate to best match `anchor`.
 
-    global umap_timing_offset
     cdef unsigned i, j, k, p, q, label, best_label, num_votes, \
         num_unlabeled, previous_unlabeled, iteration, num_coarse_edges, \
         thread_index, num_iterations, window, level_threads, \
@@ -2550,7 +2375,6 @@ cdef void umap_init_level(const long long[::1] indptr,
     cdef bint found, use_share = depth > 1
     cdef float w, total_weight, max_vote, sum_x, sum_y, spread_x = 1, \
         spread_y = 1, scale, d_pq, d_qp
-    cdef double timer
     cdef unsigned* labels
     cdef unsigned* new_labels
     cdef unsigned* vote_labels
@@ -2595,7 +2419,6 @@ cdef void umap_init_level(const long long[::1] indptr,
     # index. Encode each node's degree (whose bits sort like unsigned
     # integers, since it is non-negative) in the upper 32 bits of a key and
     # its index in the lower 32, and partially sort the keys.
-    timer = omp_get_wtime()
     keys_buffer.resize(num_nodes)
     keys = keys_buffer.data()
     thread_unsigneds.resize(level_threads * 16)
@@ -2636,7 +2459,6 @@ cdef void umap_init_level(const long long[::1] indptr,
             label += 1
     keys_buffer.clear()
     keys_buffer.shrink_to_fit()
-    umap_timings[1] += omp_get_wtime() - timer
 
     # Propagate labels for up to 100 iterations. Each unlabeled node adopts
     # the label with the largest total edge weight among its neighbors (the
@@ -2644,7 +2466,6 @@ cdef void umap_init_level(const long long[::1] indptr,
     # least 1 (at the top level) or 10% of the node's total edge weight
     # (below the top level, where weights are normalized). Stop early if no
     # nodes became labeled over the last 5 iterations.
-    timer = omp_get_wtime()
     new_labels_buffer.resize(num_nodes)
     new_labels = new_labels_buffer.data()
     advise_huge_pages(new_labels, num_nodes * sizeof(unsigned))
@@ -2703,12 +2524,10 @@ cdef void umap_init_level(const long long[::1] indptr,
             previous_unlabeled = num_unlabeled
     new_labels_buffer.clear()
     new_labels_buffer.shrink_to_fit()
-    umap_timings[2] += omp_get_wtime() - timer
 
     # Give each remaining unlabeled node the label of the first labeled node
     # found by a depth-first search of up to 100 steps, or a random label if
     # none is found
-    timer = omp_get_wtime()
     state = srand(level_seed - 2)
     for i in range(num_nodes):
         if labels[i] != UINT_MAX:
@@ -2729,11 +2548,9 @@ cdef void umap_init_level(const long long[::1] indptr,
                 stack.push_back(indices[e])
         if not found:
             labels[i] = randint(num_parts, &state)
-    umap_timings[3] += omp_get_wtime() - timer
 
     # Group nodes by part, in ascending order of index within each part, and
     # count each part's total degree to balance work across threads
-    timer = omp_get_wtime()
     part_indptr.resize(num_parts + 1)
     members.resize(num_nodes)
     part_work.resize(num_parts + 1)
@@ -2857,7 +2674,6 @@ cdef void umap_init_level(const long long[::1] indptr,
                 sum_x / <float> (part_indptr[p + 1] - part_indptr[p])
             coarse_anchor[2 * p + 1] = \
                 sum_y / <float> (part_indptr[p + 1] - part_indptr[p])
-    umap_timings[4] += omp_get_wtime() - timer
 
     # Recursively initialize the coarse graph, with exponents of the curve
     # parameters closer to 1, a quarter as many parts, and √2 times as many
@@ -2879,21 +2695,16 @@ cdef void umap_init_level(const long long[::1] indptr,
     window = num_parts / 2
     if num_parts % 2 == 1 and window % 2 == 1:
         window += 1
-    timer = omp_get_wtime()
-    umap_timing_offset = 3
     umap_layout(<float[:num_parts, :2]> coarse_layout.data(),
                 <long long[:num_parts + 1]> coarse_indptr.data(),
                 <unsigned[:num_coarse_edges]> coarse_indices.data(),
                 <float[:num_coarse_edges]> coarse_label_weights.data(),
                 num_epochs, a, b, 4, <float> 0.5, 1, max(1, window),
                 num_parts / 4 > 1024, level_seed, num_threads)
-    umap_timing_offset = 0
-    umap_timings[5] += omp_get_wtime() - timer
 
     # Place each node halfway between its part's position and the weighted
     # average of its neighbors' parts' positions, then center and align to
     # the anchor
-    timer = omp_get_wtime()
     thread_offsets.resize(level_threads + 1)
     get_thread_offsets(indptr, thread_offsets.data(), level_threads)
     with nogil, parallel(num_threads=level_threads):
@@ -2918,7 +2729,6 @@ cdef void umap_init_level(const long long[::1] indptr,
     with nogil:
         umap_center(&result[0, 0], num_nodes, level_threads)
         umap_align(&result[0, 0], &anchor[0, 0], num_nodes, level_threads)
-    umap_timings[6] += omp_get_wtime() - timer
 
 
 cdef void umap_embed(float[:, ::1] embedding,
@@ -2940,7 +2750,6 @@ cdef void umap_embed(float[:, ::1] embedding,
     cdef unsigned i, num_cells = embedding.shape[0]
     cdef float min_x = FLT_MAX, max_x = -FLT_MAX, min_y = FLT_MAX, \
         max_y = -FLT_MAX, scale_x, scale_y, spread_x = 1, spread_y = 1, scale
-    cdef double timer
     cdef uninitialized_vector[float] anchor
 
     # Use the first two PCs, min-max scaled to [0, 10], as the anchor that
@@ -2967,7 +2776,6 @@ cdef void umap_embed(float[:, ::1] embedding,
     # Center the initialization and scale it so the geometric mean of its two
     # robust spreads (the differences between their 95th and 5th
     # percentiles) is `3 * log10(num_cells) * log2(gamma + 1)`
-    timer = omp_get_wtime()
     with nogil:
         umap_center(&embedding[0, 0], num_cells, num_threads)
     umap_robust_spreads(&embedding[0, 0], num_cells, spread_x, spread_y)
@@ -2978,7 +2786,6 @@ cdef void umap_embed(float[:, ::1] embedding,
         for i in prange(num_cells, num_threads=num_threads):
             embedding[i, 0] *= scale
             embedding[i, 1] *= scale
-    umap_timings[7] += omp_get_wtime() - timer
 
     # Optimize
     umap_layout(embedding, indptr, indices, weights, num_iterations, a, b,
@@ -3003,17 +2810,14 @@ def umap(float[:, ::1] embedding,
          const unsigned num_threads):
     cdef unsigned long long num_edges
     cdef bint too_large = False, self_neighbors = False
-    cdef double timer
     cdef str error_message
     cdef uninitialized_vector[long long] indptr
     cdef uninitialized_vector[unsigned] indices
     cdef uninitialized_vector[float] weights
 
     # Build the fuzzy simplicial set
-    timer = omp_get_wtime()
     umap_fuzzy_graph(neighbors, distances, num_pruning_iterations, indptr,
                      indices, weights, too_large, self_neighbors, num_threads)
-    umap_timings[0] += omp_get_wtime() - timer
 
     # If any nearest-neighbor indices were out of bounds or equal to the
     # cell's own index, raise an error
@@ -3041,25 +2845,5 @@ def umap(float[:, ::1] embedding,
                <long long[:embedding.shape[0] + 1]> indptr.data(),
                <unsigned[:num_edges]> indices.data(),
                <float[:num_edges]> weights.data(), num_iterations, a, b,
-               alpha, gamma, negative_sample_rate, negative_window, seed,
-               num_threads)
-
-
-# TEMPORARY BENCHMARKING: run UMAP on a graph built with scipy
-def umap_from_graph(float[:, ::1] embedding,
-                    const float[:, ::1] PCs,
-                    const long long[::1] indptr,
-                    const unsigned[::1] indices,
-                    const float[::1] weights,
-                    const unsigned num_iterations,
-                    const float a,
-                    const float b,
-                    const float alpha,
-                    const float gamma,
-                    const unsigned negative_sample_rate,
-                    const unsigned negative_window,
-                    const unsigned long long seed,
-                    const unsigned num_threads):
-    umap_embed(embedding, PCs, indptr, indices, weights, num_iterations, a, b,
                alpha, gamma, negative_sample_rate, negative_window, seed,
                num_threads)
