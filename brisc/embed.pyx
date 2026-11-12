@@ -1908,59 +1908,82 @@ cdef inline void umap_repulsion(const float ux,
         gradient_y -= scale * dy
 
 
-cdef inline void umap_cell_gradient(
+cdef inline void umap_cell_prepare(
         const float* embedding,
-        const float* window_embedding,
+        const float* negative_embedding,
         const unsigned u,
         const long long* indptr,
         const unsigned* indices,
         const float* weights,
-        const long long num_edges,
         const float max_weight,
-        const float a,
-        const float b,
-        const float attraction_constant,
-        const float repulsion_constant,
-        const float clip_constant,
-        const float inverse_gamma,
         const float negatives_per_edge,
-        const unsigned num_cells,
         const unsigned window,
         const unsigned window_start,
-        unsigned* negative_buffer,
         unsigned long long state,
-        float* gradient) noexcept nogil:
-    # Calculate the gradient on cell `u`'s position, storing it in
-    # `gradient`. Sample each of `u`'s edges with probability proportional to
-    # its weight, and attract `u` towards the neighbor at the other end of
-    # each sampled edge. Then repel `u` from `negatives_per_edge` negative
-    # samples per sampled edge (rounded randomly). If `window_embedding` is
-    # not `NULL`, draw negative samples from the `window` cells starting at
-    # position `window_start` of `window_embedding` (the embedding, sorted by
-    # a random projection); otherwise, draw them from all cells. Like
-    # umap-learn, only `u`'s position is updated, not its neighbors' or
-    # negative samples'.
+        unsigned* neighbor_buffer,
+        unsigned* negative_buffer,
+        unsigned& num_accepted,
+        unsigned& num_negatives) noexcept nogil:
+    # Draw cell `u`'s random numbers and prefetch the positions it will need
+    # for `umap_cell_compute()`, so their cache misses overlap with the
+    # previous cell's computation. Sample each of `u`'s edges with
+    # probability proportional to its weight, storing the neighbors at the
+    # other ends of sampled edges in `neighbor_buffer`. Then draw
+    # `negatives_per_edge` negative samples per sampled edge (rounded
+    # randomly) uniformly from positions `window_start` to
+    # `window_start + window` of `negative_embedding`, storing their
+    # positions in `negative_buffer`.
 
     cdef long long i
-    cdef unsigned k, v, num_accepted = 0, num_negatives
-    cdef float ux = embedding[2 * u], uy = embedding[2 * u + 1], dx, dy, \
-        dist_squared, dist_b_minus_1, scale, gx = 0, gy = 0, \
-        b_minus_1 = b - <float> 1
-    cdef const float* negative_embedding = \
-        window_embedding if window_embedding != NULL else embedding
+    cdef unsigned k, v, accepted = 0, negatives
 
+    PREFETCH(&embedding[2 * u])
     for i in range(indptr[u], indptr[u + 1]):
-        # Prefetch the position of the neighbor 8 edges ahead
-        if i + 8 < num_edges:
-            PREFETCH(&embedding[2 * indices[i + 8]])
-
         # Drop the edge with probability `1 - weight / max_weight`
         if weights[i] < max_weight * random_uniform(&state):
             continue
-        num_accepted += 1
-
-        # Attractive gradient
         v = indices[i]
+        PREFETCH(&embedding[2 * v])
+        neighbor_buffer[accepted] = v
+        accepted += 1
+    negatives = <unsigned> (accepted * negatives_per_edge +
+                            random_uniform(&state))
+    for k in range(negatives):
+        v = window_start + randint(window, &state)
+        PREFETCH(&negative_embedding[2 * v])
+        negative_buffer[k] = v
+    num_accepted = accepted
+    num_negatives = negatives
+
+
+cdef inline void umap_cell_compute(const float* embedding,
+                                   const float* negative_embedding,
+                                   const unsigned u,
+                                   const unsigned* neighbor_buffer,
+                                   const unsigned num_accepted,
+                                   const unsigned* negative_buffer,
+                                   const unsigned num_negatives,
+                                   const float a,
+                                   const float b,
+                                   const float attraction_constant,
+                                   const float repulsion_constant,
+                                   const float clip_constant,
+                                   const float inverse_gamma,
+                                   float* gradient) noexcept nogil:
+    # Calculate the gradient on cell `u`'s position from the neighbors and
+    # negative samples drawn by `umap_cell_prepare()`, storing it in
+    # `gradient`: attract `u` towards each neighbor and repel it from each
+    # negative sample. Like umap-learn, only `u`'s position is updated, not
+    # its neighbors' or negative samples'.
+
+    cdef unsigned k, v
+    cdef float ux = embedding[2 * u], uy = embedding[2 * u + 1], dx, dy, \
+        dist_squared, dist_b_minus_1, scale, gx = 0, gy = 0, \
+        b_minus_1 = b - <float> 1
+
+    # Attractive gradients
+    for k in range(num_accepted):
+        v = neighbor_buffer[k]
         dx = ux - embedding[2 * v]
         dy = uy - embedding[2 * v + 1]
         dist_squared = dx * dx + dy * dy
@@ -1971,19 +1994,7 @@ cdef inline void umap_cell_gradient(
             gx += scale * dx
             gy += scale * dy
 
-    # Repulsive gradients from negative samples. Draw all the negative
-    # samples first, prefetching each one's position, so that their cache
-    # misses overlap rather than each waiting behind the previous one's
-    # gradient calculation; then calculate their gradients.
-    num_negatives = <unsigned> (num_accepted * negatives_per_edge +
-                                random_uniform(&state))
-    for k in range(num_negatives):
-        if window_embedding != NULL:
-            v = window_start + randint(window, &state)
-        else:
-            v = randint(num_cells, &state)
-        PREFETCH(&negative_embedding[2 * v])
-        negative_buffer[k] = v
+    # Repulsive gradients
     for k in range(num_negatives):
         v = negative_buffer[k]
         umap_repulsion(ux, uy, negative_embedding[2 * v],
@@ -2024,9 +2035,10 @@ cdef void umap_layout(float[:, ::1] embedding,
     # how much weaker the repulsion from window negatives is than from
     # uniformly sampled negatives.
 
-    cdef unsigned epoch, u, thread_index, window_start, \
-        negative_buffer_size, num_cells = embedding.shape[0], max_degree = 0
-    cdef long long i, num_edges = indptr[num_cells]
+    cdef unsigned epoch, u, thread_index, window_start, buffer_size, \
+        num_accepted, num_negatives, next_num_accepted, next_num_negatives, \
+        num_cells = embedding.shape[0], max_degree = 0
+    cdef long long i
     cdef unsigned long long state
     cdef bint use_window
     cdef float alpha, epsilon, max_weight, angle, attraction_constant, \
@@ -2037,14 +2049,19 @@ cdef void umap_layout(float[:, ::1] embedding,
     cdef float* positions = &embedding[0, 0]
     cdef float* gradients
     cdef float* window_embedding = NULL
+    cdef float* negative_embedding = &embedding[0, 0]
     cdef unsigned* order = NULL
     cdef unsigned* rank = NULL
+    cdef unsigned* neighbor_buffer
     cdef unsigned* negative_buffer
+    cdef unsigned* next_neighbor_buffer
+    cdef unsigned* next_negative_buffer
+    cdef unsigned* swap
     cdef float[:, ::1] gradients_view, momentum, velocity
     cdef uninitialized_vector[float] gradients_buffer, momentum_buffer, \
         velocity_buffer, window_embedding_buffer, thread_floats, log_ratios
     cdef uninitialized_vector[unsigned] thread_offsets, thread_unsigneds, \
-        bins_buffer, order_buffer, rank_buffer, negative_buffers
+        bins_buffer, order_buffer, rank_buffer, cell_buffers
     cdef uninitialized_vector[unsigned long long] histograms
 
     # Use at most one thread per 1024 cells, since each thread's work per
@@ -2101,6 +2118,8 @@ cdef void umap_layout(float[:, ::1] embedding,
     # Set up hard-negative windows, if used
     window = min(num_cells, max(200, window))
     use_window = num_cells > 1024 and window < num_cells
+    if not use_window:
+        window = num_cells
     negative_scale = pow(window / <float> num_cells, <float> 0.75) \
         if use_window else <float> 1
     scale_prior = negative_scale
@@ -2117,6 +2136,7 @@ cdef void umap_layout(float[:, ::1] embedding,
         order = order_buffer.data()
         rank = rank_buffer.data()
         window_embedding = window_embedding_buffer.data()
+        negative_embedding = window_embedding
         histograms.resize(<unsigned long long> num_threads * 2048)
         log_ratios.resize(128)
 
@@ -2128,9 +2148,12 @@ cdef void umap_layout(float[:, ::1] embedding,
     clip_constant = min(gamma, <float> 16)
     inverse_gamma = <float> 1 / gamma
     negatives_per_edge = negative_sample_rate / <float> 1.5
-    negative_buffer_size = \
+
+    # Each thread needs two sets of buffers for the neighbors and negative
+    # samples of the current and next cells
+    buffer_size = max_degree + 16 + \
         <unsigned> (max_degree * negatives_per_edge) + 16
-    negative_buffers.resize(num_threads * negative_buffer_size)
+    cell_buffers.resize(num_threads * 2 * buffer_size)
     state = srand(seed - 1)
 
     for epoch in range(num_epochs):
@@ -2169,26 +2192,59 @@ cdef void umap_layout(float[:, ::1] embedding,
                     negative_scale *= exp(<float> 0.1 * log_change)
         repulsion_constant = <float> 2 * gamma * b * negative_scale
 
-        # Calculate the gradient on each cell's position
+        # Calculate the gradient on each cell's position. Draw each cell's
+        # random numbers and prefetch its neighbors' and negative samples'
+        # positions one cell ahead, so their cache misses overlap with the
+        # previous cell's computation.
         with nogil, parallel(num_threads=num_threads):
             thread_index = threadid()
-            negative_buffer = \
-                negative_buffers.data() + thread_index * negative_buffer_size
+            neighbor_buffer = \
+                cell_buffers.data() + thread_index * 2 * buffer_size
+            negative_buffer = neighbor_buffer + max_degree + 16
+            next_neighbor_buffer = neighbor_buffer + buffer_size
+            next_negative_buffer = negative_buffer + buffer_size
+            num_accepted = 0
+            num_negatives = 0
+            next_num_accepted = 0
+            next_num_negatives = 0
             for u in range(thread_offsets[thread_index],
                            thread_offsets[thread_index + 1]):
-                if use_window:
-                    window_start = min(rank[u] - min(rank[u], window / 2),
-                                       num_cells - window)
-                else:
-                    window_start = 0
-                umap_cell_gradient(
-                    positions, window_embedding, u, &indptr[0], &indices[0],
-                    &weights[0], num_edges, max_weight, a, b,
+                if u == thread_offsets[thread_index]:
+                    window_start = 0 if not use_window else min(
+                        rank[u] - min(rank[u], window / 2),
+                        num_cells - window)
+                    umap_cell_prepare(
+                        positions, negative_embedding, u, &indptr[0],
+                        &indices[0], &weights[0], max_weight,
+                        negatives_per_edge, window, window_start,
+                        srand(seed + <unsigned long long> epoch * num_cells +
+                              u), neighbor_buffer, negative_buffer,
+                        num_accepted, num_negatives)
+                if u + 1 < thread_offsets[thread_index + 1]:
+                    window_start = 0 if not use_window else min(
+                        rank[u + 1] - min(rank[u + 1], window / 2),
+                        num_cells - window)
+                    umap_cell_prepare(
+                        positions, negative_embedding, u + 1, &indptr[0],
+                        &indices[0], &weights[0], max_weight,
+                        negatives_per_edge, window, window_start,
+                        srand(seed + <unsigned long long> epoch * num_cells +
+                              u + 1), next_neighbor_buffer,
+                        next_negative_buffer, next_num_accepted,
+                        next_num_negatives)
+                umap_cell_compute(
+                    positions, negative_embedding, u, neighbor_buffer,
+                    num_accepted, negative_buffer, num_negatives, a, b,
                     attraction_constant, repulsion_constant, clip_constant,
-                    inverse_gamma, negatives_per_edge, num_cells, window,
-                    window_start, negative_buffer,
-                    srand(seed + <unsigned long long> epoch * num_cells + u),
-                    &gradients[2 * u])
+                    inverse_gamma, &gradients[2 * u])
+                swap = neighbor_buffer
+                neighbor_buffer = next_neighbor_buffer
+                next_neighbor_buffer = swap
+                swap = negative_buffer
+                negative_buffer = next_negative_buffer
+                next_negative_buffer = swap
+                num_accepted = next_num_accepted
+                num_negatives = next_num_negatives
 
         # Take an Adam step
         with nogil:
