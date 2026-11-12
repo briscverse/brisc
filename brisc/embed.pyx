@@ -2424,7 +2424,8 @@ cdef void umap_init_level(const long long[::1] indptr,
     cdef unsigned i, j, k, p, q, label, best_label, num_votes, \
         num_unlabeled, previous_unlabeled, iteration, num_coarse_edges, \
         thread_index, num_iterations, window, level_threads, slot, \
-        hash_table_size, num_nodes = anchor.shape[0], max_degree = 0
+        hash_table_size, table_size, table_mask, \
+        num_nodes = anchor.shape[0], max_degree = 0
     cdef long long e, total, max_part_work
     cdef unsigned long long m, position, count, \
         level_seed = seed + (<unsigned long long> depth << 40)
@@ -2452,7 +2453,8 @@ cdef void umap_init_level(const long long[::1] indptr,
     cdef uninitialized_vector[float] vote_weights_buffer, coarse_summed, \
         coarse_label_weights, out_weights, coarse_anchor, coarse_layout
     cdef vector[vector[float]] thread_out_weights
-    cdef vector[vector[unsigned]] thread_out_indices
+    cdef vector[vector[unsigned]] thread_out_indices, thread_hash_tables, \
+        thread_vote_slots
 
     # Base case: place nodes at their (centered) anchor positions, scaled to
     # a robust spread that grows with the number of nodes and the depth
@@ -2672,25 +2674,13 @@ cdef void umap_init_level(const long long[::1] indptr,
     # sum the weights of the edges from its members to each other part, in
     # order of first appearance, using a per-thread open-addressing hash
     # table (like the one for label propagation) that maps parts to their
-    # positions in this part's row. Each thread appends its parts' edges to
-    # its own buffers, which are concatenated at the end.
-    max_part_work = 0
-    for p in range(num_parts):
-        max_part_work = max(max_part_work, part_work[p + 1] - part_work[p])
-    # A part's edges point to at most `num_parts - 1` other parts, which is
-    # far fewer than its number of edges for large parts
-    max_part_work = min(max_part_work, <long long> num_parts)
-    hash_table_size = 16
-    while hash_table_size < 2 * max_part_work:
-        hash_table_size *= 2
-    hash_table_buffer.resize(
-        <unsigned long long> level_threads * hash_table_size)
-    with nogil:
-        for e in prange(<long long> level_threads * hash_table_size,
-                        num_threads=level_threads):
-            hash_table_buffer[e] = UINT_MAX
-    vote_slots_buffer.resize(
-        <unsigned long long> level_threads * (max_part_work + 16))
+    # positions in this part's row. Each thread sizes its hash table for the
+    # largest part in its range: a power of 2 at least twice that part's
+    # number of edges, or the number of parts if smaller, since a part's
+    # edges point to at most `num_parts - 1` other parts. (A few parts can be
+    # much larger than the rest, so sizing every thread's table for the
+    # largest part overall would waste memory.) Each thread appends its
+    # parts' edges to its own buffers, which are concatenated at the end.
     thread_offsets.resize(level_threads + 1)
     part_work_view = <long long[:num_parts + 1]> part_work.data()
     get_thread_offsets(part_work_view, thread_offsets.data(), level_threads)
@@ -2698,13 +2688,24 @@ cdef void umap_init_level(const long long[::1] indptr,
     out_weights.resize(num_parts)
     thread_out_indices.resize(level_threads)
     thread_out_weights.resize(level_threads)
+    thread_hash_tables.resize(level_threads)
+    thread_vote_slots.resize(level_threads)
     with nogil, parallel(num_threads=level_threads):
         thread_index = threadid()
-        hash_table = \
-            hash_table_buffer.data() + \
-                <unsigned long long> thread_index * hash_table_size
-        vote_slots = vote_slots_buffer.data() + \
-            <unsigned long long> thread_index * (max_part_work + 16)
+        max_part_work = 0
+        for p in range(thread_offsets[thread_index],
+                       thread_offsets[thread_index + 1]):
+            max_part_work = \
+                max(max_part_work, part_work[p + 1] - part_work[p])
+        max_part_work = min(max_part_work, <long long> num_parts)
+        table_size = 16
+        while table_size < 2 * max_part_work:
+            table_size = table_size * 2
+        table_mask = table_size - 1
+        thread_hash_tables[thread_index].assign(table_size, UINT_MAX)
+        thread_vote_slots[thread_index].resize(max_part_work + 16)
+        hash_table = thread_hash_tables[thread_index].data()
+        vote_slots = thread_vote_slots[thread_index].data()
         for p in range(thread_offsets[thread_index],
                        thread_offsets[thread_index + 1]):
             position = thread_out_indices[thread_index].size()
@@ -2718,11 +2719,11 @@ cdef void umap_init_level(const long long[::1] indptr,
                         continue
                     w = summed_weights[e]
                     total_weight = total_weight + w
-                    slot = (q * 2654435761u) & (hash_table_size - 1)
+                    slot = (q * 2654435761u) & table_mask
                     while hash_table[slot] != UINT_MAX and \
                             thread_out_indices[thread_index][
                                 position + hash_table[slot]] != q:
-                        slot = (slot + 1) & (hash_table_size - 1)
+                        slot = (slot + 1) & table_mask
                     if hash_table[slot] == UINT_MAX:
                         hash_table[slot] = <unsigned> count
                         vote_slots[count] = slot
@@ -2761,6 +2762,8 @@ cdef void umap_init_level(const long long[::1] indptr,
             coarse_indices[e] = thread_out_indices[thread_index][position]
             coarse_summed[e] = thread_out_weights[thread_index][position]
     thread_out_indices.clear()
+    thread_hash_tables.clear()
+    thread_vote_slots.clear()
     thread_out_weights.clear()
 
     # Calculate the coarse graph's label weights: the fuzzy union of the
