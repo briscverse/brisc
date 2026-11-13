@@ -1134,7 +1134,8 @@ cdef inline void localmap_serial_fast(const float[:, ::1] PCs,
         if iteration >= num_phase_1_iterations + num_phase_2_iterations \
                 and iteration % 10 == 0:
             sample_further_pairs_nearby(embedding, neighbor_pairs,
-                                        further_pairs, seed + iteration,
+                                        further_pairs,
+                                        seed - (iteration + 1) * num_cells,
                                         max_distance_squared, num_threads=1)
 
         # Check for KeyboardInterrupts
@@ -1217,7 +1218,8 @@ cdef inline void localmap_parallel(const float[:, ::1] PCs,
             if iteration >= num_phase_1_iterations + num_phase_2_iterations \
                     and iteration % 10 == 0:
                 sample_further_pairs_nearby(embedding, neighbor_pairs,
-                                            further_pairs, seed + iteration,
+                                            further_pairs,
+                                            seed - (iteration + 1) * num_cells,
                                             max_distance_squared, num_threads)
                 reformat_for_parallel(further_pairs, further_pair_indices,
                                       further_pair_indptr, num_threads)

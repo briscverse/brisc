@@ -227,7 +227,7 @@ cdef inline void kmeans_barbar_init(
         # sampled cell's nearest centroid candidate is now itself.
         l_over_cost = l / cost
         for i in range(num_cells):
-            state = srand(seed + i * iteration)
+            state = srand(seed + iteration * num_cells + i)
             probability = random_uniform(&state)
             if l_over_cost * min_distances[i] >= probability:
                 selected_cells.push_back(i)
@@ -583,7 +583,7 @@ cdef inline void kmeans_barbar_init_parallel(
                 c0 = num_cells * thread_index / num_threads
                 c1 = num_cells * (thread_index + 1) / num_threads
                 for i in range(c0, c1):
-                    state = srand(seed + i * iteration)
+                    state = srand(seed + iteration * num_cells + i)
                     probability = random_uniform(&state)
                     if l_over_cost * min_distances[i] >= probability:
                         thread_selected_cells[thread_index].push_back(i)
