@@ -6,7 +6,6 @@ from cpython.exc cimport PyErr_CheckSignals
 from cython.parallel cimport parallel, prange, threadid
 from libc.string cimport memcpy
 from libcpp.algorithm cimport sort
-from libcpp.pair cimport pair
 from libcpp.vector cimport vector
 from .cyutils cimport get_thread_offset, uninitialized_vector
 
@@ -30,7 +29,6 @@ def snn(const unsigned[:, ::1] neighbors,
         reserve_size = (<unsigned long long> neighbors.shape[1] + 1) * \
             (neighbors.shape[1] + 1)
     cdef np.npy_intp nnz
-    cdef pair[unsigned, unsigned] row_range
     cdef uninitialized_vector[unsigned] reverse_indices_buffer
     cdef vector[unsigned long long] reverse_indptr_buffer
     cdef vector[unsigned] shared_neighbors

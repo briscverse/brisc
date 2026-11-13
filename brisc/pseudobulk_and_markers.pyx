@@ -2,7 +2,6 @@
 # pseudobulk-style approach)
 
 from cython.parallel cimport parallel, prange, threadid
-from libcpp.pair cimport pair
 from .cyutils cimport get_thread_offset, numeric, signed_integer, \
     uninitialized_vector
 
@@ -114,7 +113,7 @@ def groupby_getnnz_csc(
     cdef unsigned column, thread_index, num_columns = nnz.shape[1]
     cdef int group
     cdef unsigned long long row
-    cdef pair[unsigned, unsigned] col_range
+    cdef unsigned start_col, end_col
 
     nnz[:] = 0
     num_threads = min(num_threads, num_columns)
@@ -142,9 +141,9 @@ def groupby_getnnz_csc(
         if has_missing:
             with nogil, parallel(num_threads=num_threads):
                 thread_index = threadid()
-                col_range = \
+                start_col, end_col = \
                     get_thread_offset(indptr, thread_index, num_threads)
-                for column in range(col_range.first, col_range.second):
+                for column in range(start_col, end_col):
                     for row in range(<unsigned long long> indptr[column],
                                      <unsigned long long> indptr[column + 1]):
                         group = group_map[indices[row]]
@@ -154,9 +153,9 @@ def groupby_getnnz_csc(
         else:
             with nogil, parallel(num_threads=num_threads):
                 thread_index = threadid()
-                col_range = \
+                start_col, end_col = \
                     get_thread_offset(indptr, thread_index, num_threads)
-                for column in range(col_range.first, col_range.second):
+                for column in range(start_col, end_col):
                     for row in range(<unsigned long long> indptr[column],
                                      <unsigned long long> indptr[column + 1]):
                         group = group_map[indices[row]]
@@ -651,7 +650,7 @@ def groupby_sum_csc(const numeric[::1] data,
     cdef unsigned gene, thread_index, num_genes = result.shape[1]
     cdef int group
     cdef unsigned long long cell
-    cdef pair[unsigned, unsigned] col_range
+    cdef unsigned start_col, end_col
 
     result[:] = 0
     num_threads = min(num_threads, num_genes)
@@ -680,9 +679,9 @@ def groupby_sum_csc(const numeric[::1] data,
         if has_missing:
             with nogil, parallel(num_threads=num_threads):
                 thread_index = threadid()
-                col_range = \
+                start_col, end_col = \
                     get_thread_offset(indptr, thread_index, num_threads)
-                for gene in range(col_range.first, col_range.second):
+                for gene in range(start_col, end_col):
                     for cell in range(<unsigned long long> indptr[gene],
                                       <unsigned long long> indptr[gene + 1]):
                         group = group_map[indices[cell]]
@@ -692,9 +691,9 @@ def groupby_sum_csc(const numeric[::1] data,
         else:
             with nogil, parallel(num_threads=num_threads):
                 thread_index = threadid()
-                col_range = \
+                start_col, end_col = \
                     get_thread_offset(indptr, thread_index, num_threads)
-                for gene in range(col_range.first, col_range.second):
+                for gene in range(start_col, end_col):
                     for cell in range(<unsigned long long> indptr[gene],
                                       <unsigned long long> indptr[gene + 1]):
                         group = group_map[indices[cell]]

@@ -8,7 +8,6 @@ from cpython.exc cimport PyErr_CheckSignals
 from cython.parallel cimport parallel, prange, threadid
 from libc.string cimport memcpy
 from libcpp.algorithm cimport sort
-from libcpp.pair cimport pair
 from libcpp.vector cimport vector
 from signal import set_wakeup_fd
 from socket import socketpair
@@ -765,7 +764,7 @@ def get_count_at_least_threshold_csr(const numeric[::1] data,
     cdef unsigned long long i, j, num_major = output.shape[0]
     cdef unsigned thread_index
     cdef numeric count
-    cdef pair[unsigned, unsigned] row_range
+    cdef unsigned start_row, end_row
 
     num_threads = min(num_threads, num_major)
     if num_threads <= 1:
@@ -778,9 +777,10 @@ def get_count_at_least_threshold_csr(const numeric[::1] data,
     else:
         with nogil, parallel(num_threads=num_threads):
             thread_index = threadid()
-            row_range = get_thread_offset(indptr, thread_index, num_threads)
+            start_row, end_row = \
+                get_thread_offset(indptr, thread_index, num_threads)
 
-            for i in range(row_range.first, row_range.second):
+            for i in range(start_row, end_row):
                 count = 0
                 for j in range(<unsigned long long> indptr[i],
                                <unsigned long long> indptr[i + 1]):

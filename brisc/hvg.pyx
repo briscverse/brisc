@@ -1,7 +1,6 @@
 # Functionality for highly-variable gene identification
 
 from cython.parallel cimport parallel, prange, threadid
-from libcpp.pair cimport pair
 from libcpp.vector cimport vector
 from .cyutils cimport get_thread_offset, numeric, signed_integer
 
@@ -154,7 +153,7 @@ def gene_mean_and_variance_csc(const numeric[::1] data,
     cdef unsigned long long i, value, sum, sum_of_squares, nnz, gene
     cdef float inv_num_cells = <float> 1 / num_cells
     cdef double inv_num_pairs_of_cells = 1.0 / (num_cells * (num_cells - 1))
-    cdef pair[unsigned, unsigned] col_range
+    cdef unsigned start_col, end_col
     cdef vector[unsigned long long] sum_buffer, sum_of_squares_buffer
     sum_buffer.resize(num_dataset_genes)
     sum_of_squares_buffer.resize(num_dataset_genes)
@@ -202,9 +201,9 @@ def gene_mean_and_variance_csc(const numeric[::1] data,
         if cell_mask.shape[0] == 0:
             with nogil, parallel(num_threads=num_threads):
                 thread_index = threadid()
-                col_range = \
+                start_col, end_col = \
                     get_thread_offset(indptr, thread_index, num_threads)
-                for gene in range(col_range.first, col_range.second):
+                for gene in range(start_col, end_col):
                     sum = 0
                     sum_of_squares = 0
                     nnz = 0
@@ -221,9 +220,9 @@ def gene_mean_and_variance_csc(const numeric[::1] data,
         else:
             with nogil, parallel(num_threads=num_threads):
                 thread_index = threadid()
-                col_range = \
+                start_col, end_col = \
                     get_thread_offset(indptr, thread_index, num_threads)
-                for gene in range(col_range.first, col_range.second):
+                for gene in range(start_col, end_col):
                     sum = 0
                     sum_of_squares = 0
                     nnz = 0
@@ -267,7 +266,7 @@ def clipped_sum_csr(const numeric[::1] data,
     cdef unsigned cell, gene, thread_index
     cdef unsigned long long i, j, value, chunk_size, start, end, \
         out_of_range_sum, squared_out_of_range_sum, num_out_of_range
-    cdef pair[unsigned, unsigned] row_range
+    cdef unsigned start_row, end_row
     cdef unsigned long long[:, ::1] sums
 
     # Key insight: the things we're summing are integers except when
@@ -323,9 +322,9 @@ def clipped_sum_csr(const numeric[::1] data,
                         thread_sums[thread_index, gene, 1] = 0
                         thread_sums[thread_index, gene, 2] = 0
 
-                    row_range = get_thread_offset(indptr, thread_index,
-                                                  num_threads)
-                    for cell in range(row_range.first, row_range.second):
+                    start_row, end_row = \
+                        get_thread_offset(indptr, thread_index, num_threads)
+                    for cell in range(start_row, end_row):
                         for i in range(<unsigned long long> indptr[cell],
                                        <unsigned long long> indptr[cell + 1]):
                             gene = indices[i]
@@ -389,7 +388,7 @@ def clipped_sum_csc(const numeric[::1] data,
     cdef unsigned cell, gene, thread_index, num_genes = indptr.shape[0] - 1
     cdef unsigned long long i, value, batch_counts_sum_int, \
         squared_batch_counts_sum_int, num_out_of_range
-    cdef pair[unsigned, unsigned] col_range
+    cdef unsigned start_col, end_col
 
     cdef vector[unsigned long long] batch_counts_sum_int_buffer, \
         squared_batch_counts_sum_int_buffer, num_out_of_range_buffer
@@ -447,9 +446,9 @@ def clipped_sum_csc(const numeric[::1] data,
         if cell_mask.shape[0] == 0:
             with nogil, parallel(num_threads=num_threads):
                 thread_index = threadid()
-                col_range = get_thread_offset(indptr, thread_index,
-                                              num_threads)
-                for gene in range(col_range.first, col_range.second):
+                start_col, end_col = \
+                    get_thread_offset(indptr, thread_index, num_threads)
+                for gene in range(start_col, end_col):
                     batch_counts_sum_int = 0
                     squared_batch_counts_sum_int = 0
                     num_out_of_range = 0
@@ -469,9 +468,9 @@ def clipped_sum_csc(const numeric[::1] data,
         else:
             with nogil, parallel(num_threads=num_threads):
                 thread_index = threadid()
-                col_range = get_thread_offset(indptr, thread_index,
-                                              num_threads)
-                for gene in range(col_range.first, col_range.second):
+                start_col, end_col = \
+                    get_thread_offset(indptr, thread_index, num_threads)
+                for gene in range(start_col, end_col):
                     batch_counts_sum_int = 0
                     squared_batch_counts_sum_int = 0
                     num_out_of_range = 0

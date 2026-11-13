@@ -2,7 +2,6 @@
 
 from cython.parallel cimport parallel, prange, threadid
 from libcpp.algorithm cimport lower_bound
-from libcpp.pair cimport pair
 from libcpp.vector cimport vector
 from .cyutils cimport atomic_and, get_thread_offset, numeric, signed_integer
 
@@ -19,7 +18,7 @@ def malat1_mask_csr(
     cdef signed_integer* start
     cdef signed_integer* end
     cdef signed_integer* found
-    cdef pair[unsigned, unsigned] row_range
+    cdef unsigned start_row, end_row
 
     num_threads = min(num_threads, num_cells)
     if num_threads <= 1:
@@ -31,8 +30,9 @@ def malat1_mask_csr(
     else:
         with nogil, parallel(num_threads=num_threads):
             thread_index = threadid()
-            row_range = get_thread_offset(indptr, thread_index, num_threads)
-            for row in range(row_range.first, row_range.second):
+            start_row, end_row = \
+                get_thread_offset(indptr, thread_index, num_threads)
+            for row in range(start_row, end_row):
                 start = <signed_integer*> &indices[indptr[row]]
                 end = start + indptr[row + 1] - indptr[row]
                 found = lower_bound(start, end, MALAT1_index)
@@ -49,7 +49,7 @@ def malat1_mask_csr_check(
     cdef unsigned row, thread_index
     cdef unsigned long long col, row_start, row_end, \
         num_cells = indptr.shape[0] - 1
-    cdef pair[unsigned, unsigned] row_range
+    cdef unsigned start_row, end_row
     cdef bint has_canonical_format = True, has_sorted_indices = True
 
     num_threads = min(num_threads, num_cells)
@@ -71,8 +71,9 @@ def malat1_mask_csr_check(
     else:
         with nogil, parallel(num_threads=num_threads):
             thread_index = threadid()
-            row_range = get_thread_offset(indptr, thread_index, num_threads)
-            for row in range(row_range.first, row_range.second):
+            start_row, end_row = \
+                get_thread_offset(indptr, thread_index, num_threads)
+            for row in range(start_row, end_row):
                 MALAT1_mask[row] = False
                 row_start = <unsigned long long> indptr[row]
                 row_end = <unsigned long long> indptr[row + 1]
@@ -99,7 +100,7 @@ def malat1_mask_csr_scan(
     cdef unsigned row, thread_index
     cdef unsigned long long col, row_start, row_end, \
         num_cells = indptr.shape[0] - 1
-    cdef pair[unsigned, unsigned] row_range
+    cdef unsigned start_row, end_row
 
     num_threads = min(num_threads, num_cells)
     if num_threads <= 1:
@@ -114,8 +115,9 @@ def malat1_mask_csr_scan(
     else:
         with nogil, parallel(num_threads=num_threads):
             thread_index = threadid()
-            row_range = get_thread_offset(indptr, thread_index, num_threads)
-            for row in range(row_range.first, row_range.second):
+            start_row, end_row = \
+                get_thread_offset(indptr, thread_index, num_threads)
+            for row in range(start_row, end_row):
                 MALAT1_mask[row] = False
                 row_start = <unsigned long long> indptr[row]
                 row_end = <unsigned long long> indptr[row + 1]
@@ -136,7 +138,7 @@ def mito_mask_csr(const numeric[::1] data,
     cdef unsigned row, row_sum, mt_sum, thread_index, \
         num_genes = indptr.shape[0] - 1
     cdef unsigned long long col
-    cdef pair[unsigned, unsigned] row_range
+    cdef unsigned start_row, end_row
 
     num_threads = min(num_threads, num_genes)
     if num_threads <= 1:
@@ -153,8 +155,9 @@ def mito_mask_csr(const numeric[::1] data,
     else:
         with nogil, parallel(num_threads=num_threads):
             thread_index = threadid()
-            row_range = get_thread_offset(indptr, thread_index, num_threads)
-            for row in range(row_range.first, row_range.second):
+            start_row, end_row = \
+                get_thread_offset(indptr, thread_index, num_threads)
+            for row in range(start_row, end_row):
                 row_sum = 0
                 mt_sum = 0
                 for col in range(<unsigned long long> indptr[row],
@@ -177,7 +180,7 @@ def mito_mask_csc(const numeric[::1] data,
     cdef unsigned thread_index, gene, row_sum, mt_sum, \
         num_genes = indptr.shape[0] - 1
     cdef unsigned long long cell, num_cells = mito_mask.shape[0]
-    cdef pair[unsigned, unsigned] col_range
+    cdef unsigned start_col, end_col
     cdef vector[unsigned] row_sums_buffer, mt_sums_buffer
     cdef vector[vector[unsigned]] thread_row_sums, thread_mt_sums
     cdef unsigned[::1] row_sums, mt_sums
@@ -211,9 +214,9 @@ def mito_mask_csc(const numeric[::1] data,
                 thread_index = threadid()
                 thread_row_sums[thread_index].resize(num_cells)
                 thread_mt_sums[thread_index].resize(num_cells)
-                col_range = \
+                start_col, end_col = \
                     get_thread_offset(indptr, thread_index, num_threads)
-                for gene in range(col_range.first, col_range.second):
+                for gene in range(start_col, end_col):
                     if mt_genes[gene]:
                         for cell in range(
                                 <unsigned long long> indptr[gene],
@@ -252,7 +255,7 @@ def qc_metrics_csr(const numeric[::1] data,
     cdef unsigned row, row_sum, mt_sum, thread_index, \
         num_genes = indptr.shape[0] - 1
     cdef unsigned long long col
-    cdef pair[unsigned, unsigned] row_range
+    cdef unsigned start_row, end_row
 
     num_threads = min(num_threads, num_genes)
     if num_threads <= 1:
@@ -270,8 +273,9 @@ def qc_metrics_csr(const numeric[::1] data,
     else:
         with nogil, parallel(num_threads=num_threads):
             thread_index = threadid()
-            row_range = get_thread_offset(indptr, thread_index, num_threads)
-            for row in range(row_range.first, row_range.second):
+            start_row, end_row = \
+                get_thread_offset(indptr, thread_index, num_threads)
+            for row in range(start_row, end_row):
                 row_sum = 0
                 mt_sum = 0
                 for col in range(<unsigned long long> indptr[row],
@@ -297,7 +301,7 @@ def qc_metrics_csc(const numeric[::1] data,
         num_genes = indptr.shape[0] - 1
     cdef volatile float mt_sum_volatile
     cdef unsigned long long cell, num_cells = num_counts.shape[0]
-    cdef pair[unsigned, unsigned] col_range
+    cdef unsigned start_col, end_col
     cdef vector[unsigned] mt_sums_buffer
     cdef vector[vector[unsigned]] thread_row_sums, thread_mt_sums, \
         thread_num_genes_per_cell
@@ -341,9 +345,9 @@ def qc_metrics_csc(const numeric[::1] data,
                 thread_row_sums[thread_index].resize(num_cells)
                 thread_mt_sums[thread_index].resize(num_cells)
                 thread_num_genes_per_cell[thread_index].resize(num_cells)
-                col_range = \
+                start_col, end_col = \
                     get_thread_offset(indptr, thread_index, num_threads)
-                for gene in range(col_range.first, col_range.second):
+                for gene in range(start_col, end_col):
                     if mt_genes[gene]:
                         for cell in range(
                                 <unsigned long long> indptr[gene],

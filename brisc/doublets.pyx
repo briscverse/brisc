@@ -4,7 +4,6 @@ from cython.parallel cimport parallel, prange, threadid
 from libc.float cimport FLT_MAX
 from libcpp.algorithm cimport nth_element, sort
 from libcpp.cmath cimport abs, erfc, exp, floor, log, log1p, sqrt
-from libcpp.pair cimport pair
 from .cyutils cimport get_thread_offset, max_heap_pop, max_heap_replace_top, \
     numeric, signed_integer, srand, rand, randint
 
@@ -368,7 +367,7 @@ def compute_cxds(
     cdef unsigned long long i, j, i_start, i_end, j_end, \
         num_cells = indptr.shape[0] - 1
     cdef float cxds_score
-    cdef pair[unsigned, unsigned] row_range
+    cdef unsigned start_row, end_row
 
     # Iterate over all pairs of genes i and j within each cell, and
     # subtract `S[i, j]` from the cell's cxds score for each pair
@@ -387,8 +386,9 @@ def compute_cxds(
     else:
         with nogil, parallel(num_threads=num_threads):
             thread_index = threadid()
-            row_range = get_thread_offset(indptr, thread_index, num_threads)
-            for cell in range(row_range.first, row_range.second):
+            start_row, end_row = \
+                get_thread_offset(indptr, thread_index, num_threads)
+            for cell in range(start_row, end_row):
                 cxds_score = 0
                 for gene_i in range(<unsigned long long> indptr[cell],
                                     <unsigned long long> indptr[cell + 1]):

@@ -3,7 +3,6 @@ from libc.limits cimport UINT_MAX
 from libc.math cimport M_PI
 from libcpp.algorithm cimport lower_bound
 from libcpp.cmath cimport cos, log, sqrt
-from libcpp.pair cimport pair
 from libcpp.vector cimport vector
 from scipy.linalg.cython_blas cimport sgemm as sgemm_, sgemv as sgemv_
 
@@ -264,10 +263,7 @@ cdef extern from * nogil:
         T& emplace_back(...) except +
 
 
-ctypedef unsigned unsigned_  # hack to get templates to work with unsigned
-
-
-cdef inline pair[unsigned, unsigned] get_thread_offset(
+cdef inline (unsigned, unsigned) get_thread_offset(
         const signed_integer[::1] indptr,
         const unsigned thread_index,
         const unsigned num_threads) noexcept nogil:
@@ -290,7 +286,7 @@ cdef inline pair[unsigned, unsigned] get_thread_offset(
         <unsigned>(lower_bound(&indptr[0], &indptr[0] + indptr.shape[0],
                                num_elements_end) - &indptr[0]),
         num_major)
-    return pair[unsigned_, unsigned_](start, end)
+    return start, end
 
 
 cdef inline void get_thread_offsets(const signed_integer[::1] indptr,

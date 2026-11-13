@@ -1,6 +1,5 @@
 from cython.parallel cimport parallel, prange, threadid
 from libc.string cimport memcpy
-from libcpp.pair cimport pair
 from libcpp.vector cimport vector
 from .cyutils cimport get_thread_offset, numeric, signed_integer, \
     uninitialized_vector
@@ -72,7 +71,7 @@ def normalize_csr(const numeric[::1] data,
     cdef float normalization_factor, inverse_size_factor, \
         new_normalization_factor, new_inverse_size_factor, new_row_sum, \
         new_total_sum = 0
-    cdef pair[unsigned, unsigned] row_range
+    cdef unsigned start_row, end_row
     cdef uninitialized_vector[unsigned] thread_nums_QCed_cells
     cdef uninitialized_vector[unsigned long long] thread_total_sums
     cdef uninitialized_vector[float] new_row_sums
@@ -177,9 +176,9 @@ def normalize_csr(const numeric[::1] data,
                 normalization_factor = 10000
                 with parallel(num_threads=num_threads):
                     thread_index = threadid()
-                    row_range = \
+                    start_row, end_row = \
                         get_thread_offset(indptr, thread_index, num_threads)
-                    for i in range(row_range.first, row_range.second):
+                    for i in range(start_row, end_row):
                         row_sum = 0
                         for j in range(<unsigned long long> indptr[i],
                                        <unsigned long long> indptr[i + 1]):
@@ -198,10 +197,10 @@ def normalize_csr(const numeric[::1] data,
                 if not has_QC_column:
                     with parallel(num_threads=num_threads):
                         thread_index = threadid()
-                        row_range = get_thread_offset(
+                        start_row, end_row = get_thread_offset(
                             indptr, thread_index, num_threads)
                         thread_total_sum = 0
-                        for i in range(row_range.first, row_range.second):
+                        for i in range(start_row, end_row):
                             row_sum = 0
                             for j in range(<unsigned long long> indptr[i],
                                            <unsigned long long> indptr[i + 1]):
@@ -218,11 +217,11 @@ def normalize_csr(const numeric[::1] data,
                     thread_nums_QCed_cells.resize(num_threads)
                     with parallel(num_threads=num_threads):
                         thread_index = threadid()
-                        row_range = get_thread_offset(
+                        start_row, end_row = get_thread_offset(
                             indptr, thread_index, num_threads)
                         thread_total_sum = 0
                         thread_num_QCed_cells = 0
-                        for i in range(row_range.first, row_range.second):
+                        for i in range(start_row, end_row):
                             row_sum = 0
                             for j in range(<unsigned long long> indptr[i],
                                            <unsigned long long> indptr[i + 1]):
@@ -245,9 +244,9 @@ def normalize_csr(const numeric[::1] data,
                 # multiply all counts for that cell by it, then log1p-transform
                 with parallel(num_threads=num_threads):
                     thread_index = threadid()
-                    row_range = \
+                    start_row, end_row = \
                         get_thread_offset(indptr, thread_index, num_threads)
-                    for i in range(row_range.first, row_range.second):
+                    for i in range(start_row, end_row):
                         inverse_size_factor = \
                             normalization_factor / row_sums[i]
                         for j in range(<unsigned long long> indptr[i],
@@ -267,9 +266,9 @@ def normalize_csr(const numeric[::1] data,
                 new_row_sums.resize(num_cells)
                 with parallel(num_threads=num_threads):
                     thread_index = threadid()
-                    row_range = \
+                    start_row, end_row = \
                         get_thread_offset(indptr, thread_index, num_threads)
-                    for i in range(row_range.first, row_range.second):
+                    for i in range(start_row, end_row):
                         new_row_sum = 0
                         inverse_size_factor = \
                             normalization_factor / row_sums[i]
@@ -294,9 +293,9 @@ def normalize_csr(const numeric[::1] data,
                 # multiply all normalized counts for that cell by it
                 with parallel(num_threads=num_threads):
                     thread_index = threadid()
-                    row_range = \
+                    start_row, end_row = \
                         get_thread_offset(indptr, thread_index, num_threads)
-                    for i in range(row_range.first, row_range.second):
+                    for i in range(start_row, end_row):
                         new_inverse_size_factor = \
                             new_normalization_factor / new_row_sums[i]
                         for j in range(<unsigned long long> indptr[i],

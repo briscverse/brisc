@@ -4,7 +4,6 @@ from cpython.exc cimport PyErr_CheckSignals
 from cython.parallel cimport parallel, prange, threadid
 from libc.string cimport memcpy
 from libcpp.algorithm cimport lower_bound
-from libcpp.pair cimport pair
 from libcpp.vector cimport vector
 from .cyutils cimport atomic_and, atomic_or, bit_width, get_thread_offset, \
     integer, numeric, signed_integer
@@ -281,7 +280,7 @@ def csr_sort_indices(const unsigned n_row,
                      unsigned num_threads):
     cdef unsigned i, thread_index
     cdef signed_integer row_start, row_end
-    cdef pair[unsigned, unsigned] row_range
+    cdef unsigned start_row, end_row
 
     num_threads = min(num_threads, n_row)
     if num_threads <= 1:
@@ -293,8 +292,9 @@ def csr_sort_indices(const unsigned n_row,
     else:
         with nogil, parallel(num_threads=num_threads):
             thread_index = threadid()
-            row_range = get_thread_offset(Ap, thread_index, num_threads)
-            for i in range(row_range.first, row_range.second):
+            start_row, end_row = \
+                get_thread_offset(Ap, thread_index, num_threads)
+            for i in range(start_row, end_row):
                 row_start = Ap[i]
                 row_end = Ap[i + 1]
                 sort_both_by_indices(&Aj[0] + row_start, &Aj[0] + row_end,
@@ -313,7 +313,7 @@ def get_csr_submatrix1(const unsigned n_row,
                        unsigned num_threads):
     cdef unsigned i, thread_index, new_n_row = ir1 - ir0
     cdef signed_integer new_nnz, jj, row_start, row_end
-    cdef pair[unsigned, unsigned] row_range
+    cdef unsigned start_row, end_row
 
     Bp[0] = 0
     num_threads = min(num_threads, new_n_row)
@@ -333,9 +333,9 @@ def get_csr_submatrix1(const unsigned n_row,
     else:
         with nogil, parallel(num_threads=num_threads):
             thread_index = threadid()
-            row_range = get_thread_offset(Ap[ir0:ir1 + 1], thread_index,
-                                          num_threads)
-            for i in range(row_range.first, row_range.second):
+            start_row, end_row = \
+                get_thread_offset(Ap[ir0:ir1 + 1], thread_index, num_threads)
+            for i in range(start_row, end_row):
                 new_nnz = 0
                 row_start = Ap[ir0 + i]
                 row_end = Ap[ir0 + i + 1]
@@ -365,7 +365,7 @@ def get_csr_submatrix1_check(const unsigned n_row,
                              unsigned num_threads):
     cdef unsigned i, thread_index, new_n_row = ir1 - ir0
     cdef signed_integer new_nnz, jj, row_start, row_end
-    cdef pair[unsigned, unsigned] row_range
+    cdef unsigned start_row, end_row
     cdef bint has_canonical_format = True, has_sorted_indices = True
 
     Bp[0] = 0
@@ -392,9 +392,9 @@ def get_csr_submatrix1_check(const unsigned n_row,
     else:
         with nogil, parallel(num_threads=num_threads):
             thread_index = threadid()
-            row_range = get_thread_offset(Ap[ir0:ir1 + 1], thread_index,
-                                          num_threads)
-            for i in range(row_range.first, row_range.second):
+            start_row, end_row = \
+                get_thread_offset(Ap[ir0:ir1 + 1], thread_index, num_threads)
+            for i in range(start_row, end_row):
                 new_nnz = 0
                 row_start = Ap[ir0 + i]
                 row_end = Ap[ir0 + i + 1]
@@ -431,7 +431,7 @@ def get_csr_submatrix1_sorted(const unsigned n_row,
                               unsigned num_threads):
     cdef unsigned i, thread_index, new_n_row = ir1 - ir0
     cdef signed_integer row_start, row_end, start_idx, end_idx
-    cdef pair[unsigned, unsigned] row_range
+    cdef unsigned start_row, end_row
 
     Bp[0] = 0
     num_threads = min(num_threads, new_n_row)
@@ -450,9 +450,9 @@ def get_csr_submatrix1_sorted(const unsigned n_row,
     else:
         with nogil, parallel(num_threads=num_threads):
             thread_index = threadid()
-            row_range = get_thread_offset(Ap[ir0:ir1 + 1], thread_index,
-                                          num_threads)
-            for i in range(row_range.first, row_range.second):
+            start_row, end_row = \
+                get_thread_offset(Ap[ir0:ir1 + 1], thread_index, num_threads)
+            for i in range(start_row, end_row):
                 row_start = Ap[ir0 + i]
                 row_end = Ap[ir0 + i + 1]
                 if row_start < row_end:
@@ -485,7 +485,7 @@ def get_csr_submatrix2(const unsigned n_row,
                        unsigned num_threads):
     cdef unsigned i, thread_index, new_n_row = ir1 - ir0
     cdef signed_integer jj, kk
-    cdef pair[unsigned, unsigned] row_range
+    cdef unsigned start_row, end_row
 
     num_threads = min(num_threads, new_n_row)
     if num_threads <= 1:
@@ -503,9 +503,9 @@ def get_csr_submatrix2(const unsigned n_row,
     else:
         with nogil, parallel(num_threads=num_threads):
             thread_index = threadid()
-            row_range = get_thread_offset(Ap[ir0:ir1 + 1], thread_index,
-                                          num_threads)
-            for i in range(row_range.first, row_range.second):
+            start_row, end_row = \
+                get_thread_offset(Ap[ir0:ir1 + 1], thread_index, num_threads)
+            for i in range(start_row, end_row):
                 kk = Bp[i]
                 for jj in range(Ap[ir0 + i], Ap[ir0 + i + 1]):
                     if Aj[jj] >= ic0 and Aj[jj] < ic1:
@@ -534,7 +534,7 @@ def get_csr_submatrix2_sorted(const unsigned n_row,
                               unsigned num_threads):
     cdef unsigned i, thread_index, new_n_row = ir1 - ir0
     cdef signed_integer jj, kk, start_idx, end_idx, row_start, row_end
-    cdef pair[unsigned, unsigned] row_range
+    cdef unsigned start_row, end_row
 
     num_threads = min(num_threads, new_n_row)
     if num_threads <= 1:
@@ -554,9 +554,9 @@ def get_csr_submatrix2_sorted(const unsigned n_row,
     else:
         with nogil, parallel(num_threads=num_threads):
             thread_index = threadid()
-            row_range = get_thread_offset(Ap[ir0:ir1 + 1], thread_index,
-                                         num_threads)
-            for i in range(row_range.first, row_range.second):
+            start_row, end_row = \
+                get_thread_offset(Ap[ir0:ir1 + 1], thread_index, num_threads)
+            for i in range(start_row, end_row):
                 kk = Bp[i]
                 row_start = Ap[ir0 + i]
                 row_end = Ap[ir0 + i + 1]
@@ -828,7 +828,7 @@ def csr_column_index1(const unsigned n_idx,
                       unsigned num_threads):
     cdef unsigned i, j, thread_index
     cdef signed_integer new_nnz, jj
-    cdef pair[unsigned, unsigned] row_range
+    cdef unsigned start_row, end_row
 
     # bincount(col_idxs)
     num_threads = min(num_threads, n_row)
@@ -852,8 +852,9 @@ def csr_column_index1(const unsigned n_idx,
     else:
         with nogil, parallel(num_threads=num_threads):
             thread_index = threadid()
-            row_range = get_thread_offset(Ap, thread_index, num_threads)
-            for i in range(row_range.first, row_range.second):
+            start_row, end_row = \
+                get_thread_offset(Ap, thread_index, num_threads)
+            for i in range(start_row, end_row):
                 new_nnz = 0
                 for jj in range(Ap[i], Ap[i + 1]):
                     new_nnz = new_nnz + col_offsets[Aj[jj]]
@@ -880,7 +881,7 @@ def csr_column_index2(const long long[::1] col_order,
     cdef unsigned row, thread_index
     cdef signed_integer n, jj, j, offset, prev_offset, k
     cdef bit_width v
-    cdef pair[unsigned, unsigned] row_range
+    cdef unsigned start_row, end_row
 
     num_threads = min(num_threads, Ap.shape[0] - 1)
     if num_threads <= 1:
@@ -903,8 +904,9 @@ def csr_column_index2(const long long[::1] col_order,
     else:
         with nogil, parallel(num_threads=num_threads):
             thread_index = threadid()
-            row_range = get_thread_offset(Ap, thread_index, num_threads)
-            for row in range(row_range.first, row_range.second):
+            start_row, end_row = \
+                get_thread_offset(Ap, thread_index, num_threads)
+            for row in range(start_row, end_row):
                 n = Bp[row]
                 for jj in range(Ap[row], Ap[row + 1]):
                     j = Aj[jj]
@@ -934,7 +936,6 @@ def csr_outer_index1(const integer[::1] row_indices,
     cdef unsigned i, j, row, thread_index, \
         num_row_indices = row_indices.shape[0]
     cdef signed_integer new_nnz, jj
-    cdef pair[unsigned, unsigned] row_range
 
     # bincount(col_indices)
     num_threads = min(num_threads, num_row_indices)
@@ -986,7 +987,6 @@ def csr_outer_index2(const integer[::1] row_indices,
     cdef unsigned i, row, num_row_indices = row_indices.shape[0]
     cdef signed_integer n, jj, j, offset, prev_offset, k
     cdef bit_width v
-    cdef pair[unsigned, unsigned] row_range
 
     num_threads = min(num_threads, Ap.shape[0] - 1)
     if num_threads <= 1:
@@ -1188,7 +1188,7 @@ def csr_tocsc(const unsigned n_row,
     cdef unsigned col, row, thread_index, preceding_thread_index
     cdef signed_integer n, cumsum, count, jj, dest, preceding_count, i, \
         Bp_col, nnz = Ap[n_row]
-    cdef pair[unsigned, unsigned] row_range
+    cdef unsigned start_row, end_row
     cdef vector[vector[unsigned]] thread_col_counts
     cdef vector[vector[signed_integer]] thread_col_offsets
     cdef unsigned* col_counts
@@ -1241,9 +1241,10 @@ def csr_tocsc(const unsigned n_row,
                 thread_index = threadid()
                 thread_col_counts[thread_index].resize(n_col)
                 thread_col_offsets[thread_index].resize(n_col)
-                row_range = get_thread_offset(Ap, thread_index, num_threads)
+                start_row, end_row = \
+                    get_thread_offset(Ap, thread_index, num_threads)
                 col_counts = thread_col_counts[thread_index].data()
-                for row in range(row_range.first, row_range.second):
+                for row in range(start_row, end_row):
                     for jj in range(Ap[row], Ap[row + 1]):
                         col = Aj[jj]
                         col_counts[col] += 1
@@ -1279,8 +1280,9 @@ def csr_tocsc(const unsigned n_row,
                             thread_col_counts[preceding_thread_index][col]
                     col_offsets[col] = preceding_count
 
-                row_range = get_thread_offset(Ap, thread_index, num_threads)
-                for row in range(row_range.first, row_range.second):
+                start_row, end_row = \
+                    get_thread_offset(Ap, thread_index, num_threads)
+                for row in range(start_row, end_row):
                     for jj in range(Ap[row], Ap[row + 1]):
                         col = Aj[jj]
                         dest = col_offsets[col]
