@@ -17193,6 +17193,14 @@ class SingleCell:
                num_phase_2_iterations, num_phase_3_iterations, learning_rate,
                seed, match_parallel, neighbors_key, num_threads)
 
+        # Unless `num_threads=1` and `match_parallel=False`, `embedding` and
+        # `gradients` are swapped every iteration, so `gradients` contains the
+        # final embedding after an odd number of iterations; if so, swap them
+        if (num_threads > 1 or match_parallel) and (
+                num_phase_1_iterations + num_phase_2_iterations +
+                num_phase_3_iterations) & 1:
+            embedding = gradients
+
         # If `QC_column` was specified, back-project from QCed cells to all
         # cells, filling with `NaN`
         if QC_column is not None:
@@ -17654,6 +17662,14 @@ class SingleCell:
                  num_phase_2_iterations, num_phase_3_iterations, learning_rate,
                  max_distance, seed, match_parallel, neighbors_key,
                  num_threads)
+
+        # Unless `num_threads=1` and `match_parallel=False`, `embedding` and
+        # `gradients` are swapped every iteration, so `gradients` contains the
+        # final embedding after an odd number of iterations; if so, swap them
+        if (num_threads > 1 or match_parallel) and (
+                num_phase_1_iterations + num_phase_2_iterations +
+                num_phase_3_iterations) & 1:
+            embedding = gradients
 
         # If `QC_column` was specified, back-project from QCed cells to all
         # cells, filling with `NaN`

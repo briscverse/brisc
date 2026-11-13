@@ -627,17 +627,17 @@ cdef inline void get_scaled_gradients_fast(
         gradients[i, 1] += gradients_i1
 
 
-cdef inline void get_gradient(const float[:, ::1] embedding,
-                              const unsigned[::1] neighbor_pair_indices,
-                              const unsigned[::1] neighbor_pair_indptr,
-                              const unsigned[::1] mid_near_pair_indices,
-                              const unsigned[::1] mid_near_pair_indptr,
-                              const unsigned[::1] further_pair_indices,
-                              const unsigned[::1] further_pair_indptr,
-                              const float w_neighbors,
-                              const float w_mid_near,
-                              float[:, ::1] gradients,
-                              const unsigned i) noexcept nogil:
+cdef inline (float, float) get_gradient(
+        const float[:, ::1] embedding,
+        const unsigned[::1] neighbor_pair_indices,
+        const unsigned[::1] neighbor_pair_indptr,
+        const unsigned[::1] mid_near_pair_indices,
+        const unsigned[::1] mid_near_pair_indptr,
+        const unsigned[::1] further_pair_indices,
+        const unsigned[::1] further_pair_indptr,
+        const float w_neighbors,
+        const float w_mid_near,
+        const unsigned i) noexcept nogil:
     cdef unsigned j, k
     cdef unsigned long long num_cells = embedding.shape[0]
     cdef float embedding_ij_0, embedding_ij_1, distance_ij, w, \
@@ -689,11 +689,10 @@ cdef inline void get_gradient(const float[:, ::1] embedding,
         gradient_i0 = gradient_i0 - w * embedding_ij_0
         gradient_i1 = gradient_i1 - w * embedding_ij_1
 
-    gradients[i, 0] = gradient_i0
-    gradients[i, 1] = gradient_i1
+    return gradient_i0, gradient_i1
 
 
-cdef inline void get_gradients_parallel(
+cdef inline void update_embedding_parallel(
         const float[:, ::1] embedding,
         const unsigned[::1] neighbor_pair_indices,
         const unsigned[::1] neighbor_pair_indptr,
@@ -703,26 +702,45 @@ cdef inline void get_gradients_parallel(
         const unsigned[::1] further_pair_indptr,
         const float w_neighbors,
         const float w_mid_near,
-        float[:, ::1] gradients,
+        float[:, ::1] new_embedding,
+        float[:, ::1] momentum,
+        float[:, ::1] velocity,
+        const float beta1,
+        const float beta2,
+        float learning_rate,
+        const unsigned iteration,
         const unsigned num_threads) noexcept nogil:
+    # Calculate each cell's gradient from `embedding` and immediately apply
+    # it via the Adam optimizer, writing the cell's new position to
+    # `new_embedding`, since other cells' gradients need its old position
     cdef unsigned i
     cdef unsigned long long num_cells = embedding.shape[0]
-
+    cdef float gradient_0, gradient_1
+    learning_rate *= sqrt(<float> 1 - pow(beta2, <float> (iteration + 1))) / \
+        (<float> 1 - pow(beta1, <float> (iteration + 1)))
     for i in prange(num_cells, num_threads=num_threads):
-        get_gradient(embedding, neighbor_pair_indices, neighbor_pair_indptr,
-                     mid_near_pair_indices, mid_near_pair_indptr,
-                     further_pair_indices, further_pair_indptr, w_neighbors,
-                     w_mid_near, gradients, i)
+        gradient_0, gradient_1 = get_gradient(
+            embedding, neighbor_pair_indices, neighbor_pair_indptr,
+            mid_near_pair_indices, mid_near_pair_indptr, further_pair_indices,
+            further_pair_indptr, w_neighbors, w_mid_near, i)
+        new_embedding[i, 0] = embedding[i, 0]
+        new_embedding[i, 1] = embedding[i, 1]
+        update_cell_embedding_adam(new_embedding[i, 0], gradient_0,
+                                   momentum[i, 0], velocity[i, 0], num_cells,
+                                   beta1, beta2, learning_rate)
+        update_cell_embedding_adam(new_embedding[i, 1], gradient_1,
+                                   momentum[i, 1], velocity[i, 1], num_cells,
+                                   beta1, beta2, learning_rate)
 
 
-cdef inline void get_scaled_gradient(const float[:, ::1] embedding,
-                                     const unsigned[::1] neighbor_pair_indices,
-                                     const unsigned[::1] neighbor_pair_indptr,
-                                     const unsigned[::1] further_pair_indices,
-                                     const unsigned[::1] further_pair_indptr,
-                                     const float half_max_distance,
-                                     float[:, ::1] gradients,
-                                     const unsigned i) noexcept nogil:
+cdef inline (float, float) get_scaled_gradient(
+        const float[:, ::1] embedding,
+        const unsigned[::1] neighbor_pair_indices,
+        const unsigned[::1] neighbor_pair_indptr,
+        const unsigned[::1] further_pair_indices,
+        const unsigned[::1] further_pair_indptr,
+        const float half_max_distance,
+        const unsigned i) noexcept nogil:
     # LocalMAP's phase-3 gradients, where `w_neighbors` is 1 and `w_mid_near`
     # is 0 (so mid-near pairs are skipped), and nearest-neighbor forces are
     # scaled by `half_max_distance / sqrt(distance_ij)`
@@ -762,27 +780,43 @@ cdef inline void get_scaled_gradient(const float[:, ::1] embedding,
         gradient_i0 = gradient_i0 - w * embedding_ij_0
         gradient_i1 = gradient_i1 - w * embedding_ij_1
 
-    gradients[i, 0] = gradient_i0
-    gradients[i, 1] = gradient_i1
+    return gradient_i0, gradient_i1
 
 
-cdef inline void get_scaled_gradients_parallel(
+cdef inline void update_embedding_scaled_parallel(
         const float[:, ::1] embedding,
         const unsigned[::1] neighbor_pair_indices,
         const unsigned[::1] neighbor_pair_indptr,
         const unsigned[::1] further_pair_indices,
         const unsigned[::1] further_pair_indptr,
         const float half_max_distance,
-        float[:, ::1] gradients,
+        float[:, ::1] new_embedding,
+        float[:, ::1] momentum,
+        float[:, ::1] velocity,
+        const float beta1,
+        const float beta2,
+        float learning_rate,
+        const unsigned iteration,
         const unsigned num_threads) noexcept nogil:
+    # Like `update_embedding_parallel()`, but with LocalMAP's phase-3
+    # gradients
     cdef unsigned i
     cdef unsigned long long num_cells = embedding.shape[0]
-
+    cdef float gradient_0, gradient_1
+    learning_rate *= sqrt(<float> 1 - pow(beta2, <float> (iteration + 1))) / \
+        (<float> 1 - pow(beta1, <float> (iteration + 1)))
     for i in prange(num_cells, num_threads=num_threads):
-        get_scaled_gradient(embedding, neighbor_pair_indices,
-                            neighbor_pair_indptr, further_pair_indices,
-                            further_pair_indptr, half_max_distance,
-                            gradients, i)
+        gradient_0, gradient_1 = get_scaled_gradient(
+            embedding, neighbor_pair_indices, neighbor_pair_indptr,
+            further_pair_indices, further_pair_indptr, half_max_distance, i)
+        new_embedding[i, 0] = embedding[i, 0]
+        new_embedding[i, 1] = embedding[i, 1]
+        update_cell_embedding_adam(new_embedding[i, 0], gradient_0,
+                                   momentum[i, 0], velocity[i, 0], num_cells,
+                                   beta1, beta2, learning_rate)
+        update_cell_embedding_adam(new_embedding[i, 1], gradient_1,
+                                   momentum[i, 1], velocity[i, 1], num_cells,
+                                   beta1, beta2, learning_rate)
 
 
 cdef inline void update_cell_embedding_adam(
@@ -813,29 +847,6 @@ cdef inline void update_embedding_adam(
     learning_rate *= sqrt(<float> 1 - pow(beta2, <float> (iteration + 1))) / \
         (<float> 1 - pow(beta1, <float> (iteration + 1)))
     for i in range(num_cells):
-        update_cell_embedding_adam(embedding[i, 0], gradients[i, 0],
-                                   momentum[i, 0], velocity[i, 0], num_cells,
-                                   beta1, beta2, learning_rate)
-        update_cell_embedding_adam(embedding[i, 1], gradients[i, 1],
-                                   momentum[i, 1], velocity[i, 1], num_cells,
-                                   beta1, beta2, learning_rate)
-
-
-cdef inline void update_embedding_adam_parallel(
-        float[:, ::1] embedding,
-        const float[:, ::1] gradients,
-        float[:, ::1] momentum,
-        float[:, ::1] velocity,
-        const unsigned long long num_cells,
-        const float beta1,
-        const float beta2,
-        float learning_rate,
-        const unsigned iteration,
-        const unsigned num_threads) noexcept nogil:
-    cdef unsigned i
-    learning_rate *= sqrt(<float> 1 - pow(beta2, <float> (iteration + 1))) / \
-        (<float> 1 - pow(beta1, <float> (iteration + 1)))
-    for i in prange(num_cells, num_threads=num_threads):
         update_cell_embedding_adam(embedding[i, 0], gradients[i, 0],
                                    momentum[i, 0], velocity[i, 0], num_cells,
                                    beta1, beta2, learning_rate)
@@ -904,7 +915,7 @@ cdef inline void pacmap_parallel(const float[:, ::1] PCs,
                                  float[:, ::1] embedding,
                                  float[:, ::1] momentum,
                                  float[:, ::1] velocity,
-                                 float[:, ::1] gradients,
+                                 float[:, ::1] embedding_buffer,
                                  const unsigned[::1] neighbor_pair_indices,
                                  const unsigned[::1] neighbor_pair_indptr,
                                  const unsigned[::1] mid_near_pair_indices,
@@ -922,6 +933,8 @@ cdef inline void pacmap_parallel(const float[:, ::1] PCs,
     cdef unsigned long long num_cells = PCs.shape[0]
     cdef float iteration_fraction, w_mid_near, w_neighbors, \
         beta1 = <float> 0.9, beta2 = <float> 0.999
+    cdef float[:, ::1] old_embedding = embedding, \
+        new_embedding = embedding_buffer
 
     with nogil:
         # Initialize the embedding, momentum and velocity. Momentum and
@@ -948,19 +961,15 @@ cdef inline void pacmap_parallel(const float[:, ::1] PCs,
                 w_mid_near = 0
                 w_neighbors = 1
 
-            # Calculate gradients
-            get_gradients_parallel(
-                embedding, neighbor_pair_indices, neighbor_pair_indptr,
+            # Calculate gradients and update the embedding via the Adam
+            # optimizer, then swap the old and new embeddings
+            update_embedding_parallel(
+                old_embedding, neighbor_pair_indices, neighbor_pair_indptr,
                 mid_near_pair_indices, mid_near_pair_indptr,
                 further_pair_indices, further_pair_indptr, w_neighbors,
-                w_mid_near, gradients, num_threads)
-
-            # Update the embedding based on the gradients, via the Adam
-            # optimizer
-            update_embedding_adam_parallel(embedding, gradients, momentum,
-                                           velocity, num_cells, beta1, beta2,
-                                           learning_rate, iteration,
-                                           num_threads)
+                w_mid_near, new_embedding, momentum, velocity, beta1, beta2,
+                learning_rate, iteration, num_threads)
+            old_embedding, new_embedding = new_embedding, old_embedding
 
             # Check for KeyboardInterrupts
             if iteration % 8 == 7:
@@ -1064,7 +1073,10 @@ def pacmap(const float[:, ::1] PCs,
         PyErr_CheckSignals()
 
         # Use the parallel implementation even when single-threaded, to
-        # ensure identical results regardless of the number of threads
+        # ensure identical results regardless of the number of threads. It
+        # uses `gradients` as a second embedding buffer and swaps the two
+        # every iteration, so after an odd number of iterations, the final
+        # embedding is in `gradients`.
         pacmap_parallel(PCs, embedding, momentum, velocity, gradients,
                         neighbor_pair_indices, neighbor_pair_indptr,
                         mid_near_pair_indices, mid_near_pair_indptr,
@@ -1147,7 +1159,7 @@ cdef inline void localmap_parallel(const float[:, ::1] PCs,
                                    float[:, ::1] embedding,
                                    float[:, ::1] momentum,
                                    float[:, ::1] velocity,
-                                   float[:, ::1] gradients,
+                                   float[:, ::1] embedding_buffer,
                                    const unsigned[:, ::1] neighbor_pairs,
                                    const unsigned[::1] neighbor_pair_indices,
                                    const unsigned[::1] neighbor_pair_indptr,
@@ -1171,6 +1183,8 @@ cdef inline void localmap_parallel(const float[:, ::1] PCs,
         half_max_distance = <float> 0.5 * max_distance, \
         max_distance_squared = max_distance * max_distance, \
         beta1 = <float> 0.9, beta2 = <float> 0.999
+    cdef float[:, ::1] old_embedding = embedding, \
+        new_embedding = embedding_buffer
 
     with nogil:
         # Initialize the embedding, momentum and velocity. Momentum and
@@ -1194,30 +1208,27 @@ cdef inline void localmap_parallel(const float[:, ::1] PCs,
                 w_mid_near = 3
                 w_neighbors = 3
 
-            # Calculate gradients
+            # Calculate gradients and update the embedding via the Adam
+            # optimizer, then swap the old and new embeddings
             if iteration >= num_phase_1_iterations + num_phase_2_iterations:
-                get_scaled_gradients_parallel(
-                    embedding, neighbor_pair_indices, neighbor_pair_indptr,
+                update_embedding_scaled_parallel(
+                    old_embedding, neighbor_pair_indices, neighbor_pair_indptr,
                     further_pair_indices, further_pair_indptr,
-                    half_max_distance, gradients, num_threads)
+                    half_max_distance, new_embedding, momentum, velocity,
+                    beta1, beta2, learning_rate, iteration, num_threads)
             else:
-                get_gradients_parallel(
-                    embedding, neighbor_pair_indices, neighbor_pair_indptr,
+                update_embedding_parallel(
+                    old_embedding, neighbor_pair_indices, neighbor_pair_indptr,
                     mid_near_pair_indices, mid_near_pair_indptr,
                     further_pair_indices, further_pair_indptr, w_neighbors,
-                    w_mid_near, gradients, num_threads)
-
-            # Update the embedding based on the gradients, via the Adam
-            # optimizer
-            update_embedding_adam_parallel(embedding, gradients, momentum,
-                                           velocity, num_cells, beta1, beta2,
-                                           learning_rate, iteration,
-                                           num_threads)
+                    w_mid_near, new_embedding, momentum, velocity, beta1,
+                    beta2, learning_rate, iteration, num_threads)
+            old_embedding, new_embedding = new_embedding, old_embedding
 
             # Re-sample further pairs every 10 iterations in phase 3
             if iteration >= num_phase_1_iterations + num_phase_2_iterations \
                     and iteration % 10 == 0:
-                sample_further_pairs_nearby(embedding, neighbor_pairs,
+                sample_further_pairs_nearby(old_embedding, neighbor_pairs,
                                             further_pairs,
                                             seed - (iteration + 1) * num_cells,
                                             max_distance_squared, num_threads)
@@ -1328,7 +1339,10 @@ def localmap(const float[:, ::1] PCs,
         PyErr_CheckSignals()
 
         # Use the parallel implementation even when single-threaded, to
-        # ensure identical results regardless of the number of threads
+        # ensure identical results regardless of the number of threads. It
+        # uses `gradients` as a second embedding buffer and swaps the two
+        # every iteration, so after an odd number of iterations, the final
+        # embedding is in `gradients`.
         localmap_parallel(PCs, embedding, momentum, velocity, gradients,
                           neighbor_pairs, neighbor_pair_indices,
                           neighbor_pair_indptr, mid_near_pair_indices,
