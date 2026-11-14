@@ -2025,7 +2025,7 @@ class SingleCell:
         total_small_bytes = 0
         for name, shape, dtype, file_offset in fixed_datasets:
             if np.prod(shape) >= num_cells:
-                array = numa_zeros(shape, dtype=dtype)
+                array = numa_zeros(shape, dtype=dtype, num_threads=num_threads)
                 large_fixed_arrays.append(array)
                 large_fixed_file_offsets.append(file_offset)
             else:
@@ -10041,16 +10041,13 @@ class SingleCell:
 
         # Preallocate
         total_num_cells = X.shape[0]
-        if num_threads == 1:
-            singlets = np.zeros(total_num_cells, dtype=bool)
-        else:
-            singlets = numa_zeros(total_num_cells, dtype=bool)
+        singlets = numa_zeros(total_num_cells, dtype=bool,
+                              num_threads=num_threads)
         if not return_scores:
             doublet_scores = np.array([], dtype=np.float32)
-        elif num_threads == 1:
-            doublet_scores = np.empty(total_num_cells, dtype=np.float32)
         else:
-            doublet_scores = numa_zeros(total_num_cells, dtype=np.float32)
+            doublet_scores = numa_zeros(total_num_cells, dtype=np.float32,
+                                        num_threads=num_threads)
         max_cells = batches.list.len().max() \
             if batch_column is not None else total_num_cells
         if doublet_fraction is not None:
@@ -11678,10 +11675,8 @@ class SingleCell:
             normalize = normalize_csc
             sparse_array = csc_array
         num_cells = X.shape[0]
-        if num_threads == 1:
-            row_sums = np.empty(num_cells, dtype=np.uint64)
-        else:
-            row_sums = numa_zeros(num_cells, dtype=np.uint64)
+        row_sums = numa_zeros(num_cells, dtype=np.uint64,
+                              num_threads=num_threads)
         if inplace:
             normalize(data=X.data, indices=X.indices, indptr=X.indptr,
                       QC_column=QC_column.to_numpy()
@@ -11693,10 +11688,8 @@ class SingleCell:
             self._uns['normalized'] = True
             return self
         else:
-            if num_threads == 1:
-                normalized_data = np.empty(len(X.data), dtype=np.float32)
-            else:
-                normalized_data = numa_zeros(len(X.data), dtype=np.float32)
+            normalized_data = numa_zeros(len(X.data), dtype=np.float32,
+                                         num_threads=num_threads)
             original_num_threads = X._num_threads
             normalize(data=X.data, indices=X.indices, indptr=X.indptr,
                       QC_column=QC_column.to_numpy()
@@ -12161,10 +12154,8 @@ class SingleCell:
                 indptr_matvec = X_csr.indptr
 
         # Run PCA with irlba
-        if num_threads == 1:
-            PCs = np.empty((num_cells, num_PCs), dtype=np.float32)
-        else:
-            PCs = numa_zeros((num_cells, num_PCs), dtype=np.float32)
+        PCs = numa_zeros((num_cells, num_PCs), dtype=np.float32,
+                         num_threads=num_threads)
         original_num_threads = X._num_threads
         X._num_threads = num_threads
         try:
@@ -12606,14 +12597,12 @@ class SingleCell:
         # iterations; if so, swap them at the end. `kmeans()` populates
         # `cell_norms` (||X||²) for reuse during the nearest-neighbor search.
         num_dimensions = PCs.shape[1]
-        if num_threads == 1:
-            cluster_labels = np.empty(num_cells, dtype=np.uint32)
-            min_distances = np.empty(num_cells, dtype=np.float32)
-            cell_norms = np.empty(num_cells, dtype=np.float32)
-        else:
-            cluster_labels = numa_zeros(num_cells, dtype=np.uint32)
-            min_distances = numa_zeros(num_cells, dtype=np.float32)
-            cell_norms = numa_zeros(num_cells, dtype=np.float32)
+        cluster_labels = numa_zeros(num_cells, dtype=np.uint32,
+                                    num_threads=num_threads)
+        min_distances = numa_zeros(num_cells, dtype=np.float32,
+                                   num_threads=num_threads)
+        cell_norms = numa_zeros(num_cells, dtype=np.float32,
+                                num_threads=num_threads)
         centroids = np.empty((num_clusters, num_dimensions), dtype=np.float32)
         centroids_new = np.empty((num_clusters, num_dimensions),
                                  dtype=np.float32)
@@ -12685,21 +12674,15 @@ class SingleCell:
         # Find the `num_neighbors` nearest neighbors of each cell, according to
         # `PCs`. Allocate the heap arrays, plus the centroid-distance and
         # nearest-cluster scratch buffers, NUMA-awarely.
-        if num_threads == 1:
-            neighbors = np.empty((num_cells, num_neighbors), dtype=np.uint32)
-            distances = np.empty((num_cells, num_neighbors), dtype=np.float32)
-            centroid_distances = np.empty((num_cells, num_clusters_searched),
-                                          dtype=np.float32)
-            nearest_clusters = np.empty((num_cells, num_clusters_searched),
-                                        dtype=np.uint32)
-        else:
-            neighbors = numa_zeros((num_cells, num_neighbors), dtype=np.uint32)
-            distances = numa_zeros((num_cells, num_neighbors),
-                                   dtype=np.float32)
-            centroid_distances = numa_zeros(
-                (num_cells, num_clusters_searched), dtype=np.float32)
-            nearest_clusters = numa_zeros(
-                (num_cells, num_clusters_searched), dtype=np.uint32)
+        neighbors = numa_zeros((num_cells, num_neighbors), dtype=np.uint32,
+                               num_threads=num_threads)
+        distances = numa_zeros((num_cells, num_neighbors), dtype=np.float32,
+                               num_threads=num_threads)
+        centroid_distances = numa_zeros((num_cells, num_clusters_searched),
+                                        dtype=np.float32,
+                                        num_threads=num_threads)
+        nearest_clusters = numa_zeros((num_cells, num_clusters_searched),
+                                      dtype=np.uint32, num_threads=num_threads)
         with threadpool_limits(
                 1, user_api=None if num_threads == 1 else 'blas'):
             knn_self(X=PCs, sorted_order=sorted_order, centroids=centroids,
@@ -13870,14 +13853,12 @@ class SingleCell:
 
         # Get `Z`, the row-normalized PCs; allocate temporary buffers
         # `cluster_labels` and `min_distances`, used in k-means
-        if num_threads == 1:
-            Z = np.empty((num_cells, num_PCs), dtype=np.float32)
-            cluster_labels = np.empty(num_cells, dtype=np.uint32)
-            min_distances = np.empty(num_cells, dtype=np.float32)
-        else:
-            Z = numa_zeros((num_cells, num_PCs), dtype=np.float32)
-            cluster_labels = numa_zeros(num_cells, dtype=np.uint32)
-            min_distances = numa_zeros(num_cells, dtype=np.float32)
+        Z = numa_zeros((num_cells, num_PCs), dtype=np.float32,
+                       num_threads=num_threads)
+        cluster_labels = numa_zeros(num_cells, dtype=np.uint32,
+                                    num_threads=num_threads)
+        min_distances = numa_zeros(num_cells, dtype=np.float32,
+                                   num_threads=num_threads)
         is_mac = sys.platform == 'darwin'
         normalize_rows(arr=PCs, out=Z, num_threads=num_threads, is_mac=is_mac)
 
@@ -13907,10 +13888,8 @@ class SingleCell:
         Y = Y[:num_clusters]
 
         # Run Harmony
-        if num_threads == 1:
-            R = np.empty((num_cells, num_clusters), dtype=np.float32)
-        else:
-            R = numa_zeros((num_cells, num_clusters), dtype=np.float32)
+        R = numa_zeros((num_cells, num_clusters), dtype=np.float32,
+                       num_threads=num_threads)
         num_threads = min(num_threads, num_cells)
         with threadpool_limits(
                 1, user_api=None if num_threads == 1 else 'blas'):
@@ -14518,14 +14497,12 @@ class SingleCell:
         # `centroids` and `centroids_new` are swapped every iteration,
         # `centroids_new` will contain the final centroids when doing an odd
         # number of k-means iterations; if so, swap them at the end.
-        if num_threads == 1:
-            cluster_labels = np.empty(num_other, dtype=np.uint32)
-            min_distances = np.empty(num_other, dtype=np.float32)
-            cell_norms = np.empty(num_other, dtype=np.float32)
-        else:
-            cluster_labels = numa_zeros(num_other, dtype=np.uint32)
-            min_distances = numa_zeros(num_other, dtype=np.float32)
-            cell_norms = numa_zeros(num_other, dtype=np.float32)
+        cluster_labels = numa_zeros(num_other, dtype=np.uint32,
+                                    num_threads=num_threads)
+        min_distances = numa_zeros(num_other, dtype=np.float32,
+                                   num_threads=num_threads)
+        cell_norms = numa_zeros(num_other, dtype=np.float32,
+                                num_threads=num_threads)
         centroids = np.empty((num_clusters, num_dimensions), dtype=np.float32)
         centroids_new = np.empty((num_clusters, num_dimensions),
                                  dtype=np.float32)
@@ -14603,23 +14580,17 @@ class SingleCell:
         # Find the `num_neighbors` nearest neighbors in `other` of each cell in
         # `self`, according to `self_Harmony_embeddings` and
         # `other_Harmony_embeddings`.
-        if num_threads == 1:
-            neighbors = np.empty((num_self, num_neighbors), dtype=np.uint32)
-            distances = np.empty((num_self, num_neighbors), dtype=np.float32)
-            centroid_distances = np.empty((num_self, num_clusters_searched),
-                                          dtype=np.float32)
-            nearest_clusters = np.empty((num_self, num_clusters_searched),
-                                        dtype=np.uint32)
-            query_norms = np.empty(num_self, dtype=np.float32)
-        else:
-            neighbors = numa_zeros((num_self, num_neighbors), dtype=np.uint32)
-            distances = numa_zeros((num_self, num_neighbors),
-                                   dtype=np.float32)
-            centroid_distances = numa_zeros((num_self, num_clusters_searched),
-                                            dtype=np.float32)
-            nearest_clusters = numa_zeros((num_self, num_clusters_searched),
-                                          dtype=np.uint32)
-            query_norms = numa_zeros(num_self, dtype=np.float32)
+        neighbors = numa_zeros((num_self, num_neighbors), dtype=np.uint32,
+                               num_threads=num_threads)
+        distances = numa_zeros((num_self, num_neighbors), dtype=np.float32,
+                               num_threads=num_threads)
+        centroid_distances = numa_zeros((num_self, num_clusters_searched),
+                                        dtype=np.float32,
+                                        num_threads=num_threads)
+        nearest_clusters = numa_zeros((num_self, num_clusters_searched),
+                                      dtype=np.uint32, num_threads=num_threads)
+        query_norms = numa_zeros(num_self, dtype=np.float32,
+                                 num_threads=num_threads)
         with threadpool_limits(
                 1, user_api=None if num_threads == 1 else 'blas'):
             knn_cross(Y=self_Harmony_embeddings, X=other_Harmony_embeddings,
@@ -14642,21 +14613,18 @@ class SingleCell:
         # common cell type. Also get the cell-type confidence of each cell's
         # type(s), i.e. the frequency of the cell type among the cell's
         # `num_neighbors` nearest neighbors.
-        if num_threads == 1:
-            cell_types = np.empty(num_self, dtype=np.uint32)
-            confidences = np.empty(num_self, dtype=np.float32)
-        else:
-            cell_types = numa_zeros(num_self, dtype=np.uint32)
-            confidences = numa_zeros(num_self, dtype=np.float32)
+        cell_types = numa_zeros(num_self, dtype=np.uint32,
+                                num_threads=num_threads)
+        confidences = numa_zeros(num_self, dtype=np.float32,
+                                 num_threads=num_threads)
         if not next_best:
             next_best_cell_types = np.array([], dtype=np.uint32)
             next_best_confidences = np.array([], dtype=np.float32)
-        elif num_threads == 1:
-            next_best_cell_types = np.empty(num_self, dtype=np.uint32)
-            next_best_confidences = np.empty(num_self, dtype=np.float32)
         else:
-            next_best_cell_types = numa_zeros(num_self, dtype=np.uint32)
-            next_best_confidences = numa_zeros(num_self, dtype=np.float32)
+            next_best_cell_types = numa_zeros(num_self, dtype=np.uint32,
+                                              num_threads=num_threads)
+            next_best_confidences = numa_zeros(num_self, dtype=np.float32,
+                                               num_threads=num_threads)
         label_transfer(neighbors=neighbors,
                        original_cell_type_column=original_cell_type_column,
                        num_cell_types=len(most_common_cell_types),
@@ -17133,56 +17101,45 @@ class SingleCell:
             raise ValueError(error_message)
 
         # Run PaCMAP
-        if num_threads == 1:
-            embedding = np.empty((num_cells, 2), dtype=np.float32)
-            momentum = np.empty((num_cells, 2), dtype=np.float32)
-            velocity = np.empty((num_cells, 2), dtype=np.float32)
-            gradients = np.empty((num_cells, 2), dtype=np.float32)
-            average_distances = np.empty(num_cells, dtype=np.float32)
-            neighbor_pairs = np.empty((num_cells, num_neighbors),
-                                      dtype=np.uint32)
-            mid_near_pairs = np.empty((num_cells, num_mid_near_pairs),
-                                      dtype=np.uint32)
-            further_pairs = np.empty((num_cells, num_further_pairs),
-                                      dtype=np.uint32)
-            if match_parallel:
-                neighbor_pair_indices = \
-                    np.empty(2 * num_cells * num_neighbors, dtype=np.uint32)
-                neighbor_pair_indptr = np.empty(num_cells + 1, dtype=np.uint32)
-                mid_near_pair_indices = np.empty(
-                    2 * num_cells * num_mid_near_pairs, dtype=np.uint32)
-                mid_near_pair_indptr = np.empty(num_cells + 1, dtype=np.uint32)
-                further_pair_indices = np.empty(
-                    2 * num_cells * num_further_pairs, dtype=np.uint32)
-                further_pair_indptr = np.empty(num_cells + 1, dtype=np.uint32)
-            else:
-                neighbor_pair_indices = np.array([], dtype=np.uint32)
-                neighbor_pair_indptr = np.array([], dtype=np.uint32)
-                mid_near_pair_indices = np.array([], dtype=np.uint32)
-                mid_near_pair_indptr = np.array([], dtype=np.uint32)
-                further_pair_indices = np.array([], dtype=np.uint32)
-                further_pair_indptr = np.array([], dtype=np.uint32)
-        else:
-            embedding = numa_zeros((num_cells, 2), dtype=np.float32)
-            momentum = numa_zeros((num_cells, 2), dtype=np.float32)
-            velocity = numa_zeros((num_cells, 2), dtype=np.float32)
-            gradients = numa_zeros((num_cells, 2), dtype=np.float32)
-            average_distances = numa_zeros(num_cells, dtype=np.float32)
-            neighbor_pairs = numa_zeros((num_cells, num_neighbors),
-                                        dtype=np.uint32)
-            mid_near_pairs = numa_zeros((num_cells, num_mid_near_pairs),
-                                        dtype=np.uint32)
-            further_pairs = numa_zeros((num_cells, num_further_pairs),
-                                       dtype=np.uint32)
+        embedding = numa_zeros((num_cells, 2), dtype=np.float32,
+                               num_threads=num_threads)
+        momentum = numa_zeros((num_cells, 2), dtype=np.float32,
+                              num_threads=num_threads)
+        velocity = numa_zeros((num_cells, 2), dtype=np.float32,
+                              num_threads=num_threads)
+        gradients = numa_zeros((num_cells, 2), dtype=np.float32,
+                               num_threads=num_threads)
+        average_distances = numa_zeros(num_cells, dtype=np.float32,
+                                       num_threads=num_threads)
+        neighbor_pairs = numa_zeros((num_cells, num_neighbors),
+                                    dtype=np.uint32, num_threads=num_threads)
+        mid_near_pairs = numa_zeros((num_cells, num_mid_near_pairs),
+                                    dtype=np.uint32, num_threads=num_threads)
+        further_pairs = numa_zeros((num_cells, num_further_pairs),
+                                   dtype=np.uint32, num_threads=num_threads)
+        if num_threads > 1 or match_parallel:
             neighbor_pair_indices = \
-                numa_zeros(2 * num_cells * num_neighbors, dtype=np.uint32)
-            neighbor_pair_indptr = numa_zeros(num_cells + 1, dtype=np.uint32)
-            mid_near_pair_indices = numa_zeros(
-                2 * num_cells * num_mid_near_pairs, dtype=np.uint32)
-            mid_near_pair_indptr = numa_zeros(num_cells + 1, dtype=np.uint32)
-            further_pair_indices = numa_zeros(
-                2 * num_cells * num_further_pairs, dtype=np.uint32)
-            further_pair_indptr = numa_zeros(num_cells + 1, dtype=np.uint32)
+                numa_zeros(2 * num_cells * num_neighbors, dtype=np.uint32,
+                           num_threads=num_threads)
+            neighbor_pair_indptr = numa_zeros(num_cells + 1, dtype=np.uint32,
+                                              num_threads=num_threads)
+            mid_near_pair_indices = \
+                numa_zeros(2 * num_cells * num_mid_near_pairs, dtype=np.uint32,
+                           num_threads=num_threads)
+            mid_near_pair_indptr = numa_zeros(num_cells + 1, dtype=np.uint32,
+                                              num_threads=num_threads)
+            further_pair_indices = \
+                numa_zeros(2 * num_cells * num_further_pairs, dtype=np.uint32,
+                           num_threads=num_threads)
+            further_pair_indptr = numa_zeros(num_cells + 1, dtype=np.uint32,
+                                             num_threads=num_threads)
+        else:
+            neighbor_pair_indices = np.array([], dtype=np.uint32)
+            neighbor_pair_indptr = np.array([], dtype=np.uint32)
+            mid_near_pair_indices = np.array([], dtype=np.uint32)
+            mid_near_pair_indptr = np.array([], dtype=np.uint32)
+            further_pair_indices = np.array([], dtype=np.uint32)
+            further_pair_indptr = np.array([], dtype=np.uint32)
         pacmap(PCs, embedding, momentum, velocity, gradients,
                average_distances, neighbor_pairs, mid_near_pairs,
                further_pairs, neighbor_pair_indices, neighbor_pair_indptr,
@@ -17602,56 +17559,45 @@ class SingleCell:
             raise ValueError(error_message)
 
         # Run LocalMAP
-        if num_threads == 1:
-            embedding = np.empty((num_cells, 2), dtype=np.float32)
-            momentum = np.empty((num_cells, 2), dtype=np.float32)
-            velocity = np.empty((num_cells, 2), dtype=np.float32)
-            gradients = np.empty((num_cells, 2), dtype=np.float32)
-            average_distances = np.empty(num_cells, dtype=np.float32)
-            neighbor_pairs = np.empty((num_cells, num_neighbors),
-                                      dtype=np.uint32)
-            mid_near_pairs = np.empty((num_cells, num_mid_near_pairs),
-                                      dtype=np.uint32)
-            further_pairs = np.empty((num_cells, num_further_pairs),
-                                      dtype=np.uint32)
-            if match_parallel:
-                neighbor_pair_indices = \
-                    np.empty(2 * num_cells * num_neighbors, dtype=np.uint32)
-                neighbor_pair_indptr = np.empty(num_cells + 1, dtype=np.uint32)
-                mid_near_pair_indices = np.empty(
-                    2 * num_cells * num_mid_near_pairs, dtype=np.uint32)
-                mid_near_pair_indptr = np.empty(num_cells + 1, dtype=np.uint32)
-                further_pair_indices = np.empty(
-                    2 * num_cells * num_further_pairs, dtype=np.uint32)
-                further_pair_indptr = np.empty(num_cells + 1, dtype=np.uint32)
-            else:
-                neighbor_pair_indices = np.array([], dtype=np.uint32)
-                neighbor_pair_indptr = np.array([], dtype=np.uint32)
-                mid_near_pair_indices = np.array([], dtype=np.uint32)
-                mid_near_pair_indptr = np.array([], dtype=np.uint32)
-                further_pair_indices = np.array([], dtype=np.uint32)
-                further_pair_indptr = np.array([], dtype=np.uint32)
-        else:
-            embedding = numa_zeros((num_cells, 2), dtype=np.float32)
-            momentum = numa_zeros((num_cells, 2), dtype=np.float32)
-            velocity = numa_zeros((num_cells, 2), dtype=np.float32)
-            gradients = numa_zeros((num_cells, 2), dtype=np.float32)
-            average_distances = numa_zeros(num_cells, dtype=np.float32)
-            neighbor_pairs = numa_zeros((num_cells, num_neighbors),
-                                        dtype=np.uint32)
-            mid_near_pairs = numa_zeros((num_cells, num_mid_near_pairs),
-                                        dtype=np.uint32)
-            further_pairs = numa_zeros((num_cells, num_further_pairs),
-                                       dtype=np.uint32)
+        embedding = numa_zeros((num_cells, 2), dtype=np.float32,
+                               num_threads=num_threads)
+        momentum = numa_zeros((num_cells, 2), dtype=np.float32,
+                              num_threads=num_threads)
+        velocity = numa_zeros((num_cells, 2), dtype=np.float32,
+                              num_threads=num_threads)
+        gradients = numa_zeros((num_cells, 2), dtype=np.float32,
+                               num_threads=num_threads)
+        average_distances = numa_zeros(num_cells, dtype=np.float32,
+                                       num_threads=num_threads)
+        neighbor_pairs = numa_zeros((num_cells, num_neighbors),
+                                    dtype=np.uint32, num_threads=num_threads)
+        mid_near_pairs = numa_zeros((num_cells, num_mid_near_pairs),
+                                    dtype=np.uint32, num_threads=num_threads)
+        further_pairs = numa_zeros((num_cells, num_further_pairs),
+                                   dtype=np.uint32, num_threads=num_threads)
+        if num_threads > 1 or match_parallel:
             neighbor_pair_indices = \
-                numa_zeros(2 * num_cells * num_neighbors, dtype=np.uint32)
-            neighbor_pair_indptr = numa_zeros(num_cells + 1, dtype=np.uint32)
-            mid_near_pair_indices = numa_zeros(
-                2 * num_cells * num_mid_near_pairs, dtype=np.uint32)
-            mid_near_pair_indptr = numa_zeros(num_cells + 1, dtype=np.uint32)
-            further_pair_indices = numa_zeros(
-                2 * num_cells * num_further_pairs, dtype=np.uint32)
-            further_pair_indptr = numa_zeros(num_cells + 1, dtype=np.uint32)
+                numa_zeros(2 * num_cells * num_neighbors, dtype=np.uint32,
+                           num_threads=num_threads)
+            neighbor_pair_indptr = numa_zeros(num_cells + 1, dtype=np.uint32,
+                                              num_threads=num_threads)
+            mid_near_pair_indices = \
+                numa_zeros(2 * num_cells * num_mid_near_pairs, dtype=np.uint32,
+                           num_threads=num_threads)
+            mid_near_pair_indptr = numa_zeros(num_cells + 1, dtype=np.uint32,
+                                              num_threads=num_threads)
+            further_pair_indices = \
+                numa_zeros(2 * num_cells * num_further_pairs, dtype=np.uint32,
+                           num_threads=num_threads)
+            further_pair_indptr = numa_zeros(num_cells + 1, dtype=np.uint32,
+                                             num_threads=num_threads)
+        else:
+            neighbor_pair_indices = np.array([], dtype=np.uint32)
+            neighbor_pair_indptr = np.array([], dtype=np.uint32)
+            mid_near_pair_indices = np.array([], dtype=np.uint32)
+            mid_near_pair_indptr = np.array([], dtype=np.uint32)
+            further_pair_indices = np.array([], dtype=np.uint32)
+            further_pair_indptr = np.array([], dtype=np.uint32)
         localmap(PCs, embedding, momentum, velocity, gradients,
                  average_distances, neighbor_pairs, mid_near_pairs,
                  further_pairs, neighbor_pair_indices, neighbor_pair_indptr,
@@ -17965,10 +17911,8 @@ class SingleCell:
 
         def fuzzy_simplicial_set(neighbors, distances, num_threads):
             N, K = neighbors.shape
-            if num_threads == 1:
-                data = np.empty(neighbors.size, dtype=np.float32)
-            else:
-                data = numa_zeros(neighbors.size, dtype=np.float32)
+            data = numa_zeros(neighbors.size, dtype=np.float32,
+                              num_threads=num_threads)
             if N * K <= np.iinfo(np.int32).max:
                 indices = neighbors.ravel().view(np.int32)
                 indptr = np.arange(0, (N + 1) * K, K, dtype=np.int32)

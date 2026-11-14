@@ -263,6 +263,187 @@ cdef extern from * nogil:
         T& emplace_back(...) except +
 
 
+# NUMA-aware allocation of zeroed memory, underlying `numa_zeros()` in
+# utils.py. Large allocations get fresh pages from `mmap()` on Linux, bypassing
+# glibc's malloc arena so that NUMA first-touch placement is guaranteed, with
+# Transparent Huge Pages (THP) requested where they won't cause NUMA skew.
+# Smaller allocations, and all allocations on other platforms, use `calloc()`.
+# Either way, the memory is zero-initialized.
+#
+# `num_threads` is the number of threads that will first touch the memory
+# (i.e. write to it before anything else does), each touching a contiguous
+# chunk. When it is 1, or there is only one NUMA node, the memory cannot be
+# split across NUMA nodes, so it always gets huge pages. Otherwise, it gets
+# huge pages only if each thread's chunk is at least 16 MB: below that, a
+# thread's chunk fits within the TLB's reach even with 4 KB pages, so huge
+# pages provide little benefit, while the huge page straddling each boundary
+# between NUMA nodes is placed entirely on one node, potentially making some
+# threads' entire chunks remote.
+#
+# System information is read once (per extension module, since each module
+# compiles its own copy of this code) on the first allocation.
+
+cdef extern from * nogil:
+    """
+    #include <cstdio>
+    #include <cstdlib>
+    #include <cstring>
+    #include <new>
+    #ifdef __linux__
+    #include <sched.h>
+    #include <sys/mman.h>
+    #endif
+
+    // Allocations of at least this many bytes use `mmap()` on Linux
+    constexpr size_t NUMA_MMAP_MIN_BYTES = 1ULL << 20;
+
+    // Memory first touched by multiple threads on a multi-NUMA-node system
+    // only gets huge pages if each thread's chunk is at least this large
+    constexpr size_t NUMA_MIN_HUGE_PAGE_BYTES_PER_THREAD = 16ULL << 20;
+
+    #ifdef __linux__
+    struct numa_system_info {
+        size_t huge_page_size = 2ULL << 20;  // fallback if sysfs is unreadable
+        bool advise_hugepage = false;
+        unsigned num_numa_nodes = 1;
+    };
+
+    // Read a sysfs file (at most `size - 1` bytes) into `buffer`; return
+    // false if the file can't be read
+    inline bool numa_read_file(const char* path, char* buffer, size_t size) {
+        FILE* file = std::fopen(path, "r");
+        if (!file) return false;
+        size_t length = std::fread(buffer, 1, size - 1, file);
+        std::fclose(file);
+        buffer[length] = '\\0';
+        return length > 0;
+    }
+
+    // Call `f(i)` for each number in a sysfs list like "0-47,96-143"
+    template<class F>
+    inline void numa_for_each_in_list(const char* list, F f) {
+        char* end;
+        for (;;) {
+            long first = std::strtol(list, &end, 10);
+            if (end == list) return;
+            long last = *end == '-' ? std::strtol(end + 1, &end, 10) : first;
+            for (long i = first; i <= last; i++) f(i);
+            if (*end != ',') return;
+            list = end + 1;
+        }
+    }
+
+    inline numa_system_info numa_read_system_info() {
+        numa_system_info info;
+        char buffer[4096];
+
+        // Huge page size: 2 MB on x86, but e.g. 512 MB on ARM with 64 KB
+        // base pages
+        if (numa_read_file(
+                "/sys/kernel/mm/transparent_hugepage/hpage_pmd_size",
+                buffer, sizeof(buffer))) {
+            unsigned long long size = std::strtoull(buffer, nullptr, 10);
+            if (size > 0) info.huge_page_size = size;
+        }
+
+        // Request huge pages only when THP is in "madvise" mode (in "always"
+        // mode the kernel uses them anyway, and in "never" mode it never
+        // does), and only when the kernel won't compact memory synchronously
+        // to satisfy the request (~10x slowdowns on fragmented nodes). The
+        // selected option in each file is in brackets, e.g. "[madvise]".
+        info.advise_hugepage =
+            numa_read_file("/sys/kernel/mm/transparent_hugepage/enabled",
+                           buffer, sizeof(buffer)) &&
+            std::strstr(buffer, "[madvise]") &&
+            numa_read_file("/sys/kernel/mm/transparent_hugepage/defrag",
+                           buffer, sizeof(buffer)) &&
+            (std::strstr(buffer, "[defer]") || std::strstr(buffer, "[never]"));
+
+        // Count the NUMA nodes containing at least one CPU this process may
+        // run on, which excludes memory-only nodes (e.g. HBM or CXL memory)
+        // and nodes outside the process's cpuset (e.g. under Slurm)
+        cpu_set_t cpus;
+        char cpu_list[4096];
+        if (sched_getaffinity(0, sizeof(cpus), &cpus) == 0 &&
+                numa_read_file("/sys/devices/system/node/has_cpu", buffer,
+                               sizeof(buffer))) {
+            unsigned num_nodes = 0;
+            numa_for_each_in_list(buffer, [&](long node) {
+                char path[64];
+                std::snprintf(path, sizeof(path),
+                              "/sys/devices/system/node/node%ld/cpulist",
+                              node);
+                bool usable = false;
+                if (numa_read_file(path, cpu_list, sizeof(cpu_list)))
+                    numa_for_each_in_list(cpu_list, [&](long cpu) {
+                        usable |= cpu < CPU_SETSIZE && CPU_ISSET(cpu, &cpus);
+                    });
+                num_nodes += usable;
+            });
+            if (num_nodes > 0) info.num_numa_nodes = num_nodes;
+        }
+        return info;
+    }
+
+    inline const numa_system_info& numa_get_system_info() {
+        static const numa_system_info info = numa_read_system_info();
+        return info;
+    }
+
+    // Round the length of large mappings up to a multiple of the huge page
+    // size, so that recent kernels (6.7+) align them to huge page boundaries.
+    // Don't round up mappings smaller than one huge page: they can't contain
+    // a huge page anyway, and rounding them up could let a single write
+    // commit an entire huge page (e.g. 512 MB with 64 KB base pages).
+    inline size_t numa_mapping_length(size_t num_bytes) {
+        size_t huge_page_size = numa_get_system_info().huge_page_size;
+        if (num_bytes < huge_page_size) return num_bytes;
+        return (num_bytes + huge_page_size - 1) / huge_page_size *
+            huge_page_size;
+    }
+    #endif
+
+    inline void* numa_allocate(size_t num_bytes, unsigned num_threads) {
+    #ifdef __linux__
+        if (num_bytes >= NUMA_MMAP_MIN_BYTES) {
+            const numa_system_info& info = numa_get_system_info();
+            size_t length = numa_mapping_length(num_bytes);
+            void* pointer = mmap(nullptr, length, PROT_READ | PROT_WRITE,
+                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (pointer == MAP_FAILED) throw std::bad_alloc();
+            if (num_bytes >= info.huge_page_size) {
+                bool huge = info.num_numa_nodes == 1 || num_threads <= 1 ||
+                    num_bytes / num_threads >=
+                        NUMA_MIN_HUGE_PAGE_BYTES_PER_THREAD;
+                if (!huge)
+                    madvise(pointer, length, MADV_NOHUGEPAGE);
+                else if (info.advise_hugepage)
+                    madvise(pointer, length, MADV_HUGEPAGE);
+            }
+            return pointer;
+        }
+    #endif
+        (void) num_threads;
+        void* pointer = std::calloc(num_bytes > 0 ? num_bytes : 1, 1);
+        if (!pointer) throw std::bad_alloc();
+        return pointer;
+    }
+
+    inline void numa_free(void* pointer, size_t num_bytes) noexcept {
+    #ifdef __linux__
+        if (num_bytes >= NUMA_MMAP_MIN_BYTES) {
+            munmap(pointer, numa_mapping_length(num_bytes));
+            return;
+        }
+    #endif
+        (void) num_bytes;
+        std::free(pointer);
+    }
+    """
+    void* numa_allocate(size_t num_bytes, unsigned num_threads) except +
+    void numa_free(void* pointer, size_t num_bytes) noexcept
+
+
 cdef inline (unsigned, unsigned) get_thread_offset(
         const signed_integer[::1] indptr,
         const unsigned thread_index,

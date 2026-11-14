@@ -4,6 +4,7 @@ import numpy as np
 import threading
 cimport numpy as np
 np.import_array()
+from cpython.buffer cimport PyBuffer_FillInfo
 from cpython.exc cimport PyErr_CheckSignals
 from cython.parallel cimport parallel, prange, threadid
 from libc.string cimport memcpy
@@ -11,8 +12,29 @@ from libcpp.algorithm cimport sort
 from libcpp.vector cimport vector
 from signal import set_wakeup_fd
 from socket import socketpair
-from .cyutils cimport atomic_or, bit_width, integer, numeric, recv, \
-    signed_integer, uninitialized_vector
+from .cyutils cimport atomic_or, bit_width, integer, numa_allocate, \
+    numa_free, numeric, recv, signed_integer, uninitialized_vector
+
+
+cdef class NumaBuffer:
+    """
+    Zeroed memory from `numa_allocate()`, exposed via the buffer protocol so
+    `numa_zeros()` in utils.py can wrap it in a NumPy array without copying.
+    The memory is freed when the last array referencing it is deleted.
+    """
+    cdef void* pointer
+    cdef size_t num_bytes
+
+    def __cinit__(self, const size_t num_bytes, const unsigned num_threads):
+        self.pointer = numa_allocate(num_bytes, num_threads)
+        self.num_bytes = num_bytes
+
+    def __dealloc__(self):
+        if self.pointer != NULL:
+            numa_free(self.pointer, self.num_bytes)
+
+    def __getbuffer__(self, Py_buffer* buffer, int flags):
+        PyBuffer_FillInfo(buffer, self, self.pointer, self.num_bytes, 0, flags)
 
 
 def bin_count(const integer[::1] arr,

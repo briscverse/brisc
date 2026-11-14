@@ -2,10 +2,8 @@ from __future__ import annotations
 
 # Python utility functions
 
-import ctypes
 import h5py
 import importlib
-import mmap
 import numpy as np
 import os
 import platform
@@ -16,7 +14,6 @@ import sys
 import warnings
 from collections.abc import Iterable
 from functools import reduce
-from pathlib import Path
 from typing import Any, Literal, NamedTuple, Sequence, Union
 from .type_aliases import Color
 
@@ -62,7 +59,7 @@ import_cython({'cyutils': (
     'concatenate_indptrs_int64', 'csr_hstack',
     'get_count_at_least_threshold_csr', 'getnnz_csr',
     'getnnz_at_least_threshold_csr', 'greater_than_or_equal',
-    'parallel_subset_1d_cython', 'parallel_subset_2d_cython',
+    'NumaBuffer', 'parallel_subset_1d_cython', 'parallel_subset_2d_cython',
     'weighted_bin_count')})
 
 
@@ -711,10 +708,8 @@ def getnnz(sparse_matrix: 'csr_array' | 'csc_array',
         # `output = np.diff(sparse_matrix.indptr)`
         indptr = sparse_matrix.indptr
         if output is None:
-            if num_threads == 1:
-                output = np.empty(len(indptr) - 1, dtype=np.uint32)
-            else:
-                output = numa_zeros(len(indptr) - 1, dtype=np.uint32)
+            output = numa_zeros(len(indptr) - 1, dtype=np.uint32,
+                                num_threads=num_threads)
         getnnz_csr(indptr=indptr, output=output, num_threads=num_threads)
         return output
     else:
@@ -836,93 +831,34 @@ def ix_symmetric(indexer: np.ndarray) -> \
     return indexer[:, None], indexer[None]
 
 
-# Count NUMA nodes by looking at which node directories exist.
-# /sys/devices/system/node/node0, node1, ... are present for each NUMA node.
-if sys.platform == 'linux':
-    _num_NUMA_nodes = \
-        max(1, len(tuple(Path('/sys/devices/system/node').glob('node[0-9]*'))))
-    libc = ctypes.CDLL('libc.so.6', use_errno=True)
-
-    # Request huge pages only when the kernel won't compact memory
-    # synchronously to satisfy the request (~10x slowdowns on fragmented
-    # nodes); with enabled=always it uses free huge pages anyway.
-    def _thp_setting(name):
-        try:
-            match = re.search(r'\[([\w+]+)\]', Path(
-                '/sys/kernel/mm/transparent_hugepage', name).read_text())
-            return match.group(1) if match else None
-        except OSError:
-            return None
-    _advise_hugepage = _thp_setting('enabled') == 'madvise' and \
-        _thp_setting('defrag') in ('defer', 'never')
-
-
 def numa_zeros(shape: int | np.integer | tuple[int | np.integer, ...],
-               dtype: np.typing.DTypeLike = np.float64) -> np.ndarray:
+               dtype: np.typing.DTypeLike = np.float64,
+               *,
+               num_threads: int | np.integer) -> np.ndarray:
     """
-    Drop-in replacement for np.zeros() that guarantees fresh, unmapped virtual
-    memory via mmap on Linux. Bypasses glibc's malloc arena to ensure strict
-    NUMA first-touch placement.
+    Drop-in replacement for `np.zeros()` that allocates memory in a NUMA-aware
+    way, via `numa_allocate()` in cyutils.pxd.
 
-    Automatically disables Transparent Huge Pages (THP) for small arrays where
-    it would cause false sharing at NUMA node boundaries, and enables it for
-    large arrays.
+    On Linux, arrays of at least 1 MB get fresh, unmapped virtual memory via
+    `mmap()`, bypassing glibc's malloc arena to guarantee NUMA first-touch
+    placement. They also get Transparent Huge Pages (THP), unless
+    `num_threads > 1`, there are multiple NUMA nodes, and each thread's chunk
+    is under 16 MB; see cyutils.pxd for the rationale. Smaller arrays, and all
+    arrays on other platforms, are allocated with `calloc()`.
 
     Args:
         shape: the desired shape of the resulting array
         dtype: the desired data-type for the array
+        num_threads: the number of threads that will first touch (write to)
+                     the array, each touching a contiguous chunk
 
     Returns:
-        A NumPy array with the desired shape and data type wrapping fresh,
-        unmapped virtual memory.
+        A zero-initialized NumPy array with the desired shape and data type.
     """
-    if sys.platform != 'linux':
-        return np.zeros(shape, dtype=dtype)
     dtype = np.dtype(dtype)
-    if isinstance(shape, (int, np.integer)):
-        shape = (int(shape),)
-    else:
-        shape = tuple(int(s) for s in shape)
-    nbytes = int(np.prod(shape)) * dtype.itemsize
-    if nbytes == 0:
-        return np.zeros(shape, dtype=dtype)
-    mm = mmap.mmap(-1, nbytes,
-                   flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS,
-                   prot=mmap.PROT_READ | mmap.PROT_WRITE)
-
-    # Transparent Huge Pages (THP) allocate memory in 2 MB chunks. When a
-    # parallel first-touch workload spans multiple NUMA nodes, each 2 MB page
-    # can only be assigned to one node. At the boundaries between nodes'
-    # regions, one node "wins" the entire 2 MB page, misplacing memory that
-    # should belong to the neighboring node.
-    #
-    # There are (# NUMA nodes - 1) such boundaries, so the worst-case misplaced
-    # memory is (# NUMA nodes - 1) * 2 MB. Whether this matters depends on the
-    # per-node chunk size: a misplaced 2 MB page within a 200 MB chunk is
-    # negligible, but within a 4 MB chunk it's catastrophic (half the node's
-    # memory is on the wrong node).
-    #
-    # We disable THP when any single node's chunk is smaller than a fixed
-    # number of huge pages. Below this point, boundary effects dominate and the
-    # NUMA locality loss outweighs the TLB savings. At 16 huge pages (32 MB)
-    # per node, boundary waste is at most 1/16 = 6.25% of a node's memory,
-    # which is a reasonable crossover point: THP's TLB benefit (reducing TLB
-    # misses by 512x for each huge page) is modest at this scale, while a
-    # 6.25%+ bandwidth penalty from remote NUMA access is easily measurable.
-    HUGE_PAGE_SIZE = 2_097_152
-    MIN_HUGE_PAGES_PER_NODE = 16
-    bytes_per_node = nbytes / _num_NUMA_nodes
-    MADV_NOHUGEPAGE = 15
-    MADV_HUGEPAGE = 14
-    addr = ctypes.addressof(ctypes.c_char.from_buffer(mm))
-    if bytes_per_node < MIN_HUGE_PAGES_PER_NODE * HUGE_PAGE_SIZE:
-        libc.madvise(ctypes.c_void_p(addr), ctypes.c_size_t(nbytes),
-                     ctypes.c_int(MADV_NOHUGEPAGE))
-    elif _advise_hugepage:
-        libc.madvise(ctypes.c_void_p(addr), ctypes.c_size_t(nbytes),
-                     ctypes.c_int(MADV_HUGEPAGE))
-
-    return np.frombuffer(mm, dtype=dtype).reshape(shape)
+    num_bytes = int(np.prod(shape)) * dtype.itemsize
+    return np.ndarray(shape, dtype=dtype,
+                      buffer=NumaBuffer(num_bytes, num_threads))
 
 
 def parallel_subset_1d(array: np.ndarray[np.dtype[np.integer | np.floating]],
@@ -944,7 +880,8 @@ def parallel_subset_1d(array: np.ndarray[np.dtype[np.integer | np.floating]],
     Returns:
         `array[indices]`.
     """
-    subset_array = numa_zeros(len(indices), dtype=array.dtype)
+    subset_array = numa_zeros(len(indices), dtype=array.dtype,
+                              num_threads=num_threads)
     parallel_subset_1d_cython(bitview(array), indices, bitview(subset_array),
                               num_threads)
     return subset_array
@@ -970,7 +907,7 @@ def parallel_subset_2d(array: np.ndarray[np.dtype[np.integer | np.floating]],
         `array[indices]`.
     """
     subset_array = numa_zeros((len(indices), array.shape[1]),
-                              dtype=array.dtype)
+                              dtype=array.dtype, num_threads=num_threads)
     parallel_subset_2d_cython(bitview(array), indices, bitview(subset_array),
                               num_threads)
     return subset_array
