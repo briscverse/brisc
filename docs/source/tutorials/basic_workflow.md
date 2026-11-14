@@ -348,9 +348,9 @@ sc.plot_umap('cell_type', 'umap.png')
 :align: center
 :::
 
-UMAP is the slowest of brisc's embeddings, and there are two ways to go faster. To speed up UMAP itself, pass `hogwild=True`, which parallelizes its otherwise single-threaded optimization with [Hogwild!](https://arxiv.org/abs/1106.5730) gradient descent — much faster, but no longer reproducible, with runs varying slightly even at a fixed `seed`.
+UMAP is the slowest of brisc's embeddings. It follows the new initialization and optimizer from umap-learn 0.6, which lay out a coarse version of the nearest-neighbor graph first and then optimize every cell's position in parallel, giving identical results for any number of threads.
 
-Or switch to a faster method: {meth}`~brisc.SingleCell.pacmap` ([PaCMAP](https://arxiv.org/abs/2012.04456)), a relative of UMAP that also captures global structure better, or {meth}`~brisc.SingleCell.localmap` ([LocalMAP](https://arxiv.org/abs/2412.15426)), a newer relative of PaCMAP that further sharpens local cluster separation. Each has its own plotter — {meth}`~brisc.SingleCell.plot_pacmap` and {meth}`~brisc.SingleCell.plot_localmap`.
+To go faster, switch to a faster method: {meth}`~brisc.SingleCell.pacmap` ([PaCMAP](https://arxiv.org/abs/2012.04456)), a relative of UMAP that also captures global structure better, or {meth}`~brisc.SingleCell.localmap` ([LocalMAP](https://arxiv.org/abs/2412.15426)), a newer relative of PaCMAP that further sharpens local cluster separation. Each has its own plotter — {meth}`~brisc.SingleCell.plot_pacmap` and {meth}`~brisc.SingleCell.plot_localmap`.
 
 ## Marker genes
 

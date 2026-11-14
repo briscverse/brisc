@@ -374,9 +374,11 @@ cdef extern from * nogil:
         numa_vector(unsigned num_threads) except +
 
 
-# Hack to allow Cython to parse `unsigned` and `unsigned long long` as
-# template arguments inside an expression, e.g. `numa_vector[unsigned_](...)`
+# Hack to allow Cython to parse `unsigned`, `long long` and
+# `unsigned long long` as template arguments inside an expression, e.g.
+# `numa_vector[unsigned_](...)`
 ctypedef unsigned unsigned_
+ctypedef long long long_long_
 ctypedef unsigned long long unsigned_long_long_
 
 
