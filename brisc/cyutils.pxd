@@ -100,14 +100,14 @@ cdef extern from * nogil:
     #include <sys/mman.h>
     #endif
 
-    // Allocations of at least this many bytes use `mmap()` on Linux
+    #ifdef __linux__
+    // Allocations of at least this many bytes use `mmap()`
     constexpr size_t NUMA_MMAP_MIN_BYTES = 1ULL << 20;
 
     // Memory first touched by multiple threads on a multi-NUMA-node system
     // only gets huge pages if each thread's chunk is at least this large
     constexpr size_t NUMA_MIN_HUGE_PAGE_BYTES_PER_THREAD = 16ULL << 20;
 
-    #ifdef __linux__
     struct numa_system_info {
         size_t huge_page_size = 2ULL << 20;  // fallback if sysfs is unreadable
         bool advise_hugepage = false;
