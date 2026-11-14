@@ -1,8 +1,8 @@
 from cython.parallel cimport parallel, prange, threadid
 from libc.string cimport memcpy
 from libcpp.vector cimport vector
-from .cyutils cimport get_thread_offset, numeric, signed_integer, \
-    uninitialized_vector
+from .cyutils cimport get_thread_offset, numa_vector, numeric, \
+    signed_integer, uninitialized_vector, unsigned_long_long_
 
 
 cdef inline float log1p(const float x) noexcept nogil:
@@ -59,7 +59,6 @@ def normalize_csr(const numeric[::1] data,
                   const signed_integer[::1] indptr,
                   char[::1] QC_column,
                   float[::1] normalized_data,
-                  unsigned long long[::1] row_sums,
                   const unsigned long long num_cells,
                   const unsigned method_number,
                   unsigned num_threads):
@@ -74,9 +73,15 @@ def normalize_csr(const numeric[::1] data,
     cdef unsigned start_row, end_row
     cdef uninitialized_vector[unsigned] thread_nums_QCed_cells
     cdef uninitialized_vector[unsigned long long] thread_total_sums
-    cdef uninitialized_vector[float] new_row_sums
+    cdef numa_vector[unsigned long long] row_sums_buffer
+    cdef numa_vector[float] new_row_sums
+    cdef unsigned long long[::1] row_sums
 
     num_threads = min(num_threads, num_cells)
+    row_sums_buffer = numa_vector[unsigned_long_long_](num_threads)
+    row_sums_buffer.resize(num_cells)
+    if num_cells > 0:
+        row_sums = <unsigned long long[:num_cells]> row_sums_buffer.data()
     if num_threads <= 1:
         if method_number == 0:  # 'logCP10k'
             # Step 1 and 2: since the normalization factor is a constant
@@ -263,6 +268,7 @@ def normalize_csr(const numeric[::1] data,
                 # log1p from being vectorized), and sum `new_row_sums`
                 # single-threaded afterwards to get the same order of
                 # operations as the CSC version.
+                new_row_sums = numa_vector[float](num_threads)
                 new_row_sums.resize(num_cells)
                 with parallel(num_threads=num_threads):
                     thread_index = threadid()
@@ -308,7 +314,6 @@ def normalize_csc(const numeric[::1] data,
                   const signed_integer[::1] indptr,
                   char[::1] QC_column,
                   float[::1] normalized_data,
-                  unsigned long long[::1] row_sums,
                   const unsigned long long num_cells,
                   const unsigned method_number,
                   unsigned num_threads):
@@ -319,13 +324,21 @@ def normalize_csc(const numeric[::1] data,
         num_elements = data.shape[0], total_sum = 0
     cdef float normalization_factor, inverse_size_factor, \
         new_normalization_factor, new_inverse_size_factor, new_total_sum = 0
-    cdef vector[vector[unsigned long long]] thread_row_sums
-    cdef vector[float] new_row_sums
+    cdef numa_vector[unsigned long long] row_sums_buffer
+    cdef vector[numa_vector[unsigned long long]] thread_row_sums
+    cdef numa_vector[float] new_row_sums
+    cdef unsigned long long[::1] row_sums
 
     num_threads = min(num_threads, min(num_cells, num_elements))
+
+    # `row_sums` is filled by a single-threaded scatter (by the last thread,
+    # when multithreaded)
+    row_sums_buffer.resize(num_cells)
+    if num_cells > 0:
+        row_sums = <unsigned long long[:num_cells]> row_sums_buffer.data()
+
     if num_threads <= 1:
         # Step 1a: calculate row sums
-        row_sums[:] = 0
         for j in range(num_elements):
             row_sums[indices[j]] += <unsigned long long> data[j]
 

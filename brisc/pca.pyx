@@ -6,8 +6,8 @@ from libcpp.algorithm cimport fill
 from libcpp.cmath cimport abs, sqrt
 from libcpp.vector cimport vector
 from scipy.linalg.cython_lapack cimport sgesdd
-from .cyutils cimport get_thread_offsets, norm, random_normal, sgemm, sgemv, \
-    signed_integer, srand, uninitialized_vector
+from .cyutils cimport get_thread_offsets, norm, numa_vector, random_normal, \
+    sgemm, sgemv, signed_integer, srand, uninitialized_vector
 
 
 cdef inline void clipped_stddev_csr(const float[::1] data,
@@ -687,10 +687,10 @@ def irlba(const float[::1] data_matvec,
         Smax = <float> 2.4221817809573368e-05  # (float32 eps) ** (2 / 3)
     cdef int lwork
     cdef bint converged = False
-    cdef uninitialized_vector[float] clipped_stddev_buffer, U_buffer, \
-        U_new_buffer, V_buffer, V_new_buffer, B_buffer, Ub_buffer, Sb_buffer, \
-        Vbt_buffer, remainder_buffer, work, block_sums_buffer, \
-        partial_work_buffer
+    cdef uninitialized_vector[float] clipped_stddev_buffer, V_buffer, \
+        V_new_buffer, B_buffer, Ub_buffer, Sb_buffer, Vbt_buffer, \
+        remainder_buffer, work, block_sums_buffer, partial_work_buffer
+    cdef numa_vector[float] U_buffer, U_new_buffer
     cdef uninitialized_vector[int] iwork
     cdef uninitialized_vector[unsigned] matvec_thread_offsets_buffer, \
         rmatvec_thread_offsets_buffer
@@ -708,8 +708,10 @@ def irlba(const float[::1] data_matvec,
     clipped_stddev = <float[:num_genes]> clipped_stddev_buffer.data()
 
     # Allocate `U` and `U_new`: the left singular vectors
+    U_buffer = numa_vector[float](num_threads)
     U_buffer.resize(num_cells * subspace_size)
     U = <float[:num_cells:1, :subspace_size]> U_buffer.data()
+    U_new_buffer = numa_vector[float](num_threads)
     U_new_buffer.resize(num_cells * subspace_size)
     U_new = <float[:num_cells:1, :subspace_size]> U_new_buffer.data()
 

@@ -11675,15 +11675,13 @@ class SingleCell:
             normalize = normalize_csc
             sparse_array = csc_array
         num_cells = X.shape[0]
-        row_sums = numa_zeros(num_cells, dtype=np.uint64,
-                              num_threads=num_threads)
         if inplace:
             normalize(data=X.data, indices=X.indices, indptr=X.indptr,
                       QC_column=QC_column.to_numpy()
                                 if QC_column is not None else
                                 np.array([], dtype=bool),
-                      normalized_data=X.data, row_sums=row_sums,
-                      num_cells=num_cells, method_number=method_number,
+                      normalized_data=X.data, num_cells=num_cells,
+                      method_number=method_number,
                       num_threads=num_threads)
             self._uns['normalized'] = True
             return self
@@ -11695,8 +11693,8 @@ class SingleCell:
                       QC_column=QC_column.to_numpy()
                                 if QC_column is not None else
                                 np.array([], dtype=bool),
-                      normalized_data=normalized_data, row_sums=row_sums,
-                      num_cells=num_cells, method_number=method_number,
+                      normalized_data=normalized_data, num_cells=num_cells,
+                      method_number=method_number,
                       num_threads=num_threads)
             X = sparse_array((normalized_data, X.indices, X.indptr),
                              shape=X.shape)
@@ -12599,8 +12597,6 @@ class SingleCell:
         num_dimensions = PCs.shape[1]
         cluster_labels = numa_zeros(num_cells, dtype=np.uint32,
                                     num_threads=num_threads)
-        min_distances = numa_zeros(num_cells, dtype=np.float32,
-                                   num_threads=num_threads)
         cell_norms = numa_zeros(num_cells, dtype=np.float32,
                                 num_threads=num_threads)
         centroids = np.empty((num_clusters, num_dimensions), dtype=np.float32)
@@ -12614,7 +12610,7 @@ class SingleCell:
                 X=PCs, cluster_labels=cluster_labels, centroids=centroids,
                 centroids_new=centroids_new,
                 num_cells_per_cluster=num_cells_per_cluster,
-                min_distances=min_distances, cell_norms=cell_norms,
+                cell_norms=cell_norms,
                 kmeans_barbar=kmeans_barbar,
                 num_init_iterations=num_init_iterations,
                 num_kmeans_iterations=num_kmeans_iterations,
@@ -12624,7 +12620,7 @@ class SingleCell:
                 num_threads=num_threads)
         if iterations_until_convergence & 1:
             centroids = centroids_new
-        del centroids_new, min_distances
+        del centroids_new
 
         # Remove empty clusters resulting from the final E-step
         non_empty = num_cells_per_cluster > 0
@@ -12672,31 +12668,22 @@ class SingleCell:
                                             num_threads)
 
         # Find the `num_neighbors` nearest neighbors of each cell, according to
-        # `PCs`. Allocate the heap arrays, plus the centroid-distance and
-        # nearest-cluster scratch buffers, NUMA-awarely.
+        # `PCs`. Allocate the heap arrays NUMA-awarely.
         neighbors = numa_zeros((num_cells, num_neighbors), dtype=np.uint32,
                                num_threads=num_threads)
         distances = numa_zeros((num_cells, num_neighbors), dtype=np.float32,
                                num_threads=num_threads)
-        centroid_distances = numa_zeros((num_cells, num_clusters_searched),
-                                        dtype=np.float32,
-                                        num_threads=num_threads)
-        nearest_clusters = numa_zeros((num_cells, num_clusters_searched),
-                                      dtype=np.uint32, num_threads=num_threads)
         with threadpool_limits(
                 1, user_api=None if num_threads == 1 else 'blas'):
             knn_self(X=PCs, sorted_order=sorted_order, centroids=centroids,
                      num_cells_per_cluster=num_cells_per_cluster,
                      neighbors=neighbors, distances=distances,
-                     cell_norms=cell_norms,
-                     centroid_distances=centroid_distances,
-                     nearest_clusters=nearest_clusters,
-                     num_neighbors=num_neighbors,
+                     cell_norms=cell_norms, num_neighbors=num_neighbors,
                      num_clusters_searched=num_clusters_searched,
                      chunk_size_kmeans=chunk_size_kmeans,
                      chunk_size_search=chunk_size_search, is_mac=is_mac,
                      num_threads=num_threads)
-        del centroid_distances, nearest_clusters, cell_norms
+        del cell_norms
 
         # Invert the argsort so that `neighbors` and `distances` are with
         # respect to the original dataset, rather than being sorted by cluster.
@@ -13851,14 +13838,12 @@ class SingleCell:
                 f'({num_cells:,})')
             raise ValueError(error_message)
 
-        # Get `Z`, the row-normalized PCs; allocate temporary buffers
-        # `cluster_labels` and `min_distances`, used in k-means
+        # Get `Z`, the row-normalized PCs; allocate the temporary buffer
+        # `cluster_labels`, used in k-means
         Z = numa_zeros((num_cells, num_PCs), dtype=np.float32,
                        num_threads=num_threads)
         cluster_labels = numa_zeros(num_cells, dtype=np.uint32,
                                     num_threads=num_threads)
-        min_distances = numa_zeros(num_cells, dtype=np.float32,
-                                   num_threads=num_threads)
         is_mac = sys.platform == 'darwin'
         normalize_rows(arr=PCs, out=Z, num_threads=num_threads, is_mac=is_mac)
 
@@ -13873,7 +13858,6 @@ class SingleCell:
                 X=Z, cluster_labels=cluster_labels, centroids=Y,
                 centroids_new=Y_new,
                 num_cells_per_cluster=np.empty(num_clusters, dtype=np.uint32),
-                min_distances=min_distances,
                 cell_norms=np.array([], dtype=np.float32),
                 kmeans_barbar=kmeans_barbar,
                 num_init_iterations=num_init_iterations,
@@ -13884,16 +13868,14 @@ class SingleCell:
                 num_threads=num_threads)
         if iterations_until_convergence & 1:
             Y = Y_new
-        del Y_new, cluster_labels, min_distances
+        del Y_new, cluster_labels
         Y = Y[:num_clusters]
 
         # Run Harmony
-        R = numa_zeros((num_cells, num_clusters), dtype=np.float32,
-                       num_threads=num_threads)
         num_threads = min(num_threads, num_cells)
         with threadpool_limits(
                 1, user_api=None if num_threads == 1 else 'blas'):
-            harmony(PCs=PCs, Z=Z, Y=Y, R=R, batch_labels=batch_labels,
+            harmony(PCs=PCs, Z=Z, Y=Y, batch_labels=batch_labels,
                     num_batches=num_batches, max_iterations=max_iterations,
                     max_clustering_iterations=max_clustering_iterations,
                     block_proportion=block_proportion, tolerance=tolerance,
@@ -14499,8 +14481,6 @@ class SingleCell:
         # number of k-means iterations; if so, swap them at the end.
         cluster_labels = numa_zeros(num_other, dtype=np.uint32,
                                     num_threads=num_threads)
-        min_distances = numa_zeros(num_other, dtype=np.float32,
-                                   num_threads=num_threads)
         cell_norms = numa_zeros(num_other, dtype=np.float32,
                                 num_threads=num_threads)
         centroids = np.empty((num_clusters, num_dimensions), dtype=np.float32)
@@ -14514,7 +14494,7 @@ class SingleCell:
                 X=other_Harmony_embeddings, cluster_labels=cluster_labels,
                 centroids=centroids, centroids_new=centroids_new,
                 num_cells_per_cluster=num_cells_per_cluster,
-                min_distances=min_distances, cell_norms=cell_norms,
+                cell_norms=cell_norms,
                 kmeans_barbar=kmeans_barbar,
                 num_init_iterations=num_init_iterations,
                 num_kmeans_iterations=num_kmeans_iterations,
@@ -14524,7 +14504,7 @@ class SingleCell:
                 num_threads=num_threads)
         if iterations_until_convergence & 1:
             centroids = centroids_new
-        del centroids_new, min_distances
+        del centroids_new
 
         # Remove empty clusters resulting from the final E-step
         non_empty = num_cells_per_cluster > 0
@@ -14584,28 +14564,17 @@ class SingleCell:
                                num_threads=num_threads)
         distances = numa_zeros((num_self, num_neighbors), dtype=np.float32,
                                num_threads=num_threads)
-        centroid_distances = numa_zeros((num_self, num_clusters_searched),
-                                        dtype=np.float32,
-                                        num_threads=num_threads)
-        nearest_clusters = numa_zeros((num_self, num_clusters_searched),
-                                      dtype=np.uint32, num_threads=num_threads)
-        query_norms = numa_zeros(num_self, dtype=np.float32,
-                                 num_threads=num_threads)
         with threadpool_limits(
                 1, user_api=None if num_threads == 1 else 'blas'):
             knn_cross(Y=self_Harmony_embeddings, X=other_Harmony_embeddings,
                       centroids=centroids,
                       num_cells_per_cluster=num_cells_per_cluster,
                       cell_norms=cell_norms, neighbors=neighbors,
-                      distances=distances,
-                      centroid_distances=centroid_distances,
-                      nearest_clusters=nearest_clusters,
-                      query_norms=query_norms, num_neighbors=num_neighbors,
+                      distances=distances, num_neighbors=num_neighbors,
                       num_clusters_searched=num_clusters_searched,
                       chunk_size_kmeans=chunk_size_kmeans,
                       chunk_size_search=chunk_size_search, is_mac=is_mac,
                       num_threads=num_threads)
-        del centroid_distances, nearest_clusters, query_norms
 
         # Get the (two) most common cell type(s) for each cell in `self` among
         # its `num_neighbors` nearest neighbors in `other`. Pick the first
@@ -17103,48 +17072,9 @@ class SingleCell:
         # Run PaCMAP
         embedding = numa_zeros((num_cells, 2), dtype=np.float32,
                                num_threads=num_threads)
-        momentum = numa_zeros((num_cells, 2), dtype=np.float32,
-                              num_threads=num_threads)
-        velocity = numa_zeros((num_cells, 2), dtype=np.float32,
-                              num_threads=num_threads)
         gradients = numa_zeros((num_cells, 2), dtype=np.float32,
                                num_threads=num_threads)
-        average_distances = numa_zeros(num_cells, dtype=np.float32,
-                                       num_threads=num_threads)
-        neighbor_pairs = numa_zeros((num_cells, num_neighbors),
-                                    dtype=np.uint32, num_threads=num_threads)
-        mid_near_pairs = numa_zeros((num_cells, num_mid_near_pairs),
-                                    dtype=np.uint32, num_threads=num_threads)
-        further_pairs = numa_zeros((num_cells, num_further_pairs),
-                                   dtype=np.uint32, num_threads=num_threads)
-        if num_threads > 1 or match_parallel:
-            neighbor_pair_indices = \
-                numa_zeros(2 * num_cells * num_neighbors, dtype=np.uint32,
-                           num_threads=num_threads)
-            neighbor_pair_indptr = numa_zeros(num_cells + 1, dtype=np.uint32,
-                                              num_threads=num_threads)
-            mid_near_pair_indices = \
-                numa_zeros(2 * num_cells * num_mid_near_pairs, dtype=np.uint32,
-                           num_threads=num_threads)
-            mid_near_pair_indptr = numa_zeros(num_cells + 1, dtype=np.uint32,
-                                              num_threads=num_threads)
-            further_pair_indices = \
-                numa_zeros(2 * num_cells * num_further_pairs, dtype=np.uint32,
-                           num_threads=num_threads)
-            further_pair_indptr = numa_zeros(num_cells + 1, dtype=np.uint32,
-                                             num_threads=num_threads)
-        else:
-            neighbor_pair_indices = np.array([], dtype=np.uint32)
-            neighbor_pair_indptr = np.array([], dtype=np.uint32)
-            mid_near_pair_indices = np.array([], dtype=np.uint32)
-            mid_near_pair_indptr = np.array([], dtype=np.uint32)
-            further_pair_indices = np.array([], dtype=np.uint32)
-            further_pair_indptr = np.array([], dtype=np.uint32)
-        pacmap(PCs, embedding, momentum, velocity, gradients,
-               average_distances, neighbor_pairs, mid_near_pairs,
-               further_pairs, neighbor_pair_indices, neighbor_pair_indptr,
-               mid_near_pair_indices, mid_near_pair_indptr,
-               further_pair_indices, further_pair_indptr, neighbors, distances,
+        pacmap(PCs, embedding, gradients, neighbors, distances,
                num_neighbors, num_extra_neighbors, num_mid_near_pairs,
                num_further_pairs, num_phase_1_iterations,
                num_phase_2_iterations, num_phase_3_iterations, learning_rate,
@@ -17561,50 +17491,11 @@ class SingleCell:
         # Run LocalMAP
         embedding = numa_zeros((num_cells, 2), dtype=np.float32,
                                num_threads=num_threads)
-        momentum = numa_zeros((num_cells, 2), dtype=np.float32,
-                              num_threads=num_threads)
-        velocity = numa_zeros((num_cells, 2), dtype=np.float32,
-                              num_threads=num_threads)
         gradients = numa_zeros((num_cells, 2), dtype=np.float32,
                                num_threads=num_threads)
-        average_distances = numa_zeros(num_cells, dtype=np.float32,
-                                       num_threads=num_threads)
-        neighbor_pairs = numa_zeros((num_cells, num_neighbors),
-                                    dtype=np.uint32, num_threads=num_threads)
-        mid_near_pairs = numa_zeros((num_cells, num_mid_near_pairs),
-                                    dtype=np.uint32, num_threads=num_threads)
-        further_pairs = numa_zeros((num_cells, num_further_pairs),
-                                   dtype=np.uint32, num_threads=num_threads)
-        if num_threads > 1 or match_parallel:
-            neighbor_pair_indices = \
-                numa_zeros(2 * num_cells * num_neighbors, dtype=np.uint32,
-                           num_threads=num_threads)
-            neighbor_pair_indptr = numa_zeros(num_cells + 1, dtype=np.uint32,
-                                              num_threads=num_threads)
-            mid_near_pair_indices = \
-                numa_zeros(2 * num_cells * num_mid_near_pairs, dtype=np.uint32,
-                           num_threads=num_threads)
-            mid_near_pair_indptr = numa_zeros(num_cells + 1, dtype=np.uint32,
-                                              num_threads=num_threads)
-            further_pair_indices = \
-                numa_zeros(2 * num_cells * num_further_pairs, dtype=np.uint32,
-                           num_threads=num_threads)
-            further_pair_indptr = numa_zeros(num_cells + 1, dtype=np.uint32,
-                                             num_threads=num_threads)
-        else:
-            neighbor_pair_indices = np.array([], dtype=np.uint32)
-            neighbor_pair_indptr = np.array([], dtype=np.uint32)
-            mid_near_pair_indices = np.array([], dtype=np.uint32)
-            mid_near_pair_indptr = np.array([], dtype=np.uint32)
-            further_pair_indices = np.array([], dtype=np.uint32)
-            further_pair_indptr = np.array([], dtype=np.uint32)
-        localmap(PCs, embedding, momentum, velocity, gradients,
-                 average_distances, neighbor_pairs, mid_near_pairs,
-                 further_pairs, neighbor_pair_indices, neighbor_pair_indptr,
-                 mid_near_pair_indices, mid_near_pair_indptr,
-                 further_pair_indices, further_pair_indptr, neighbors,
-                 distances, num_neighbors, num_extra_neighbors,
-                 num_mid_near_pairs, num_further_pairs, num_phase_1_iterations,
+        localmap(PCs, embedding, gradients, neighbors, distances,
+                 num_neighbors, num_extra_neighbors, num_mid_near_pairs,
+                 num_further_pairs, num_phase_1_iterations,
                  num_phase_2_iterations, num_phase_3_iterations, learning_rate,
                  max_distance, seed, match_parallel, neighbors_key,
                  num_threads)

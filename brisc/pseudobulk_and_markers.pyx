@@ -2,8 +2,8 @@
 # pseudobulk-style approach)
 
 from cython.parallel cimport parallel, prange, threadid
-from .cyutils cimport get_thread_offset, numeric, signed_integer, \
-    uninitialized_vector
+from .cyutils cimport get_thread_offset, numa_vector, numeric, \
+    signed_integer, unsigned_
 
 
 def get_detection_rate(const unsigned[:, ::1] detection_count,
@@ -314,7 +314,7 @@ def groupby_getnnz_csr(const signed_integer[::1] indices,
         chunk_size, start_cell, end_cell, gene_index, \
         num_groups = group_ends.shape[0], num_genes = nnz.shape[1]
     cdef unsigned long long gene, total
-    cdef uninitialized_vector[unsigned] thread_nnz_buffer
+    cdef numa_vector[unsigned] thread_nnz_buffer
     cdef unsigned[:, ::1] thread_nnz
 
     if num_threads == 1:
@@ -348,6 +348,7 @@ def groupby_getnnz_csr(const signed_integer[::1] indices,
         # Fewer groups than threads: process each group with all threads, using
         # a per-thread scratch buffer to avoid write races, then reduce across
         # threads
+        thread_nnz_buffer = numa_vector[unsigned_](num_threads)
         thread_nnz_buffer.resize(num_threads * num_genes)
         thread_nnz = \
             <unsigned[:num_threads, :num_genes]> thread_nnz_buffer.data()
@@ -398,7 +399,7 @@ def groupby_getnnz_csr_for_gene_subset(const signed_integer[::1] indices,
         num_groups = group_ends.shape[0], num_genes = nnz.shape[1]
     cdef int column
     cdef unsigned long long gene, total
-    cdef uninitialized_vector[unsigned] thread_nnz_buffer
+    cdef numa_vector[unsigned] thread_nnz_buffer
     cdef unsigned[:, ::1] thread_nnz
 
     if num_threads == 1:
@@ -439,6 +440,7 @@ def groupby_getnnz_csr_for_gene_subset(const signed_integer[::1] indices,
         # Fewer groups than threads: process each group with all threads, using
         # a per-thread scratch buffer to avoid write races, then reduce across
         # threads
+        thread_nnz_buffer = numa_vector[unsigned_](num_threads)
         thread_nnz_buffer.resize(num_threads * num_genes)
         thread_nnz = \
             <unsigned[:num_threads, :num_genes]> thread_nnz_buffer.data()
@@ -497,9 +499,9 @@ def groupby_getnnz_and_total_csr_for_gene_subset(
     cdef int column
     cdef unsigned long long gene
     cdef double gene_total
-    cdef uninitialized_vector[unsigned] thread_nnz_buffer
+    cdef numa_vector[unsigned] thread_nnz_buffer
     cdef unsigned[:, ::1] thread_nnz
-    cdef uninitialized_vector[double] thread_total_buffer
+    cdef numa_vector[double] thread_total_buffer
     cdef double[:, ::1] thread_total
 
     if num_threads == 1:
@@ -546,9 +548,11 @@ def groupby_getnnz_and_total_csr_for_gene_subset(
         # Fewer groups than threads: process each group with all threads, using
         # per-thread scratch buffers to avoid write races, then reduce across
         # threads
+        thread_nnz_buffer = numa_vector[unsigned_](num_threads)
         thread_nnz_buffer.resize(num_threads * num_genes)
         thread_nnz = \
             <unsigned[:num_threads, :num_genes]> thread_nnz_buffer.data()
+        thread_total_buffer = numa_vector[double](num_threads)
         thread_total_buffer.resize(num_threads * num_genes)
         thread_total = \
             <double[:num_threads, :num_genes]> thread_total_buffer.data()

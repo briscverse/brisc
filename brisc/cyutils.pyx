@@ -13,7 +13,7 @@ from libcpp.vector cimport vector
 from signal import set_wakeup_fd
 from socket import socketpair
 from .cyutils cimport atomic_or, bit_width, integer, numa_allocate, \
-    numa_free, numeric, recv, signed_integer, uninitialized_vector
+    numa_free, numa_vector, numeric, recv, signed_integer, uninitialized_vector
 
 
 cdef class NumaBuffer:
@@ -43,7 +43,7 @@ def bin_count(const integer[::1] arr,
     cdef unsigned long long start, end, i, num_bins, chunk_size, \
         num_elements = arr.shape[0]
     cdef unsigned thread_index
-    cdef vector[vector[unsigned]] thread_counts
+    cdef vector[numa_vector[unsigned]] thread_counts
     cdef unsigned* counts_pointer
 
     num_threads = min(num_threads, num_elements)
@@ -901,7 +901,7 @@ def weighted_bin_count(const integer[::1] arr,
     cdef unsigned long long start, end, i, num_bins, chunk_size, \
         num_elements = arr.shape[0]
     cdef unsigned thread_index
-    cdef vector[vector[numeric]] thread_counts
+    cdef vector[numa_vector[numeric]] thread_counts
     cdef numeric* counts_pointer
 
     num_threads = min(num_threads, num_elements)

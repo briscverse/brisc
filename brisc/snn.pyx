@@ -7,7 +7,7 @@ from cython.parallel cimport parallel, prange, threadid
 from libc.string cimport memcpy
 from libcpp.algorithm cimport sort
 from libcpp.vector cimport vector
-from .cyutils cimport get_thread_offset, uninitialized_vector
+from .cyutils cimport get_thread_offset, numa_vector
 
 
 def snn(const unsigned[:, ::1] neighbors,
@@ -29,8 +29,8 @@ def snn(const unsigned[:, ::1] neighbors,
         reserve_size = (<unsigned long long> neighbors.shape[1] + 1) * \
             (neighbors.shape[1] + 1)
     cdef np.npy_intp nnz
-    cdef uninitialized_vector[unsigned] reverse_indices_buffer
-    cdef vector[unsigned long long] reverse_indptr_buffer
+    cdef numa_vector[unsigned] reverse_indices_buffer
+    cdef numa_vector[unsigned long long] reverse_indptr_buffer
     cdef vector[unsigned] shared_neighbors
     cdef vector[vector[unsigned]] thread_shared_neighbors
     cdef np.ndarray[np.uint32_t, ndim=1] indices

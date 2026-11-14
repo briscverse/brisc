@@ -6,7 +6,8 @@ from libcpp.algorithm cimport fill
 from libcpp.cmath cimport abs, ceil, exp, log, pow, sqrt
 from libcpp.vector cimport vector
 from scipy.linalg.cython_blas cimport sgemm, sgemv
-from .cyutils cimport integer, randint, srand, uninitialized_vector
+from .cyutils cimport integer, numa_vector, randint, srand, \
+    uninitialized_vector, unsigned_
 
 
 cdef inline void bin_count_nogil(const integer[::1] arr,
@@ -102,8 +103,9 @@ def label_transfer(const unsigned[:, ::1] neighbors,
                 thread_index = threadid()
                 thread_counts[thread_index].resize(num_cell_types)
                 for i in prange(num_cells):
-                    fill(thread_counts[thread_index].begin(),
-                         thread_counts[thread_index].end(), 0)
+                    fill(thread_counts[thread_index].data(),
+                         thread_counts[thread_index].data() + num_cell_types,
+                         0)
                     for j in range(num_neighbors):
                         cell_type = original_cell_type_column[neighbors[i, j]]
                         thread_counts[thread_index][cell_type] += 1
@@ -166,8 +168,9 @@ def label_transfer(const unsigned[:, ::1] neighbors,
                 thread_index = threadid()
                 thread_counts[thread_index].resize(num_cell_types)
                 for i in prange(num_cells):
-                    fill(thread_counts[thread_index].begin(),
-                         thread_counts[thread_index].end(), 0)
+                    fill(thread_counts[thread_index].data(),
+                         thread_counts[thread_index].data() + num_cell_types,
+                         0)
                     for j in range(num_neighbors):
                         cell_type = original_cell_type_column[neighbors[i, j]]
                         thread_counts[thread_index][cell_type] += 1
@@ -304,7 +307,6 @@ def normalize_rows(const float[:, ::1] arr,
 def harmony(const float[:, ::1] PCs,
             float[:, ::1] Z,
             float[:, ::1] Y,
-            float[:, ::1] R,
             const unsigned[::1] batch_labels,
             const unsigned num_batches,
             const unsigned max_iterations,
@@ -376,16 +378,16 @@ def harmony(const float[:, ::1] PCs,
     cdef float past_clustering_objectives[3]
     cdef bint compute_objective, compute_Y, converged, cold_start
     cdef str metrics
-    cdef uninitialized_vector[unsigned] N_b_buffer, cell_order_buffer, \
-        slab_starts_buffer, slab_counts_buffer, batch_cursors_buffer, \
-        slab_piece_offsets_buffer, piece_batches_buffer, piece_starts_buffer, \
-        batch_order_buffer
+    cdef uninitialized_vector[unsigned] N_b_buffer, slab_starts_buffer, \
+        slab_counts_buffer, batch_cursors_buffer, slab_piece_offsets_buffer, \
+        piece_batches_buffer, piece_starts_buffer
     cdef uninitialized_vector[float] Pr_b_buffer, theta_batch_buffer, \
         cluster_diversity_penalty_buffer, E_buffer, O_buffer, \
         diversity_buffer, R_sums_buffer, intercepts_buffer, W_buffer, \
-        O_slab_buffer, Y_chunk_buffer, Z_chunk_buffer, distance_buffer, \
-        delta_O_buffer, \
-        ratio_buffer, kmeans_errors, entropy_terms
+        Z_chunk_buffer, distance_buffer, delta_O_buffer, ratio_buffer, \
+        kmeans_errors, entropy_terms
+    cdef numa_vector[unsigned] cell_order_buffer, batch_order_buffer
+    cdef numa_vector[float] R_buffer, O_slab_buffer, Y_chunk_buffer
     N_b_buffer.resize(num_batches)
     cell_order_buffer.resize(num_cells)
     slab_starts_buffer.resize(num_slabs + 1)
@@ -394,6 +396,7 @@ def harmony(const float[:, ::1] PCs,
     slab_piece_offsets_buffer.resize(num_slabs + 1)
     piece_batches_buffer.resize(max_pieces)
     piece_starts_buffer.resize(max_pieces + 1)
+    batch_order_buffer = numa_vector[unsigned_](num_threads)
     batch_order_buffer.resize(num_cells)
     Pr_b_buffer.resize(num_batches)
     theta_batch_buffer.resize(num_batches)
@@ -406,8 +409,12 @@ def harmony(const float[:, ::1] PCs,
     intercepts_buffer.resize(<unsigned long long> num_clusters * num_PCs)
     W_buffer.resize(
         <unsigned long long> num_batches * num_clusters * num_PCs)
+    Y_chunk_buffer = numa_vector[float](num_threads)
     Y_chunk_buffer.resize(
         <unsigned long long> num_block_chunks * num_clusters * num_PCs)
+    R_buffer = numa_vector[float](num_threads)
+    R_buffer.resize(num_cells * num_clusters)
+    O_slab_buffer = numa_vector[float](num_threads)
     O_slab_buffer.resize(
         <unsigned long long> num_slabs * num_batches * num_clusters)
     Z_chunk_buffer.resize(
@@ -441,6 +448,7 @@ def harmony(const float[:, ::1] PCs,
         cluster_diversity_penalty = <float[:num_clusters]> \
             cluster_diversity_penalty_buffer.data()
     cdef float[:, ::1] \
+        R = <float[:num_cells, :num_clusters]> R_buffer.data(), \
         E = <float[:num_batches, :num_clusters]> E_buffer.data(), \
         O = <float[:num_batches, :num_clusters]> O_buffer.data(), \
         diversity = <float[:num_batches, :num_clusters]> \

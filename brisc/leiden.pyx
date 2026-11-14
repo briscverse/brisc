@@ -4,11 +4,10 @@ import threading
 from cpython.exc cimport PyErr_CheckSignals
 from cython.parallel cimport prange
 from libcpp.algorithm cimport fill
-from libcpp.vector cimport vector
 from signal import set_wakeup_fd
 from socket import socketpair
-from .cyutils cimport atomic_or, randint, recv, signed_integer, srand, \
-    uninitialized_vector, PREFETCH
+from .cyutils cimport atomic_or, numa_vector, randint, recv, signed_integer, \
+    srand, PREFETCH
 
 
 cdef inline unsigned next_pow2_minus_1(unsigned x) noexcept nogil:
@@ -56,16 +55,15 @@ def leiden(float[::1] data,
         delta_objective, edge_weight
     cdef bint any_moved
     cdef str error_message
-    cdef uninitialized_vector[unsigned] communities_buffer, \
-        node_order_buffer, queue_buffer, refined_communities_buffer, \
-        community_node_indptr_buffer
-    cdef uninitialized_vector[double] weighted_degrees_buffer, \
-        community_weights_buffer, refined_community_weights_buffer
-    cdef uninitialized_vector[float] data_buffer, data_buffer_alt
-    cdef uninitialized_vector[signed_integer] indices_buffer, \
-        indices_buffer_alt, indptr_buffer, indptr_buffer_alt
-    cdef vector[double] node_to_community_weights_buffer
-    cdef vector[unsigned long long] bitset_buffer
+    cdef numa_vector[unsigned] communities_buffer, node_order_buffer, \
+        queue_buffer, refined_communities_buffer, community_node_indptr_buffer
+    cdef numa_vector[double] weighted_degrees_buffer, \
+        community_weights_buffer, refined_community_weights_buffer, \
+        node_to_community_weights_buffer
+    cdef numa_vector[float] data_buffer, data_buffer_alt
+    cdef numa_vector[signed_integer] indices_buffer, indices_buffer_alt, \
+        indptr_buffer, indptr_buffer_alt
+    cdef numa_vector[unsigned long long] bitset_buffer
 
     communities_buffer.resize(num_cells)
     node_order_buffer.resize(num_cells)
@@ -953,15 +951,14 @@ cdef inline unsigned leiden_nogil(
         delta_objective, edge_weight
     cdef bint any_moved
     cdef char signal_byte
-    cdef uninitialized_vector[unsigned] communities, node_order, queue, \
+    cdef numa_vector[unsigned] communities, node_order, queue, \
         refined_communities_buffer, community_node_indptr
-    cdef uninitialized_vector[double] weighted_degrees, community_weights, \
-        refined_community_weights
-    cdef uninitialized_vector[float] data_buffer, data_buffer_alt
-    cdef uninitialized_vector[signed_integer] indices_buffer, \
-        indices_buffer_alt, indptr_buffer, indptr_buffer_alt
-    cdef vector[double] node_to_community_weights
-    cdef vector[unsigned long long] bitset
+    cdef numa_vector[double] weighted_degrees, community_weights, \
+        refined_community_weights, node_to_community_weights
+    cdef numa_vector[float] data_buffer, data_buffer_alt
+    cdef numa_vector[signed_integer] indices_buffer, indices_buffer_alt, \
+        indptr_buffer, indptr_buffer_alt
+    cdef numa_vector[unsigned long long] bitset
 
     communities.resize(num_cells)
     node_order.resize(num_cells)

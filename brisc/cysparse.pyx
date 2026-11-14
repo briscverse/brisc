@@ -6,7 +6,7 @@ from libc.string cimport memcpy
 from libcpp.algorithm cimport lower_bound
 from libcpp.vector cimport vector
 from .cyutils cimport atomic_and, atomic_or, bit_width, get_thread_offset, \
-    integer, numeric, signed_integer
+    integer, numa_vector, numeric, signed_integer
 
 
 ctypedef fused integer2:
@@ -1189,8 +1189,8 @@ def csr_tocsc(const unsigned n_row,
     cdef signed_integer n, cumsum, count, jj, dest, preceding_count, i, \
         Bp_col, nnz = Ap[n_row]
     cdef unsigned start_row, end_row
-    cdef vector[vector[unsigned]] thread_col_counts
-    cdef vector[vector[signed_integer]] thread_col_offsets
+    cdef vector[numa_vector[unsigned]] thread_col_counts
+    cdef vector[numa_vector[signed_integer]] thread_col_offsets
     cdef unsigned* col_counts
     cdef signed_integer* col_offsets
 

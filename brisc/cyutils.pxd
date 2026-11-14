@@ -69,206 +69,12 @@ cdef extern from * nogil:
     void PREFETCH(const void *addr)
 
 
-# A drop-in replacement for Cython's `vector` that does not automatically
-# zero-initialize
-
-cdef extern from * nogil:
-    """
-    // A simplified standalone version of boost::noinit_adaptor
-    template<class A>
-    struct noinit_adaptor : A {
-        template<class U>
-        struct rebind {
-            typedef noinit_adaptor<typename std::allocator_traits<A>::template
-                                   rebind_alloc<U>> other;
-        };
-
-        template<class U>
-        void construct(U* p) {
-            ::new(p) U;
-        }
-
-        template<class U, class V>
-        void construct(U* p, const V& v) {
-            ::new(p) U(v);
-        }
-
-        template<class U>
-        void destroy(U* p) {
-            p->~U();
-        }
-    };
-
-    #include <vector>
-    template<class T>
-    using uninitialized_vector = \
-        std::vector<T, noinit_adaptor<std::allocator<T>>>;
-    """
-    cdef cppclass uninitialized_vector[T]:
-        ctypedef T value_type
-        ctypedef size_t size_type
-        ctypedef ptrdiff_t difference_type
-
-        cppclass const_iterator
-        cppclass iterator:
-            iterator() except +
-            iterator(iterator&) except +
-            T& operator*()
-            iterator operator++()
-            iterator operator--()
-            iterator operator++(int)
-            iterator operator--(int)
-            iterator operator+(size_type)
-            iterator operator-(size_type)
-            difference_type operator-(iterator)
-            difference_type operator-(const_iterator)
-            bint operator==(iterator)
-            bint operator==(const_iterator)
-            bint operator!=(iterator)
-            bint operator!=(const_iterator)
-            bint operator<(iterator)
-            bint operator<(const_iterator)
-            bint operator>(iterator)
-            bint operator>(const_iterator)
-            bint operator<=(iterator)
-            bint operator<=(const_iterator)
-            bint operator>=(iterator)
-            bint operator>=(const_iterator)
-        cppclass const_iterator:
-            const_iterator() except +
-            const_iterator(iterator&) except +
-            const_iterator(const_iterator&) except +
-            operator=(iterator&) except +
-            const T& operator*()
-            const_iterator operator++()
-            const_iterator operator--()
-            const_iterator operator++(int)
-            const_iterator operator--(int)
-            const_iterator operator+(size_type)
-            const_iterator operator-(size_type)
-            difference_type operator-(iterator)
-            difference_type operator-(const_iterator)
-            bint operator==(iterator)
-            bint operator==(const_iterator)
-            bint operator!=(iterator)
-            bint operator!=(const_iterator)
-            bint operator<(iterator)
-            bint operator<(const_iterator)
-            bint operator>(iterator)
-            bint operator>(const_iterator)
-            bint operator<=(iterator)
-            bint operator<=(const_iterator)
-            bint operator>=(iterator)
-            bint operator>=(const_iterator)
-
-        cppclass const_reverse_iterator
-        cppclass reverse_iterator:
-            reverse_iterator() except +
-            reverse_iterator(reverse_iterator&) except +
-            T& operator*()
-            reverse_iterator operator++()
-            reverse_iterator operator--()
-            reverse_iterator operator++(int)
-            reverse_iterator operator--(int)
-            reverse_iterator operator+(size_type)
-            reverse_iterator operator-(size_type)
-            difference_type operator-(iterator)
-            difference_type operator-(const_iterator)
-            bint operator==(reverse_iterator)
-            bint operator==(const_reverse_iterator)
-            bint operator!=(reverse_iterator)
-            bint operator!=(const_reverse_iterator)
-            bint operator<(reverse_iterator)
-            bint operator<(const_reverse_iterator)
-            bint operator>(reverse_iterator)
-            bint operator>(const_reverse_iterator)
-            bint operator<=(reverse_iterator)
-            bint operator<=(const_reverse_iterator)
-            bint operator>=(reverse_iterator)
-            bint operator>=(const_reverse_iterator)
-        cppclass const_reverse_iterator:
-            const_reverse_iterator() except +
-            const_reverse_iterator(reverse_iterator&) except +
-            operator=(reverse_iterator&) except +
-            const T& operator*()
-            const_reverse_iterator operator++()
-            const_reverse_iterator operator--()
-            const_reverse_iterator operator++(int)
-            const_reverse_iterator operator--(int)
-            const_reverse_iterator operator+(size_type)
-            const_reverse_iterator operator-(size_type)
-            difference_type operator-(iterator)
-            difference_type operator-(const_iterator)
-            bint operator==(reverse_iterator)
-            bint operator==(const_reverse_iterator)
-            bint operator!=(reverse_iterator)
-            bint operator!=(const_reverse_iterator)
-            bint operator<(reverse_iterator)
-            bint operator<(const_reverse_iterator)
-            bint operator>(reverse_iterator)
-            bint operator>(const_reverse_iterator)
-            bint operator<=(reverse_iterator)
-            bint operator<=(const_reverse_iterator)
-            bint operator>=(reverse_iterator)
-            bint operator>=(const_reverse_iterator)
-
-        uninitialized_vector() except +
-        uninitialized_vector(uninitialized_vector&) except +
-        uninitialized_vector(size_type) except +
-        uninitialized_vector(size_type, T&) except +
-        T& operator[](size_type)
-        bint operator==(uninitialized_vector&, uninitialized_vector&)
-        bint operator!=(uninitialized_vector&, uninitialized_vector&)
-        bint operator<(uninitialized_vector&, uninitialized_vector&)
-        bint operator>(uninitialized_vector&, uninitialized_vector&)
-        bint operator<=(uninitialized_vector&, uninitialized_vector&)
-        bint operator>=(uninitialized_vector&, uninitialized_vector&)
-        void assign(size_type, const T&)
-        void assign[InputIt](InputIt, InputIt) except +
-        T& at(size_type) except +
-        T& back()
-        iterator begin()
-        const_iterator const_begin "begin"()
-        const_iterator cbegin()
-        size_type capacity()
-        void clear()
-        bint empty()
-        iterator end()
-        const_iterator const_end "end"()
-        const_iterator cend()
-        iterator erase(iterator)
-        iterator erase(iterator, iterator)
-        T& front()
-        iterator insert(iterator, const T&) except +
-        iterator insert(iterator, size_type, const T&) except +
-        iterator insert[InputIt](iterator, InputIt, InputIt) except +
-        size_type max_size()
-        void pop_back()
-        void push_back(T&) except +
-        reverse_iterator rbegin()
-        const_reverse_iterator const_rbegin "rbegin"()
-        const_reverse_iterator crbegin()
-        reverse_iterator rend()
-        const_reverse_iterator const_rend "rend"()
-        const_reverse_iterator crend()
-        void reserve(size_type) except +
-        void resize(size_type) except +
-        void resize(size_type, T&) except +
-        size_type size()
-        void swap(uninitialized_vector&)
-        T* data()
-        const T* const_data "data"()
-        void shrink_to_fit() except +
-        iterator emplace(const_iterator, ...) except +
-        T& emplace_back(...) except +
-
-
 # NUMA-aware allocation of zeroed memory, underlying `numa_zeros()` in
-# utils.py. Large allocations get fresh pages from `mmap()` on Linux, bypassing
-# glibc's malloc arena so that NUMA first-touch placement is guaranteed, with
-# Transparent Huge Pages (THP) requested where they won't cause NUMA skew.
-# Smaller allocations, and all allocations on other platforms, use `calloc()`.
-# Either way, the memory is zero-initialized.
+# utils.py and `numa_vector` below. Large allocations get fresh pages from
+# `mmap()` on Linux, bypassing glibc's malloc arena so that NUMA first-touch
+# placement is guaranteed, with Transparent Huge Pages (THP) requested where
+# they won't cause NUMA skew. Smaller allocations, and all allocations on other
+# platforms, use `calloc()`. Either way, the memory is zero-initialized.
 #
 # `num_threads` is the number of threads that will first touch the memory
 # (i.e. write to it before anything else does), each touching a contiguous
@@ -442,6 +248,136 @@ cdef extern from * nogil:
     """
     void* numa_allocate(size_t num_bytes, unsigned num_threads) except +
     void numa_free(void* pointer, size_t num_bytes) noexcept
+
+
+# Two drop-in replacements for Cython's `vector` that avoid needless
+# zero-initialization. Both are `std::vector`s with custom allocators, so they
+# support the full `vector` interface.
+# - `uninitialized_vector`: leaves new elements uninitialized. Use it for small
+#   arrays and for arrays resized many times.
+# - `numa_vector`: gets its memory from `numa_allocate()`, so new elements are
+#   already zero. Use it for large arrays resized at most a few times. Its
+#   constructor takes the number of threads that will first touch its memory
+#   (default 1; see `numa_allocate()`), e.g.
+#   `buffer = numa_vector[float](num_threads)`.
+
+cdef extern from * nogil:
+    """
+    #include <memory>
+    #include <type_traits>
+    #include <vector>
+
+    // A simplified standalone version of boost::noinit_adaptor: an allocator
+    // adaptor that default-initializes new elements instead of
+    // value-initializing them, i.e. leaves them uninitialized
+    template<class A>
+    struct noinit_adaptor : A {
+        noinit_adaptor() = default;
+        using A::A;
+
+        template<class B>
+        noinit_adaptor(const noinit_adaptor<B>& other) noexcept
+            : A(static_cast<const B&>(other)) {}
+
+        template<class U>
+        struct rebind {
+            typedef noinit_adaptor<typename std::allocator_traits<A>::template
+                                   rebind_alloc<U>> other;
+        };
+
+        template<class U>
+        void construct(U* p) {
+            ::new(p) U;
+        }
+
+        template<class U, class V>
+        void construct(U* p, const V& v) {
+            ::new(p) U(v);
+        }
+
+        template<class U>
+        void destroy(U* p) {
+            p->~U();
+        }
+    };
+
+    // An allocator that allocates with `numa_allocate()`
+    template<class T>
+    struct numa_allocator {
+        using value_type = T;
+
+        // On assignment and swap, adopt the other vector's allocator (and
+        // thus its `num_threads`), so that e.g.
+        // `buffer = numa_vector[float](num_threads)` works
+        using propagate_on_container_copy_assignment = std::true_type;
+        using propagate_on_container_move_assignment = std::true_type;
+        using propagate_on_container_swap = std::true_type;
+
+        unsigned num_threads = 1;
+
+        numa_allocator() noexcept = default;
+        explicit numa_allocator(unsigned num_threads) noexcept
+            : num_threads(num_threads) {}
+        template<class U>
+        numa_allocator(const numa_allocator<U>& other) noexcept
+            : num_threads(other.num_threads) {}
+
+        T* allocate(size_t n) {
+            return static_cast<T*>(numa_allocate(n * sizeof(T), num_threads));
+        }
+        void deallocate(T* p, size_t n) noexcept {
+            numa_free(p, n * sizeof(T));
+        }
+
+        // Any `numa_allocator` can free memory from any other
+        template<class U>
+        bool operator==(const numa_allocator<U>&) const noexcept {
+            return true;
+        }
+        template<class U>
+        bool operator!=(const numa_allocator<U>&) const noexcept {
+            return false;
+        }
+    };
+
+    template<class T>
+    using noinit_allocator = noinit_adaptor<std::allocator<T>>;
+    template<class T>
+    using numa_noinit_allocator = noinit_adaptor<numa_allocator<T>>;
+
+    template<class T>
+    using uninitialized_vector = std::vector<T, noinit_allocator<T>>;
+
+    // Skip zero-initialization, since `numa_allocate()` zeroes memory itself
+    template<class T>
+    struct numa_vector : std::vector<T, numa_noinit_allocator<T>> {
+        explicit numa_vector(unsigned num_threads = 1)
+            : numa_vector::vector(numa_noinit_allocator<T>(num_threads)) {}
+    };
+    """
+    cdef cppclass noinit_allocator[T]:
+        pass
+
+    cdef cppclass numa_noinit_allocator[T]:
+        pass
+
+    # Inherit `vector`'s declarations, including its iterators, which take
+    # the allocator into account
+    cdef cppclass uninitialized_vector[T](vector[T, noinit_allocator[T]]):
+        uninitialized_vector() except +
+        uninitialized_vector(uninitialized_vector&) except +
+        uninitialized_vector(size_t) except +
+        uninitialized_vector(size_t, T&) except +
+
+    cdef cppclass numa_vector[T](vector[T, numa_noinit_allocator[T]]):
+        numa_vector() except +
+        numa_vector(unsigned num_threads) except +
+
+
+# Hack to allow Cython to parse `unsigned` and `unsigned long long` as
+# template arguments inside an expression, e.g. `numa_vector[unsigned_](...)`
+ctypedef unsigned unsigned_
+ctypedef unsigned long long unsigned_long_long_
 
 
 cdef inline (unsigned, unsigned) get_thread_offset(

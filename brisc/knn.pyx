@@ -6,8 +6,8 @@ from libc.float cimport FLT_MAX
 from libc.string cimport memcpy
 from libcpp.algorithm cimport sort
 from libcpp.vector cimport vector
-from .cyutils cimport max_heap_replace_top, max_heap_sort, partial_distances, \
-    uninitialized_vector
+from .cyutils cimport max_heap_replace_top, max_heap_sort, numa_vector, \
+    partial_distances, uninitialized_vector, unsigned_
 
 
 def knn_self(const float[:, ::1] X,
@@ -17,8 +17,6 @@ def knn_self(const float[:, ::1] X,
              unsigned[:, ::1] neighbors,
              float[:, ::1] distances,
              const float[::1] cell_norms,
-             float[:, ::1] centroid_distances,
-             unsigned[:, ::1] nearest_clusters,
              const unsigned num_neighbors,
              const unsigned num_clusters_searched,
              const unsigned chunk_size_kmeans,
@@ -47,10 +45,16 @@ def knn_self(const float[:, ::1] X,
     cdef const float* row
     cdef uninitialized_vector[unsigned] cluster_offsets_buffer
     cdef uninitialized_vector[float] centroid_norms_buffer, \
-        temp_distances_buffer, query_X_buffer, block_distances_buffer
+        temp_distances_buffer, query_X_buffer
     cdef uninitialized_vector[unsigned long long] pairs_buffer
+    cdef numa_vector[float] centroid_distances_buffer, \
+        block_distances_buffer
+    cdef numa_vector[unsigned] nearest_clusters_buffer
+    cdef float[:, ::1] centroid_distances
+    cdef unsigned[:, ::1] nearest_clusters
     cdef vector[uninitialized_vector[float]] thread_distances, \
-        thread_query_X, thread_block_distances
+        thread_query_X
+    cdef vector[numa_vector[float]] thread_block_distances
     cdef vector[uninitialized_vector[unsigned long long]] thread_pairs
     centroid_norms_buffer.resize(num_clusters)
     cluster_offsets_buffer.resize(num_clusters + 1)
@@ -98,6 +102,17 @@ def knn_self(const float[:, ::1] X,
     # and multiple threads.
 
     num_threads = min(num_threads, num_chunks)
+
+    # Allocate scratch space for each query's nearest clusters
+    centroid_distances_buffer = numa_vector[float](num_threads)
+    centroid_distances_buffer.resize(num_X * num_clusters_searched)
+    centroid_distances = <float[:num_X, :num_clusters_searched]> \
+        centroid_distances_buffer.data()
+    nearest_clusters_buffer = numa_vector[unsigned_](num_threads)
+    nearest_clusters_buffer.resize(num_X * num_clusters_searched)
+    nearest_clusters = <unsigned[:num_X, :num_clusters_searched]> \
+        nearest_clusters_buffer.data()
+
     if num_threads <= 1 and not is_mac:
         PyErr_CheckSignals()
 
@@ -505,9 +520,6 @@ def knn_cross(const float[:, ::1] Y,
               const float[::1] cell_norms,
               unsigned[:, ::1] neighbors,
               float[:, ::1] distances,
-              float[:, ::1] centroid_distances,
-              unsigned[:, ::1] nearest_clusters,
-              float[::1] query_norms,
               const unsigned num_neighbors,
               const unsigned num_clusters_searched,
               const unsigned chunk_size_kmeans,
@@ -540,10 +552,17 @@ def knn_cross(const float[:, ::1] Y,
     cdef const float* row
     cdef uninitialized_vector[unsigned] cluster_offsets_buffer
     cdef uninitialized_vector[float] centroid_norms_buffer, \
-        temp_distances_buffer, query_Y_buffer, block_distances_buffer
+        temp_distances_buffer, query_Y_buffer
     cdef uninitialized_vector[unsigned long long] pairs_buffer
+    cdef numa_vector[float] centroid_distances_buffer, \
+        block_distances_buffer, query_norms_buffer
+    cdef numa_vector[unsigned] nearest_clusters_buffer
+    cdef float[:, ::1] centroid_distances
+    cdef unsigned[:, ::1] nearest_clusters
+    cdef float[::1] query_norms
     cdef vector[uninitialized_vector[float]] thread_distances, \
-        thread_query_Y, thread_block_distances
+        thread_query_Y
+    cdef vector[numa_vector[float]] thread_block_distances
     cdef vector[uninitialized_vector[unsigned long long]] thread_pairs
     centroid_norms_buffer.resize(num_clusters)
     cluster_offsets_buffer.resize(num_clusters + 1)
@@ -576,6 +595,20 @@ def knn_cross(const float[:, ::1] Y,
     # and multiple threads
 
     num_threads = min(num_threads, num_chunks)
+
+    # Allocate scratch space for each query's nearest clusters
+    centroid_distances_buffer = numa_vector[float](num_threads)
+    centroid_distances_buffer.resize(num_Y * num_clusters_searched)
+    centroid_distances = <float[:num_Y, :num_clusters_searched]> \
+        centroid_distances_buffer.data()
+    nearest_clusters_buffer = numa_vector[unsigned_](num_threads)
+    nearest_clusters_buffer.resize(num_Y * num_clusters_searched)
+    nearest_clusters = <unsigned[:num_Y, :num_clusters_searched]> \
+        nearest_clusters_buffer.data()
+    query_norms_buffer = numa_vector[float](num_threads)
+    query_norms_buffer.resize(num_Y)
+    query_norms = <float[:num_Y]> query_norms_buffer.data()
+
     if num_threads <= 1 and not is_mac:
         PyErr_CheckSignals()
 

@@ -10,8 +10,8 @@ from libcpp.algorithm cimport sort
 from libcpp.cmath cimport cos, exp, log, log2, pow, sqrt
 from libcpp.vector cimport vector
 from .cyutils cimport PREFETCH, atomic_or, max_heap_replace_top, \
-    max_heap_sort, randint, random_normal, random_uniform, signed_integer, \
-    srand, uninitialized_vector
+    max_heap_sort, numa_vector, randint, random_normal, random_uniform, \
+    signed_integer, srand, uninitialized_vector, unsigned_
 
 
 cdef inline void get_neighbor_pairs(const float[:, ::1] X,
@@ -354,9 +354,9 @@ cdef inline void reformat_for_parallel(
     cdef unsigned i, j, k, t, r, own, num_pairs_per_cell = pairs.shape[1]
     cdef unsigned long long index, p, start, end, chunk_size, total, \
         num_cells = pairs.shape[0], stride = num_threads + 16
-    cdef uninitialized_vector[unsigned] dest_indices, bucket_sources, \
-        bucket_targets
+    cdef numa_vector[unsigned] dest_indices, bucket_sources, bucket_targets
     cdef uninitialized_vector[unsigned long long] cursors, range_offsets
+    dest_indices = numa_vector[unsigned_](num_threads)
     dest_indices.resize(num_cells)
 
     # Each pair (i, j) appears in two cells' lists: i's, as part of
@@ -397,7 +397,9 @@ cdef inline void reformat_for_parallel(
     # in order of i: count the pairs going from each range of i's to each
     # range of j's, then lay out the buckets for each range of j's
     # consecutively, ordered by range of i.
+    bucket_sources = numa_vector[unsigned_](num_threads)
     bucket_sources.resize(num_cells * num_pairs_per_cell)
+    bucket_targets = numa_vector[unsigned_](num_threads)
     bucket_targets.resize(num_cells * num_pairs_per_cell)
     cursors.resize(num_threads * stride)
     range_offsets.resize(num_threads + 1)
@@ -979,19 +981,7 @@ cdef inline void pacmap_parallel(const float[:, ::1] PCs,
 
 def pacmap(const float[:, ::1] PCs,
            float[:, ::1] embedding,
-           float[:, ::1] momentum,
-           float[:, ::1] velocity,
            float[:, ::1] gradients,
-           float[::1] total_distances,
-           unsigned[:, ::1] neighbor_pairs,
-           unsigned[:, ::1] mid_near_pairs,
-           unsigned[:, ::1] further_pairs,
-           unsigned[::1] neighbor_pair_indices,
-           unsigned[::1] neighbor_pair_indptr,
-           unsigned[::1] mid_near_pair_indices,
-           unsigned[::1] mid_near_pair_indptr,
-           unsigned[::1] further_pair_indices,
-           unsigned[::1] further_pair_indptr,
            const unsigned[:, ::1] neighbors,
            const float[:, ::1] distances,
            const unsigned num_neighbors,
@@ -1009,6 +999,44 @@ def pacmap(const float[:, ::1] PCs,
     cdef unsigned i, num_cells = PCs.shape[0]
     cdef bint too_large = False, self_neighbors = False
     cdef str error_message
+    cdef numa_vector[float] momentum_buffer, velocity_buffer, \
+        total_distances_buffer
+    cdef numa_vector[unsigned] neighbor_pairs_buffer, mid_near_pairs_buffer, \
+        further_pairs_buffer, neighbor_pair_indices_buffer, \
+        neighbor_pair_indptr_buffer, mid_near_pair_indices_buffer, \
+        mid_near_pair_indptr_buffer, further_pair_indices_buffer, \
+        further_pair_indptr_buffer
+    cdef float[:, ::1] momentum, velocity
+    cdef float[::1] total_distances
+    cdef unsigned[:, ::1] neighbor_pairs, mid_near_pairs, further_pairs
+    cdef unsigned[::1] neighbor_pair_indices, neighbor_pair_indptr, \
+        mid_near_pair_indices, mid_near_pair_indptr, further_pair_indices, \
+        further_pair_indptr
+
+    momentum_buffer = numa_vector[float](num_threads)
+    momentum_buffer.resize(2 * num_cells)
+    momentum = <float[:num_cells, :2]> momentum_buffer.data()
+    velocity_buffer = numa_vector[float](num_threads)
+    velocity_buffer.resize(2 * num_cells)
+    velocity = <float[:num_cells, :2]> velocity_buffer.data()
+    total_distances_buffer = numa_vector[float](num_threads)
+    total_distances_buffer.resize(num_cells)
+    total_distances = <float[:num_cells]> total_distances_buffer.data()
+    neighbor_pairs_buffer = numa_vector[unsigned_](num_threads)
+    neighbor_pairs_buffer.resize(
+        <unsigned long long> num_cells * num_neighbors)
+    neighbor_pairs = <unsigned[:num_cells, :num_neighbors]> \
+        neighbor_pairs_buffer.data()
+    mid_near_pairs_buffer = numa_vector[unsigned_](num_threads)
+    mid_near_pairs_buffer.resize(
+        <unsigned long long> num_cells * num_mid_near_pairs)
+    mid_near_pairs = <unsigned[:num_cells, :num_mid_near_pairs]> \
+        mid_near_pairs_buffer.data()
+    further_pairs_buffer = numa_vector[unsigned_](num_threads)
+    further_pairs_buffer.resize(
+        <unsigned long long> num_cells * num_further_pairs)
+    further_pairs = <unsigned[:num_cells, :num_further_pairs]> \
+        further_pairs_buffer.data()
 
     # Select the `num_neighbors` of the `num_total_neighbors`
     # nearest-neighbor pairs with the lowest scaled distances
@@ -1064,6 +1092,36 @@ def pacmap(const float[:, ::1] PCs,
                            num_phase_3_iterations, learning_rate)
     else:
         num_threads = min(num_threads, num_cells)
+
+        neighbor_pair_indices_buffer = numa_vector[unsigned_](num_threads)
+        neighbor_pair_indices_buffer.resize(2ULL * num_cells * num_neighbors)
+        neighbor_pair_indices = <unsigned[:2ULL * num_cells * num_neighbors]> \
+            neighbor_pair_indices_buffer.data()
+        neighbor_pair_indptr_buffer = numa_vector[unsigned_](num_threads)
+        neighbor_pair_indptr_buffer.resize(num_cells + 1)
+        neighbor_pair_indptr = <unsigned[:num_cells + 1]> \
+            neighbor_pair_indptr_buffer.data()
+        mid_near_pair_indices_buffer = numa_vector[unsigned_](num_threads)
+        mid_near_pair_indices_buffer.resize(
+            2ULL * num_cells * num_mid_near_pairs)
+        mid_near_pair_indices = \
+            <unsigned[:2ULL * num_cells * num_mid_near_pairs]> \
+            mid_near_pair_indices_buffer.data()
+        mid_near_pair_indptr_buffer = numa_vector[unsigned_](num_threads)
+        mid_near_pair_indptr_buffer.resize(num_cells + 1)
+        mid_near_pair_indptr = <unsigned[:num_cells + 1]> \
+            mid_near_pair_indptr_buffer.data()
+        further_pair_indices_buffer = numa_vector[unsigned_](num_threads)
+        further_pair_indices_buffer.resize(
+            2ULL * num_cells * num_further_pairs)
+        further_pair_indices = \
+            <unsigned[:2ULL * num_cells * num_further_pairs]> \
+            further_pair_indices_buffer.data()
+        further_pair_indptr_buffer = numa_vector[unsigned_](num_threads)
+        further_pair_indptr_buffer.resize(num_cells + 1)
+        further_pair_indptr = <unsigned[:num_cells + 1]> \
+            further_pair_indptr_buffer.data()
+
         reformat_for_parallel(neighbor_pairs, neighbor_pair_indices,
                               neighbor_pair_indptr, num_threads)
         reformat_for_parallel(mid_near_pairs, mid_near_pair_indices,
@@ -1243,19 +1301,7 @@ cdef inline void localmap_parallel(const float[:, ::1] PCs,
 
 def localmap(const float[:, ::1] PCs,
              float[:, ::1] embedding,
-             float[:, ::1] momentum,
-             float[:, ::1] velocity,
              float[:, ::1] gradients,
-             float[::1] total_distances,
-             unsigned[:, ::1] neighbor_pairs,
-             unsigned[:, ::1] mid_near_pairs,
-             unsigned[:, ::1] further_pairs,
-             unsigned[::1] neighbor_pair_indices,
-             unsigned[::1] neighbor_pair_indptr,
-             unsigned[::1] mid_near_pair_indices,
-             unsigned[::1] mid_near_pair_indptr,
-             unsigned[::1] further_pair_indices,
-             unsigned[::1] further_pair_indptr,
              const unsigned[:, ::1] neighbors,
              const float[:, ::1] distances,
              const unsigned num_neighbors,
@@ -1274,6 +1320,44 @@ def localmap(const float[:, ::1] PCs,
     cdef unsigned i, num_cells = PCs.shape[0]
     cdef bint too_large = False, self_neighbors = False
     cdef str error_message
+    cdef numa_vector[float] momentum_buffer, velocity_buffer, \
+        total_distances_buffer
+    cdef numa_vector[unsigned] neighbor_pairs_buffer, mid_near_pairs_buffer, \
+        further_pairs_buffer, neighbor_pair_indices_buffer, \
+        neighbor_pair_indptr_buffer, mid_near_pair_indices_buffer, \
+        mid_near_pair_indptr_buffer, further_pair_indices_buffer, \
+        further_pair_indptr_buffer
+    cdef float[:, ::1] momentum, velocity
+    cdef float[::1] total_distances
+    cdef unsigned[:, ::1] neighbor_pairs, mid_near_pairs, further_pairs
+    cdef unsigned[::1] neighbor_pair_indices, neighbor_pair_indptr, \
+        mid_near_pair_indices, mid_near_pair_indptr, further_pair_indices, \
+        further_pair_indptr
+
+    momentum_buffer = numa_vector[float](num_threads)
+    momentum_buffer.resize(2 * num_cells)
+    momentum = <float[:num_cells, :2]> momentum_buffer.data()
+    velocity_buffer = numa_vector[float](num_threads)
+    velocity_buffer.resize(2 * num_cells)
+    velocity = <float[:num_cells, :2]> velocity_buffer.data()
+    total_distances_buffer = numa_vector[float](num_threads)
+    total_distances_buffer.resize(num_cells)
+    total_distances = <float[:num_cells]> total_distances_buffer.data()
+    neighbor_pairs_buffer = numa_vector[unsigned_](num_threads)
+    neighbor_pairs_buffer.resize(
+        <unsigned long long> num_cells * num_neighbors)
+    neighbor_pairs = <unsigned[:num_cells, :num_neighbors]> \
+        neighbor_pairs_buffer.data()
+    mid_near_pairs_buffer = numa_vector[unsigned_](num_threads)
+    mid_near_pairs_buffer.resize(
+        <unsigned long long> num_cells * num_mid_near_pairs)
+    mid_near_pairs = <unsigned[:num_cells, :num_mid_near_pairs]> \
+        mid_near_pairs_buffer.data()
+    further_pairs_buffer = numa_vector[unsigned_](num_threads)
+    further_pairs_buffer.resize(
+        <unsigned long long> num_cells * num_further_pairs)
+    further_pairs = <unsigned[:num_cells, :num_further_pairs]> \
+        further_pairs_buffer.data()
 
     # Select the `num_neighbors` of the `num_total_neighbors`
     # nearest-neighbor pairs with the lowest scaled distances
@@ -1330,6 +1414,36 @@ def localmap(const float[:, ::1] PCs,
                              max_distance, seed)
     else:
         num_threads = min(num_threads, num_cells)
+
+        neighbor_pair_indices_buffer = numa_vector[unsigned_](num_threads)
+        neighbor_pair_indices_buffer.resize(2ULL * num_cells * num_neighbors)
+        neighbor_pair_indices = <unsigned[:2ULL * num_cells * num_neighbors]> \
+            neighbor_pair_indices_buffer.data()
+        neighbor_pair_indptr_buffer = numa_vector[unsigned_](num_threads)
+        neighbor_pair_indptr_buffer.resize(num_cells + 1)
+        neighbor_pair_indptr = <unsigned[:num_cells + 1]> \
+            neighbor_pair_indptr_buffer.data()
+        mid_near_pair_indices_buffer = numa_vector[unsigned_](num_threads)
+        mid_near_pair_indices_buffer.resize(
+            2ULL * num_cells * num_mid_near_pairs)
+        mid_near_pair_indices = \
+            <unsigned[:2ULL * num_cells * num_mid_near_pairs]> \
+            mid_near_pair_indices_buffer.data()
+        mid_near_pair_indptr_buffer = numa_vector[unsigned_](num_threads)
+        mid_near_pair_indptr_buffer.resize(num_cells + 1)
+        mid_near_pair_indptr = <unsigned[:num_cells + 1]> \
+            mid_near_pair_indptr_buffer.data()
+        further_pair_indices_buffer = numa_vector[unsigned_](num_threads)
+        further_pair_indices_buffer.resize(
+            2ULL * num_cells * num_further_pairs)
+        further_pair_indices = \
+            <unsigned[:2ULL * num_cells * num_further_pairs]> \
+            further_pair_indices_buffer.data()
+        further_pair_indptr_buffer = numa_vector[unsigned_](num_threads)
+        further_pair_indptr_buffer.resize(num_cells + 1)
+        further_pair_indptr = <unsigned[:num_cells + 1]> \
+            further_pair_indptr_buffer.data()
+
         reformat_for_parallel(neighbor_pairs, neighbor_pair_indices,
                               neighbor_pair_indptr, num_threads)
         reformat_for_parallel(mid_near_pairs, mid_near_pair_indices,

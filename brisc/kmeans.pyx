@@ -6,8 +6,9 @@ from libc.float cimport FLT_MAX
 from libc.string cimport memcpy
 from libcpp.algorithm cimport fill
 from libcpp.vector cimport vector
-from .cyutils cimport min_heap_replace_top, min_heap_sort, partial_distances, \
-    randint, random_uniform, sgemm, srand, uninitialized_vector
+from .cyutils cimport min_heap_replace_top, min_heap_sort, numa_vector, \
+    partial_distances, randint, random_uniform, sgemm, srand, \
+    uninitialized_vector, unsigned_
 
 
 cdef inline void kmeans_random_init(const float[:, ::1] X,
@@ -60,10 +61,11 @@ cdef inline void kmeans_barbar_init(
         min_distance, inverse_cost, probability, alpha = -2, beta = 1, \
         l = oversampling_factor * num_clusters
     cdef char transA = b'T', transB = b'N'
-    cdef uninitialized_vector[float] X_norms_buffer, newly_selected_X_buffer, \
+    cdef uninitialized_vector[float] newly_selected_X_buffer, \
         distances_buffer, chunk_costs_buffer
-    cdef vector[unsigned] best_selected_cells_buffer, selected_cells, \
-        selected_cell_weights_buffer
+    cdef numa_vector[float] X_norms_buffer
+    cdef numa_vector[unsigned] best_selected_cells_buffer
+    cdef vector[unsigned] selected_cells, selected_cell_weights_buffer
     cdef uninitialized_vector[unsigned] centroid_indices_buffer
     cdef float[::1] X_norms, chunk_costs
     cdef float[:, ::1] newly_selected_X, distances
@@ -382,10 +384,10 @@ cdef inline void kmeans_barbar_init_parallel(
         min_distance, inverse_cost, probability, alpha = -2, beta = 1, \
         l = oversampling_factor * num_clusters
     cdef char transA = b'T', transB = b'N'
-    cdef uninitialized_vector[float] X_norms_buffer, newly_selected_X, \
-        chunk_costs_buffer
-    cdef vector[unsigned] best_selected_cells_buffer, selected_cells, \
-        selected_cell_weights
+    cdef uninitialized_vector[float] newly_selected_X, chunk_costs_buffer
+    cdef numa_vector[float] X_norms_buffer
+    cdef numa_vector[unsigned] best_selected_cells_buffer
+    cdef vector[unsigned] selected_cells, selected_cell_weights
     cdef uninitialized_vector[unsigned] centroid_indices_buffer
     cdef vector[uninitialized_vector[float]] thread_distances
     cdef vector[vector[unsigned]] thread_selected_cells, \
@@ -408,6 +410,7 @@ cdef inline void kmeans_barbar_init_parallel(
     # Calculate the (squared Euclidean) distance from each cell to the random
     # cell, storing it in `min_distances`. In the same loop, also calculate the
     # squared L2 norm of each cell, ||X||².
+    X_norms_buffer = numa_vector[float](num_threads)
     X_norms_buffer.resize(num_cells)
     X_norms = <float[:num_cells]> X_norms_buffer.data()
     with nogil:
@@ -470,6 +473,7 @@ cdef inline void kmeans_barbar_init_parallel(
     # now itself. `best_selected_cells` starts off at 0 for non-newly selected
     # cells, i.e. they still have the initial random cell (`selected_cells[0]`)
     # listed as their closest centroid candidate.
+    best_selected_cells_buffer = numa_vector[unsigned_](num_threads)
     best_selected_cells_buffer.resize(num_cells)
     best_selected_cells = <unsigned[:num_cells]> \
         best_selected_cells_buffer.data()
@@ -891,7 +895,6 @@ def kmeans(const float[:, ::1] X,
            float[:, ::1] centroids,
            float[:, ::1] centroids_new,
            unsigned[::1] num_cells_per_cluster,
-           float[::1] min_distances,
            float[::1] cell_norms,
            const bint kmeans_barbar,
            const unsigned num_init_iterations,
@@ -910,12 +913,12 @@ def kmeans(const float[:, ::1] X,
         num_chunks = (num_cells + chunk_size - 1) / chunk_size
     cdef float squared_norm, sum_of_squared_norms, difference, distance, \
         min_distance, norm, total_min_distance, old_total_min_distance
-    cdef uninitialized_vector[float] centroid_norms_buffer, \
-        chunk_centroids_new_buffer, distances_buffer
+    cdef uninitialized_vector[float] centroid_norms_buffer, distances_buffer
+    cdef numa_vector[float] min_distances_buffer, chunk_centroids_new_buffer
     cdef vector[vector[unsigned]] thread_num_cells_per_cluster
     cdef vector[uninitialized_vector[float]] thread_distances
     cdef uninitialized_vector[unsigned] remap_buffer, compact_buffer
-    cdef float[::1] centroid_norms
+    cdef float[::1] centroid_norms, min_distances
     cdef float[:, ::1] distances, temp
     cdef float[:, :, ::1] chunk_centroids_new
     cdef unsigned[::1] remap, compact
@@ -936,6 +939,12 @@ def kmeans(const float[:, ::1] X,
     # and multiple threads
 
     num_threads = min(num_threads, num_chunks)
+
+    # Allocate each cell's distance to its nearest centroid
+    min_distances_buffer = numa_vector[float](num_threads)
+    min_distances_buffer.resize(num_cells)
+    min_distances = <float[:num_cells]> min_distances_buffer.data()
+
     if num_threads <= 1 and not is_mac:
         if kmeans_barbar:
             # Initialize centroids with k-means||
@@ -972,6 +981,7 @@ def kmeans(const float[:, ::1] X,
 
         centroid_norms_buffer.resize(num_clusters)
         centroid_norms = <float[:num_clusters]> centroid_norms_buffer.data()
+        chunk_centroids_new_buffer = numa_vector[float](num_threads)
         chunk_centroids_new_buffer.resize(
             <unsigned long long> num_chunks * num_clusters * num_dimensions)
         chunk_centroids_new = \
@@ -1196,6 +1206,7 @@ def kmeans(const float[:, ::1] X,
 
         centroid_norms_buffer.resize(num_clusters)
         centroid_norms = <float[:num_clusters]> centroid_norms_buffer.data()
+        chunk_centroids_new_buffer = numa_vector[float](num_threads)
         chunk_centroids_new_buffer.resize(
             <unsigned long long> num_chunks * num_clusters * num_dimensions)
         chunk_centroids_new = \

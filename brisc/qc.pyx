@@ -3,7 +3,8 @@
 from cython.parallel cimport parallel, prange, threadid
 from libcpp.algorithm cimport lower_bound
 from libcpp.vector cimport vector
-from .cyutils cimport atomic_and, get_thread_offset, numeric, signed_integer
+from .cyutils cimport atomic_and, get_thread_offset, numa_vector, numeric, \
+    signed_integer
 
 
 def malat1_mask_csr(
@@ -181,8 +182,8 @@ def mito_mask_csc(const numeric[::1] data,
         num_genes = indptr.shape[0] - 1
     cdef unsigned long long cell, num_cells = mito_mask.shape[0]
     cdef unsigned start_col, end_col
-    cdef vector[unsigned] row_sums_buffer, mt_sums_buffer
-    cdef vector[vector[unsigned]] thread_row_sums, thread_mt_sums
+    cdef numa_vector[unsigned] row_sums_buffer, mt_sums_buffer
+    cdef vector[numa_vector[unsigned]] thread_row_sums, thread_mt_sums
     cdef unsigned[::1] row_sums, mt_sums
 
     num_threads = min(num_threads, num_genes)
@@ -302,8 +303,8 @@ def qc_metrics_csc(const numeric[::1] data,
     cdef volatile float mt_sum_volatile
     cdef unsigned long long cell, num_cells = num_counts.shape[0]
     cdef unsigned start_col, end_col
-    cdef vector[unsigned] mt_sums_buffer
-    cdef vector[vector[unsigned]] thread_row_sums, thread_mt_sums, \
+    cdef numa_vector[unsigned] mt_sums_buffer
+    cdef vector[numa_vector[unsigned]] thread_row_sums, thread_mt_sums, \
         thread_num_genes_per_cell
     cdef unsigned[::1] mt_sums
 
