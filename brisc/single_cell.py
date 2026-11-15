@@ -17762,25 +17762,33 @@ class SingleCell:
         # `None`, set to `self.num_threads`, and if -1, set to `os.cpu_count()`
         num_threads = self._process_num_threads(num_threads)
 
+        # Check that there are at least 2 PCs
+        if PCs.shape[1] < 2:
+            error_message = (
+                f'obsm[{PC_key!r}] has fewer than 2 columns, so the embedding '
+                f'cannot be calculated')
+            raise ValueError(error_message)
+
         # Subset PCs and nearest-neighbor indices to QCed cells only, if
-        # `QC_column` is not `None`
+        # `QC_column` is not `None`. UMAP only uses the first two PCs (to
+        # orient its initialization), so only subset those.
         if QC_column is not None:
             QC_column_NumPy = QC_column.to_numpy()
-            PCs = PCs[QC_column_NumPy]
-            neighbors = neighbors[QC_column_NumPy]
-            distances = distances[QC_column_NumPy]
+            PCs = PCs[QC_column_NumPy, :2]
+            if num_threads == 1:
+                neighbors = neighbors[QC_column_NumPy]
+                distances = distances[QC_column_NumPy]
+            else:
+                indices = np.flatnonzero(QC_column_NumPy)
+                neighbors = parallel_subset_2d(neighbors, indices, num_threads)
+                distances = parallel_subset_2d(distances, indices, num_threads)
 
-        # Check that there are at least 2 cells and 2 PCs
+        # Check that there are at least 2 cells
         num_cells = len(PCs)
         if num_cells < 2:
             error_message = (
                 f'there are fewer than 2 cells, so the embedding cannot be '
                 f'calculated')
-            raise ValueError(error_message)
-        if PCs.shape[1] < 2:
-            error_message = (
-                f'obsm[{PC_key!r}] has fewer than 2 columns, so the embedding '
-                f'cannot be calculated')
             raise ValueError(error_message)
 
         # If `a` and `b` are `None`, select them based on `spread` and

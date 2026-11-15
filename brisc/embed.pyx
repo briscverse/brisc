@@ -2547,6 +2547,7 @@ cdef void umap_init_level(const long long[::1] indptr,
                           const unsigned[::1] indices,
                           const float[::1] label_weights,
                           const float[::1] summed_weights,
+                          numa_vector[float]* summed_weights_owner,
                           const float[:, ::1] anchor,
                           float[:, ::1] result,
                           const float a,
@@ -2895,6 +2896,14 @@ cdef void umap_init_level(const long long[::1] indptr,
             coarse_indptr[p + 1] = count
             out_weights[p] = total_weight
 
+    # `summed_weights` is no longer needed. If it is the level above's
+    # `coarse_summed` (`summed_weights_owner`) rather than the original
+    # graph's weights, free it now instead of keeping it while the levels
+    # below run.
+    if summed_weights_owner != NULL:
+        summed_weights_owner.clear()
+        summed_weights_owner.shrink_to_fit()
+
     # Cumsum the coarse graph's row lengths and concatenate the threads'
     # buffers into the coarse graph
     thread_totals.resize(level_threads + 1)
@@ -2959,7 +2968,7 @@ cdef void umap_init_level(const long long[::1] indptr,
         <long long[:num_parts + 1]> coarse_indptr.data(),
         <unsigned[:num_coarse_edges]> coarse_indices.data(),
         <float[:num_coarse_edges]> coarse_label_weights.data(),
-        <float[:num_coarse_edges]> coarse_summed.data(),
+        <float[:num_coarse_edges]> coarse_summed.data(), &coarse_summed,
         <float[:num_parts, :2]> coarse_anchor.data(),
         <float[:num_parts, :2]> coarse_layout.data(),
         pow(a, <float> 0.25), pow(b, <float> 0.25), depth + 1, num_parts / 4,
@@ -3049,7 +3058,7 @@ cdef void umap_embed(float[:, ::1] embedding,
 
     # Initialize recursively, starting with a quarter as many parts as cells
     # (but at least 1024), 50 epochs, and the curve parameters' fourth roots
-    umap_init_level(indptr, indices, weights, weights,
+    umap_init_level(indptr, indices, weights, weights, NULL,
                     <float[:num_cells, :2]> anchor.data(), embedding,
                     pow(a, <float> 0.25), pow(b, <float> 0.25), 1,
                     max(1024, num_cells / 4), 50, seed, num_threads)
