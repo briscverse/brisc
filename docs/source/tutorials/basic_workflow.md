@@ -330,7 +330,7 @@ Each resolution adds a column to {attr}`~brisc.SingleCell.obs`: `cluster_0` thro
 
 ## Embedding
 
-To visualize the data, brisc embeds the cells in two dimensions. brisc supports three embedding methods: {meth}`~brisc.SingleCell.umap` ([UMAP](https://arxiv.org/abs/1802.03426)), which most single-cell workflows use; {meth}`~brisc.SingleCell.pacmap` ([PaCMAP](https://arxiv.org/abs/2012.04456)), a relative of UMAP that was designed to capture global structure better; and {meth}`~brisc.SingleCell.localmap` ([LocalMAP](https://arxiv.org/abs/2412.15426)), a variant of PaCMAP designed to separate local clusters more clearly. Here, we use UMAP:
+To visualize the data, brisc embeds the cells in two dimensions. brisc supports three embedding methods: {meth}`~brisc.SingleCell.umap` ([UMAP](https://arxiv.org/abs/1802.03426)), which most single-cell workflows use; {meth}`~brisc.SingleCell.pacmap` ([PaCMAP](https://arxiv.org/abs/2012.04456)), a relative of UMAP that was designed to capture global structure better; and {meth}`~brisc.SingleCell.localmap` ([LocalMAP](https://arxiv.org/abs/2412.15426)), a variant of PaCMAP that aims to prevent distinct clusters from collapsing into one another. Here, we use UMAP:
 
 ```python
 sc = sc.umap()

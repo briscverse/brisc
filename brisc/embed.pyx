@@ -2370,13 +2370,13 @@ cdef inline float umap_select(const float[:, ::1] positions,
                               unsigned long long k,
                               unsigned long long[::1] histograms,
                               const unsigned num_threads) noexcept nogil:
-    # Return the `k`th smallest value in column `dimension` of `positions`
-    # (with `k = 0` giving the minimum), via an exact parallel radix select
-    # on the values' bits, mapped to unsigned integers with the same order
-    # (by flipping the sign bit of non-negative values and all bits of
-    # negative values). Each pass histograms the next (at most) 11 bits of the
-    # values whose earlier bits match those of the `k`th smallest value so
-    # far: bits 22-31, then 11-21, then 0-10.
+    # Return the `k`th smallest value in column `dimension` of `positions`,
+    # via an exact parallel radix select on the values' bits, mapped to
+    # unsigned integers with the same order (by flipping the sign bit of
+    # non-negative values and all bits of negative values). Each pass
+    # histograms the next (at most) 11 bits of the values whose earlier bits
+    # match those of the `k`th smallest value so far: bits 22-31, then 11-21,
+    # then 0-10.
 
     cdef unsigned row, key, digit, other_thread, thread_index, start, end, \
         radix_pass, shift, prefix = 0, num_rows = positions.shape[0]
@@ -2952,14 +2952,24 @@ cdef inline void umap_init_level(const long long[::1] indptr,
         coarse_positions = <float[:num_parts, :2]> coarse_anchor.data()
 
     # Place each node halfway between its part's position and the weighted
-    # average of its neighbors' parts' positions. Process nodes in chunks of
-    # `chunk_size`, dynamically scheduled to balance work across threads, and
-    # also sum each chunk's positions and anchors.
+    # average of its neighbors' parts' positions, and sum each chunk of
+    # `chunk_size` nodes' positions and anchors. Give each thread a
+    # contiguous range of whole chunks with about the same number of edges,
+    # by rounding the boundaries of edge-balanced ranges of nodes to the
+    # nearest chunk boundary.
     num_chunks = (num_nodes + chunk_size - 1) / chunk_size
     chunk_sums.resize(4 * num_chunks)
-    with nogil:
-        for chunk in prange(num_chunks, schedule='dynamic',
-                            num_threads=level_threads):
+    get_thread_offsets(indptr, thread_offsets.data(), level_threads)
+    for thread_index in range(1, level_threads):
+        thread_offsets[thread_index] = <unsigned> min(
+            (thread_offsets[thread_index] +
+             <unsigned long long> chunk_size / 2) / chunk_size,
+            <unsigned long long> num_chunks)
+    thread_offsets[level_threads] = num_chunks
+    with nogil, parallel(num_threads=level_threads):
+        thread_index = threadid()
+        for chunk in range(thread_offsets[thread_index],
+                           thread_offsets[thread_index + 1]):
             sum_x = 0
             sum_y = 0
             anchor_sum_x = 0
@@ -2994,6 +3004,7 @@ cdef inline void umap_init_level(const long long[::1] indptr,
             chunk_sums[4 * chunk + 1] = sum_y
             chunk_sums[4 * chunk + 2] = anchor_sum_x
             chunk_sums[4 * chunk + 3] = anchor_sum_y
+    with nogil:
         mean_x = 0
         mean_y = 0
         anchor_mean_x = 0
