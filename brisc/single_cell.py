@@ -17538,6 +17538,7 @@ class SingleCell:
              spread: float = 1,
              min_dist: float = 0.5,
              seed: int | np.integer = 0,
+             chunk_size: int | np.integer = 1024,
              overwrite: bool = False,
              num_threads: int | np.integer | None = None) -> SingleCell:
         """
@@ -17549,8 +17550,7 @@ class SingleCell:
         0.6 (with `compatibility_layout=False`): the embedding is initialized
         by recursively laying out coarser and coarser versions of the
         nearest-neighbor graph, then optimized with Adam, updating every
-        cell's position in parallel each iteration. Results are identical
-        regardless of the number of threads.
+        cell's position in parallel each iteration.
 
         This function is intended to be run after `pca()` and `neighbors()`. By
         default, it uses `obsm['pca']`, `obsm['neighbors']`, and
@@ -17585,17 +17585,17 @@ class SingleCell:
                             larger than 10,000 elements.
             alpha: the initial learning rate for optimization
             gamma: the weight applied to negative samples during optimization
-            negative_sample_rate: controls the number of negative samples per
+            negative_sample_rate: determines the number of negative samples per
                                   positive sample; as in umap-learn 0.6, the
                                   actual number is `negative_sample_rate / 1.5`
                                   on average
-            negative_window: when there are more than `negative_window`
-                             cells, draw each cell's negative samples from a
-                             window of `negative_window` cells near it in a
-                             random 1D projection of the embedding
-                             (re-randomized each iteration), rather than from
-                             all cells. These "hard negatives" make negative
-                             sampling more effective for large datasets; set
+            negative_window: when there are more than this many cells, draw
+                             each cell's negative samples from a window of
+                             `negative_window` cells near it in a random 1D
+                             projection of the embedding (re-randomized each
+                             iteration), rather than from all cells. These
+                             "hard negatives" make negative sampling more
+                             effective for large datasets; set
                              `negative_window` to at least the number of cells
                              to disable them.
             a: UMAP curve parameter; if `None`, will be fit based on the values
@@ -17609,6 +17609,11 @@ class SingleCell:
             min_dist: the minimum distance between points in the embedding.
                       Only used when `a` and `b` are `None`.
             seed: the random seed to use for UMAP
+            chunk_size: the number of cells per fixed block in deterministic
+                        parallel reductions. Used to parallelize operations
+                        like means that would otherwise be serial. Block
+                        boundaries are fixed regardless of thread count,
+                        ensuring floating-point identical results.
             overwrite: if `True`, overwrite `embedding_key` if already present
                        in `obsm`, instead of raising an error
             num_threads: the number of threads to use when running `umap()`.
@@ -17758,6 +17763,10 @@ class SingleCell:
         # Check that `seed` is an integer
         check_type(seed, 'seed', int, 'an integer')
 
+        # Check that `chunk_size` is a positive integer
+        check_type(chunk_size, 'chunk_size', int, 'a positive integer')
+        check_bounds(chunk_size, 'chunk_size', 1)
+
         # Check that `num_threads` is a positive integer, -1 or `None`; if
         # `None`, set to `self.num_threads`, and if -1, set to `os.cpu_count()`
         num_threads = self._process_num_threads(num_threads)
@@ -17787,7 +17796,7 @@ class SingleCell:
         num_cells = len(PCs)
         if num_cells < 2:
             error_message = (
-                f'there are fewer than 2 cells, so the embedding cannot be '
+                f'there is only one cell, so the embedding cannot be '
                 f'calculated')
             raise ValueError(error_message)
 
@@ -17803,22 +17812,30 @@ class SingleCell:
             a, b = curve_fit(
                 lambda x, a, b: 1.0 / (1.0 + a * x ** (2 * b)), xv, yv)[0]
 
-        # Run UMAP. Like umap-learn, prune graph edges whose weights are less
-        # than `1 / num_pruning_iterations` of the maximum weight, since they
-        # would be sampled less than once in expectation during optimization.
-        # Since the same edges are pruned, each remaining edge is sampled as
-        # many times in expectation as umap-learn samples it.
+        # Run UMAP. Like umap-learn, prune graph edges based on the number of
+        # iterations, or on the number of cells if there are 10 or fewer
+        # iterations.
         num_pruning_iterations = num_iterations if num_iterations > 10 else \
             500 if num_cells <= 10_000 else 200
         embedding = numa_zeros((num_cells, 2), dtype=np.float32,
                                num_threads=num_threads)
-        umap(embedding=embedding, PCs=PCs, neighbors=neighbors,
-             distances=distances, num_iterations=num_iterations,
+        embedding_buffer = numa_zeros((num_cells, 2), dtype=np.float32,
+                                      num_threads=num_threads)
+        umap(embedding=embedding, embedding_buffer=embedding_buffer, PCs=PCs,
+             neighbors=neighbors, distances=distances,
+             num_iterations=num_iterations,
              num_pruning_iterations=num_pruning_iterations, a=a, b=b,
              alpha=alpha, gamma=gamma,
              negative_sample_rate=negative_sample_rate,
              negative_window=negative_window, seed=seed,
-             neighbors_key=neighbors_key, num_threads=num_threads)
+             chunk_size=chunk_size, neighbors_key=neighbors_key,
+             num_threads=num_threads)
+
+        # `embedding` and `embedding_buffer` are swapped every iteration, so
+        # `embedding_buffer` contains the final embedding after an odd number
+        # of iterations; if so, swap them
+        if num_iterations & 1:
+            embedding = embedding_buffer
 
         # If `QC_column` was specified, back-project from QCed cells to all
         # cells, filling with `NaN`

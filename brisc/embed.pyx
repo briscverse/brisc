@@ -6,14 +6,15 @@ from libc.float cimport FLT_MAX
 from libc.limits cimport UINT_MAX
 from libc.math cimport M_PI
 from libc.string cimport memcpy
-from libcpp.algorithm cimport min_element, nth_element, sort
+from libcpp.algorithm cimport nth_element, sort
 from libcpp.cmath cimport atan2, cos, exp, log, log2, log10, pow, sin, sqrt, \
     tanh
+from libcpp.utility cimport pair
 from libcpp.vector cimport vector
 from .cyutils cimport PREFETCH, atomic_or, get_thread_offsets, long_long_, \
     max_heap_replace_top, max_heap_sort, numa_vector, randint, \
-    random_normal, random_uniform, signed_integer, srand, \
-    uninitialized_vector, unsigned_, unsigned_long_long_
+    random_uniform, srand, uninitialized_vector, unsigned_, \
+    unsigned_long_long_
 
 
 cdef inline void get_neighbor_pairs(const float[:, ::1] X,
@@ -1475,14 +1476,9 @@ def localmap(const float[:, ::1] PCs,
 # optimizer that updates every cell's position synchronously each epoch. Since
 # each cell's update only reads the previous epoch's positions and only writes
 # its own position, and all random numbers are drawn from per-cell streams, the
-# results do not depend on the number of threads.
-
-# Sums, minima and maxima over cells are calculated over chunks of this many
-# cells, which are then combined in order, so results do not depend on the
-# number of threads
-cdef enum:
-    UMAP_CHUNK_SIZE = 65536
-
+# results do not depend on the number of threads. Sums over cells are
+# calculated over fixed-size chunks of `chunk_size` cells, which are then
+# combined in order, for the same reason.
 
 cdef inline void umap_group_by_key(const unsigned[::1] keys,
                                    const unsigned num_keys,
@@ -1497,11 +1493,12 @@ cdef inline void umap_group_by_key(const unsigned[::1] keys,
     # buckets for each range of keys laid out consecutively and ordered by
     # which of `num_threads` contiguous chunks of items they come from.
 
-    cdef unsigned key, t, r, thread_index, stride = num_threads + 16
+    cdef unsigned key, item_chunk, key_range, thread_index, \
+        stride = num_threads + 16
     cdef unsigned long long item, start, end, position, count, total, \
         num_items = keys.shape[0], \
         item_chunk_size = (num_items + num_threads - 1) / num_threads, \
-        key_chunk_size = (num_keys + num_threads - 1) / num_threads
+        key_range_size = (num_keys + num_threads - 1) / num_threads
     cdef uninitialized_vector[unsigned long long] cursors, range_offsets
     cdef numa_vector[unsigned long long] buckets_buffer, key_cursors_buffer
     cdef unsigned long long[::1] buckets, key_cursors
@@ -1510,21 +1507,21 @@ cdef inline void umap_group_by_key(const unsigned[::1] keys,
     cursors.resize(<unsigned long long> num_threads * stride)
     with nogil, parallel(num_threads=num_threads):
         thread_index = threadid()
-        for r in range(num_threads):
-            cursors[thread_index * stride + r] = 0
+        for key_range in range(num_threads):
+            cursors[thread_index * stride + key_range] = 0
         start = min(thread_index * item_chunk_size, num_items)
         end = min(start + item_chunk_size, num_items)
         for item in range(start, end):
-            cursors[thread_index * stride + keys[item] / key_chunk_size] += 1
+            cursors[thread_index * stride + keys[item] / key_range_size] += 1
 
     # Lay out the buckets, and convert the counts to each bucket's start
     range_offsets.resize(num_threads + 1)
     total = 0
-    for r in range(num_threads):
-        range_offsets[r] = total
-        for t in range(num_threads):
-            count = cursors[t * stride + r]
-            cursors[t * stride + r] = total
+    for key_range in range(num_threads):
+        range_offsets[key_range] = total
+        for item_chunk in range(num_threads):
+            count = cursors[item_chunk * stride + key_range]
+            cursors[item_chunk * stride + key_range] = total
             total += count
     range_offsets[num_threads] = total
 
@@ -1537,9 +1534,9 @@ cdef inline void umap_group_by_key(const unsigned[::1] keys,
         start = min(thread_index * item_chunk_size, num_items)
         end = min(start + item_chunk_size, num_items)
         for item in range(start, end):
-            r = keys[item] / key_chunk_size
-            position = cursors[thread_index * stride + r]
-            cursors[thread_index * stride + r] = position + 1
+            key_range = keys[item] / key_range_size
+            position = cursors[thread_index * stride + key_range]
+            cursors[thread_index * stride + key_range] = position + 1
             buckets[position] = item
 
     # Count the items with each key and cumsum the counts in `group_indptr`;
@@ -1549,8 +1546,8 @@ cdef inline void umap_group_by_key(const unsigned[::1] keys,
     group_indptr.resize(num_keys + 1)
     with nogil, parallel(num_threads=num_threads):
         thread_index = threadid()
-        start = min(thread_index * key_chunk_size, num_keys)
-        end = min(start + key_chunk_size, num_keys)
+        start = min(thread_index * key_range_size, num_keys)
+        end = min(start + key_range_size, num_keys)
         for position in range(range_offsets[thread_index],
                               range_offsets[thread_index + 1]):
             group_indptr[keys[buckets[position]] + 1] += 1
@@ -1567,8 +1564,8 @@ cdef inline void umap_group_by_key(const unsigned[::1] keys,
     key_cursors = <unsigned long long[:num_keys]> key_cursors_buffer.data()
     with nogil, parallel(num_threads=num_threads):
         thread_index = threadid()
-        start = min(thread_index * key_chunk_size, num_keys)
-        end = min(start + key_chunk_size, num_keys)
+        start = min(thread_index * key_range_size, num_keys)
+        end = min(start + key_range_size, num_keys)
         for key in range(start, end):
             key_cursors[key] = group_indptr[key]
         for position in range(range_offsets[thread_index],
@@ -1580,35 +1577,40 @@ cdef inline void umap_group_by_key(const unsigned[::1] keys,
 
 
 cdef inline void umap_union_weights(const unsigned[:, ::1] neighbors,
-                                    const float[::1] directed,
+                                    const float[::1] directed_weights,
                                     const unsigned long long[::1] reverse,
                                     const long long[::1] reverse_indptr,
-                                    const unsigned i,
+                                    const unsigned cell,
                                     float* forward_weights) noexcept nogil:
-    # Calculate cell `i`'s fuzzy-union weights to each of its own nearest
-    # neighbors `j`: `w_ij + w_ji - w_ij * w_ji` if `i` is also one of `j`'s
-    # nearest neighbors, and just `w_ij` otherwise.
-    # `reverse[reverse_indptr[i]:reverse_indptr[i + 1]]` holds the flat
-    # indices `j * num_neighbors + k` of every directed edge pointing to `i`.
+    # Calculate `cell`'s fuzzy-union weights to each of its own nearest
+    # neighbors `j`: `w_ij + w_ji - w_ij * w_ji` if `cell` is also one of
+    # `j`'s nearest neighbors, and just `w_ij` otherwise.
+    # `reverse[reverse_indptr[cell]:reverse_indptr[cell + 1]]` holds the flat
+    # indices `j * num_neighbors + k` of every directed edge pointing to
+    # `cell`. (`forward_weights` is a pointer into a per-thread buffer, since
+    # Cython does not allow slicing a memoryview per thread in a parallel
+    # block.)
 
-    cdef unsigned k, j, num_neighbors = neighbors.shape[1]
-    cdef long long p
-    cdef unsigned long long e
-    cdef float w
+    cdef unsigned neighbor_index, source, num_neighbors = neighbors.shape[1]
+    cdef long long position
+    cdef unsigned long long edge
+    cdef float weight
 
-    for k in range(num_neighbors):
-        forward_weights[k] = \
-            directed[<unsigned long long> i * num_neighbors + k]
-    for p in range(reverse_indptr[i], reverse_indptr[i + 1]):
-        e = reverse[p]
-        j = <unsigned> (e / num_neighbors)
-        k = 0
-        while k < num_neighbors and neighbors[i, k] != j:
-            k += 1
-        if k < num_neighbors:
-            w = directed[e]
-            forward_weights[k] = \
-                forward_weights[k] + w - forward_weights[k] * w
+    for neighbor_index in range(num_neighbors):
+        forward_weights[neighbor_index] = directed_weights[
+            <unsigned long long> cell * num_neighbors + neighbor_index]
+    for position in range(reverse_indptr[cell], reverse_indptr[cell + 1]):
+        edge = reverse[position]
+        source = <unsigned> (edge / num_neighbors)
+        neighbor_index = 0
+        while neighbor_index < num_neighbors and \
+                neighbors[cell, neighbor_index] != source:
+            neighbor_index += 1
+        if neighbor_index < num_neighbors:
+            weight = directed_weights[edge]
+            forward_weights[neighbor_index] = \
+                forward_weights[neighbor_index] + weight - \
+                forward_weights[neighbor_index] * weight
 
 
 cdef inline void umap_fuzzy_graph(const unsigned[:, ::1] neighbors,
@@ -1622,89 +1624,92 @@ cdef inline void umap_fuzzy_graph(const unsigned[:, ::1] neighbors,
                                   unsigned num_threads):
     # Build UMAP's fuzzy simplicial set: convert each cell's nearest-neighbor
     # distances to directed membership weights `w_ij`, symmetrize them with the
-    # fuzzy union `w_ij + w_ji - w_ij * w_ji`, and prune weights below
-    # `max_weight / num_pruning_iterations`, which would be sampled less than
-    # once in expectation during optimization. Each row of the resulting CSR
-    # graph lists the cell's own nearest neighbors (in order), followed by the
-    # cells that have it as a nearest neighbor but are not among its own
-    # nearest neighbors (in ascending order).
+    # fuzzy union `w_ij + w_ji - w_ij * w_ji`, and prune small weights. Each
+    # row of the resulting CSR graph lists the cell's own nearest neighbors
+    # (in order), followed by the cells that have it as a nearest neighbor but
+    # are not among its own nearest neighbors (in ascending order).
 
-    cdef unsigned i, j, k, n, t, thread_index, start, end, chunk_size, \
-        num_cells = neighbors.shape[0], num_neighbors = neighbors.shape[1]
-    cdef long long p
-    cdef unsigned long long e, q, total, count, \
+    cdef unsigned cell, neighbor, neighbor_index, source, thread_index, \
+        start, end, iteration, num_cells = neighbors.shape[0], \
+        num_neighbors = neighbors.shape[1]
+    cdef long long position
+    cdef unsigned long long edge, output_position, num_kept, total, \
         num_edges = <unsigned long long> num_cells * num_neighbors
-    cdef float d, rho, mean_distance, distance_sum, weight_sum, lo, mid, hi, \
-        max_weight, threshold, target = log2(<float> (num_neighbors + 1))
+    cdef float distance, rho, mean_distance, distance_sum, weight_sum, \
+        low, middle, high, threshold, \
+        target = log2(<float> (num_neighbors + 1))
     cdef float* forward_weights
-    cdef uninitialized_vector[float] forward_weights_buffer, \
-        thread_max_weights
+    cdef uninitialized_vector[float] forward_weights_buffer
+    cdef uninitialized_vector[unsigned] thread_offsets
     cdef uninitialized_vector[unsigned long long] thread_num_edges
-    cdef numa_vector[float] directed_buffer
+    cdef numa_vector[float] directed_weights_buffer
     cdef numa_vector[long long] reverse_indptr_buffer
     cdef numa_vector[unsigned long long] reverse_buffer
-    cdef float[::1] directed
+    cdef float[::1] directed_weights
     cdef long long[::1] reverse_indptr
     cdef unsigned long long[::1] reverse
 
-    # Split cells into `num_threads` contiguous chunks of `chunk_size` cells
-    num_threads = min(num_threads, num_cells)
-    chunk_size = (num_cells + num_threads - 1) / num_threads
-
     # Convert each cell's nearest-neighbor distances to directed weights, as
     # in umap-learn's `smooth_knn_dist()`: subtract the distance to the
-    # nearest neighbor (`rho`), then binary-search for the bandwidth (`mid`)
-    # at which the weights sum to `target`. Also check that nearest-neighbor
-    # indices are valid.
-    directed_buffer = numa_vector[float](num_threads)
-    directed_buffer.resize(num_edges)
-    directed = <float[:num_edges]> directed_buffer.data()
+    # nearest neighbor (`rho`), then binary-search for the bandwidth
+    # (`middle`) at which the weights sum to `target`. Also check that
+    # nearest-neighbor indices are valid.
+    directed_weights_buffer = numa_vector[float](num_threads)
+    directed_weights_buffer.resize(num_edges)
+    directed_weights = <float[:num_edges]> directed_weights_buffer.data()
     with nogil, parallel(num_threads=num_threads):
         thread_index = threadid()
-        start = min(thread_index * chunk_size, num_cells)
-        end = min(start + chunk_size, num_cells)
-        for i in range(start, end):
-            e = <unsigned long long> i * num_neighbors
+        start = <unsigned> (<unsigned long long> thread_index * num_cells /
+                            num_threads)
+        end = <unsigned> (<unsigned long long> (thread_index + 1) *
+                          num_cells / num_threads)
+        for cell in range(start, end):
+            edge = <unsigned long long> cell * num_neighbors
             distance_sum = 0
-            for k in range(num_neighbors):
-                d = sqrt(max(distances[i, k], <float> 0))
-                directed[e + k] = d
-                distance_sum = distance_sum + d
-                j = neighbors[i, k]
-                if j >= num_cells:
+            for neighbor_index in range(num_neighbors):
+                distance = sqrt(max(distances[cell, neighbor_index],
+                                    <float> 0))
+                directed_weights[edge + neighbor_index] = distance
+                distance_sum = distance_sum + distance
+                neighbor = neighbors[cell, neighbor_index]
+                if neighbor >= num_cells:
                     atomic_or(too_large, True)
-                elif j == i:
+                elif neighbor == cell:
                     atomic_or(self_neighbors, True)
             rho = 0
-            for k in range(num_neighbors):
-                if directed[e + k] > <float> 0:
-                    rho = directed[e + k]
+            for neighbor_index in range(num_neighbors):
+                if directed_weights[edge + neighbor_index] > <float> 0:
+                    rho = directed_weights[edge + neighbor_index]
                     break
             mean_distance = distance_sum / (num_neighbors + 1)
-            lo = 0
-            mid = 1
-            hi = FLT_MAX
-            for n in range(64):
+            low = 0
+            middle = 1
+            high = FLT_MAX
+            for iteration in range(64):
                 weight_sum = 0
-                for k in range(num_neighbors):
-                    d = max(directed[e + k] - rho, <float> 0)
-                    weight_sum = weight_sum + exp(-(d / mid))
+                for neighbor_index in range(num_neighbors):
+                    distance = max(
+                        directed_weights[edge + neighbor_index] - rho,
+                        <float> 0)
+                    weight_sum = weight_sum + exp(-(distance / middle))
                 if abs(weight_sum - target) < <float> 1e-5:
                     break
                 if weight_sum > target:
-                    hi = mid
-                    mid = <float> 0.5 * (lo + hi)
+                    high = middle
+                    middle = <float> 0.5 * (low + high)
                 else:
-                    lo = mid
-                    if hi == FLT_MAX:
-                        mid = mid * <float> 2
+                    low = middle
+                    if high == FLT_MAX:
+                        middle = middle * <float> 2
                     else:
-                        mid = <float> 0.5 * (lo + hi)
-            if mid < <float> 0.001 * mean_distance:
-                mid = <float> 0.001 * mean_distance
-            for k in range(num_neighbors):
-                d = max(directed[e + k] - rho, <float> 0)
-                directed[e + k] = exp(-(d / mid))
+                        middle = <float> 0.5 * (low + high)
+            if middle < <float> 0.001 * mean_distance:
+                middle = <float> 0.001 * mean_distance
+            for neighbor_index in range(num_neighbors):
+                distance = max(directed_weights[edge + neighbor_index] - rho,
+                               <float> 0)
+                directed_weights[edge + neighbor_index] = \
+                    exp(-(distance / middle))
     if too_large or self_neighbors:
         return
     PyErr_CheckSignals()
@@ -1718,34 +1723,22 @@ cdef inline void umap_fuzzy_graph(const unsigned[:, ::1] neighbors,
     reverse = <unsigned long long[:num_edges]> reverse_buffer.data()
     PyErr_CheckSignals()
 
-    # Find the maximum fuzzy-union weight
+    # Symmetrizing a cell's edges takes time proportional to the number of
+    # edges pointing to it, which varies widely (e.g. for hubs), so balance
+    # work across threads by that number
+    thread_offsets.resize(num_threads + 1)
+    get_thread_offsets(reverse_indptr, thread_offsets.data(), num_threads)
+
+    # Prune weights below `1 / num_pruning_iterations`. Like umap-learn,
+    # this is the maximum weight divided by the number of iterations, but the
+    # maximum weight is always 1 (up to rounding): each cell's directed weight
+    # to its nearest neighbor is `exp(0) = 1`, and the fuzzy union of weights
+    # between 0 and 1 is also between 0 and 1. So pruning removes the edges
+    # that would be sampled less than once in expectation during
+    # optimization, and each remaining edge is sampled as many times in
+    # expectation as in umap-learn.
+    threshold = <float> 1 / num_pruning_iterations
     forward_weights_buffer.resize(num_threads * (num_neighbors + 16))
-    thread_max_weights.resize(num_threads * 16)
-    with nogil, parallel(num_threads=num_threads):
-        thread_index = threadid()
-        forward_weights = \
-            forward_weights_buffer.data() + thread_index * (num_neighbors + 16)
-        max_weight = 0
-        start = min(thread_index * chunk_size, num_cells)
-        end = min(start + chunk_size, num_cells)
-        for i in range(start, end):
-            umap_union_weights(neighbors, directed, reverse, reverse_indptr,
-                               i, forward_weights)
-            for k in range(num_neighbors):
-                max_weight = max(max_weight, forward_weights[k])
-            for p in range(reverse_indptr[i], reverse_indptr[i + 1]):
-                e = reverse[p]
-                j = <unsigned> (e / num_neighbors)
-                k = 0
-                while k < num_neighbors and neighbors[i, k] != j:
-                    k = k + 1
-                if k == num_neighbors:
-                    max_weight = max(max_weight, directed[e])
-        thread_max_weights[thread_index * 16] = max_weight
-    max_weight = 0
-    for t in range(num_threads):
-        max_weight = max(max_weight, thread_max_weights[t * 16])
-    threshold = max_weight / num_pruning_iterations
 
     # Count the edges each cell keeps after pruning, then cumsum the counts in
     # `indptr`
@@ -1756,38 +1749,39 @@ cdef inline void umap_fuzzy_graph(const unsigned[:, ::1] neighbors,
         thread_index = threadid()
         forward_weights = \
             forward_weights_buffer.data() + thread_index * (num_neighbors + 16)
-        q = 0
-        start = min(thread_index * chunk_size, num_cells)
-        end = min(start + chunk_size, num_cells)
-        for i in range(start, end):
-            umap_union_weights(neighbors, directed, reverse, reverse_indptr,
-                               i, forward_weights)
-            count = 0
-            for k in range(num_neighbors):
-                if forward_weights[k] >= threshold:
-                    count = count + 1
-            for p in range(reverse_indptr[i], reverse_indptr[i + 1]):
-                e = reverse[p]
-                j = <unsigned> (e / num_neighbors)
-                k = 0
-                while k < num_neighbors and neighbors[i, k] != j:
-                    k = k + 1
-                if k == num_neighbors and directed[e] >= threshold:
-                    count = count + 1
-            q = q + count
-            indptr[i + 1] = q
-        thread_num_edges[thread_index * 16] = q
+        total = 0
+        for cell in range(thread_offsets[thread_index],
+                          thread_offsets[thread_index + 1]):
+            umap_union_weights(neighbors, directed_weights, reverse,
+                               reverse_indptr, cell, forward_weights)
+            num_kept = 0
+            for neighbor_index in range(num_neighbors):
+                if forward_weights[neighbor_index] >= threshold:
+                    num_kept = num_kept + 1
+            for position in range(reverse_indptr[cell],
+                                  reverse_indptr[cell + 1]):
+                edge = reverse[position]
+                source = <unsigned> (edge / num_neighbors)
+                neighbor_index = 0
+                while neighbor_index < num_neighbors and \
+                        neighbors[cell, neighbor_index] != source:
+                    neighbor_index = neighbor_index + 1
+                if neighbor_index == num_neighbors and \
+                        directed_weights[edge] >= threshold:
+                    num_kept = num_kept + 1
+            total = total + num_kept
+            indptr[cell + 1] = total
+        thread_num_edges[thread_index * 16] = total
     total = 0
-    for t in range(num_threads):
-        count = thread_num_edges[t * 16]
-        thread_num_edges[t * 16] = total
-        total += count
+    for thread_index in range(num_threads):
+        num_kept = thread_num_edges[thread_index * 16]
+        thread_num_edges[thread_index * 16] = total
+        total += num_kept
     with nogil, parallel(num_threads=num_threads):
         thread_index = threadid()
-        start = min(thread_index * chunk_size, num_cells)
-        end = min(start + chunk_size, num_cells)
-        for i in range(start, end):
-            indptr[i + 1] += thread_num_edges[thread_index * 16]
+        for cell in range(thread_offsets[thread_index],
+                          thread_offsets[thread_index + 1]):
+            indptr[cell + 1] += thread_num_edges[thread_index * 16]
     PyErr_CheckSignals()
 
     # Fill in the pruned graph
@@ -1799,170 +1793,95 @@ cdef inline void umap_fuzzy_graph(const unsigned[:, ::1] neighbors,
         thread_index = threadid()
         forward_weights = \
             forward_weights_buffer.data() + thread_index * (num_neighbors + 16)
-        start = min(thread_index * chunk_size, num_cells)
-        end = min(start + chunk_size, num_cells)
-        for i in range(start, end):
-            umap_union_weights(neighbors, directed, reverse, reverse_indptr,
-                               i, forward_weights)
-            q = indptr[i]
-            for k in range(num_neighbors):
-                if forward_weights[k] >= threshold:
-                    indices[q] = neighbors[i, k]
-                    weights[q] = forward_weights[k]
-                    q = q + 1
-            for p in range(reverse_indptr[i], reverse_indptr[i + 1]):
-                e = reverse[p]
-                j = <unsigned> (e / num_neighbors)
-                k = 0
-                while k < num_neighbors and neighbors[i, k] != j:
-                    k = k + 1
-                if k == num_neighbors and directed[e] >= threshold:
-                    indices[q] = j
-                    weights[q] = directed[e]
-                    q = q + 1
+        for cell in range(thread_offsets[thread_index],
+                          thread_offsets[thread_index + 1]):
+            umap_union_weights(neighbors, directed_weights, reverse,
+                               reverse_indptr, cell, forward_weights)
+            output_position = indptr[cell]
+            for neighbor_index in range(num_neighbors):
+                if forward_weights[neighbor_index] >= threshold:
+                    indices[output_position] = neighbors[cell, neighbor_index]
+                    weights[output_position] = forward_weights[neighbor_index]
+                    output_position = output_position + 1
+            for position in range(reverse_indptr[cell],
+                                  reverse_indptr[cell + 1]):
+                edge = reverse[position]
+                source = <unsigned> (edge / num_neighbors)
+                neighbor_index = 0
+                while neighbor_index < num_neighbors and \
+                        neighbors[cell, neighbor_index] != source:
+                    neighbor_index = neighbor_index + 1
+                if neighbor_index == num_neighbors and \
+                        directed_weights[edge] >= threshold:
+                    indices[output_position] = source
+                    weights[output_position] = directed_weights[edge]
+                    output_position = output_position + 1
 
 
 cdef inline (float, float) umap_projection_range(
-        const float[:, ::1] positions,
+        const float[::1] positions,
         const float cos_angle,
         const float sin_angle,
         const unsigned num_threads) noexcept nogil:
     # Return the minimum and maximum over cells of the projection of their
-    # positions (the first two columns of `positions`) onto the direction
-    # (`cos_angle`, `sin_angle`)
+    # positions onto the direction (`cos_angle`, `sin_angle`). `positions`
+    # is flattened: cell `i`'s position is `positions[2 * i:2 * i + 2]`.
+    # Minima and maxima are exact, so unlike sums, they do not depend on how
+    # cells are split across threads.
 
-    cdef unsigned i, chunk, num_cells = positions.shape[0], \
-        num_chunks = (num_cells + UMAP_CHUNK_SIZE - 1) / UMAP_CHUNK_SIZE
+    cdef unsigned cell, thread_index, start, end, \
+        num_cells = positions.shape[0] / 2
     cdef float projection, minimum, maximum
-    cdef vector[float] chunk_minima, chunk_maxima
-    chunk_minima.resize(num_chunks)
-    chunk_maxima.resize(num_chunks)
-    for chunk in prange(num_chunks, num_threads=num_threads):
+    cdef uninitialized_vector[float] thread_minima, thread_maxima
+    thread_minima.resize(num_threads * 16)
+    thread_maxima.resize(num_threads * 16)
+    with parallel(num_threads=num_threads):
+        thread_index = threadid()
+        start = <unsigned> (<unsigned long long> thread_index * num_cells /
+                            num_threads)
+        end = <unsigned> (<unsigned long long> (thread_index + 1) *
+                          num_cells / num_threads)
         minimum = FLT_MAX
         maximum = -FLT_MAX
-        for i in range(chunk * UMAP_CHUNK_SIZE,
-                       min((chunk + 1) * UMAP_CHUNK_SIZE, num_cells)):
-            projection = positions[i, 0] * cos_angle + \
-                positions[i, 1] * sin_angle
+        for cell in range(start, end):
+            projection = positions[2 * cell] * cos_angle + \
+                positions[2 * cell + 1] * sin_angle
             minimum = min(minimum, projection)
             maximum = max(maximum, projection)
-        chunk_minima[chunk] = minimum
-        chunk_maxima[chunk] = maximum
+        thread_minima[thread_index * 16] = minimum
+        thread_maxima[thread_index * 16] = maximum
     minimum = FLT_MAX
     maximum = -FLT_MAX
-    for chunk in range(num_chunks):
-        minimum = min(minimum, chunk_minima[chunk])
-        maximum = max(maximum, chunk_maxima[chunk])
+    for thread_index in range(num_threads):
+        minimum = min(minimum, thread_minima[thread_index * 16])
+        maximum = max(maximum, thread_maxima[thread_index * 16])
     return minimum, maximum
 
 
-cdef inline void umap_projection_order(const float[:, ::1] positions,
-                                       const float cos_angle,
-                                       const float sin_angle,
-                                       const unsigned num_bins,
-                                       unsigned[::1] bins,
-                                       unsigned[::1] order,
-                                       unsigned[::1] rank,
-                                       unsigned long long[::1] histograms,
-                                       unsigned long long[::1] bin_starts,
-                                       const unsigned num_threads) \
+cdef inline (float, float) umap_mean(const float[:, ::1] positions,
+                                     const unsigned chunk_size,
+                                     const unsigned num_threads) \
         noexcept nogil:
-    # Sort cells by their projection onto the direction (`cos_angle`,
-    # `sin_angle`), storing the sorted order in `order` and each cell's
-    # position in the sorted order in `rank`. Unlike umap-learn, which sorts
-    # the projections exactly, quantize them into `num_bins` equal-width bins
-    # and counting-sort the bins, which takes a single pass. Ties are broken
-    # by index; since bins are much narrower than the windows negative samples
-    # are drawn from, this barely changes the windows. Each thread counts and
-    # then scatters one contiguous chunk of cells, so the result does not
-    # depend on the number of threads.
+    # Return the mean of each column of the `num_rows` × 2 array `positions`
 
-    cdef unsigned i, bin, t, thread_index, start, end, \
-        num_cells = positions.shape[0]
-    cdef unsigned long long count, total
-    cdef unsigned long long* histogram
-    cdef float minimum, maximum, projection, scale
-
-    # Bin each cell's projection, and count each thread's cells in each bin
-    minimum, maximum = umap_projection_range(positions, cos_angle, sin_angle,
-                                             num_threads)
-    scale = num_bins / (maximum - minimum) if maximum > minimum else \
-        <float> 0
-    with parallel(num_threads=num_threads):
-        thread_index = threadid()
-        histogram = &histograms[<unsigned long long> thread_index * num_bins]
-        for bin in range(num_bins):
-            histogram[bin] = 0
-        start = <unsigned> (<unsigned long long> thread_index * num_cells /
-                            num_threads)
-        end = <unsigned> (<unsigned long long> (thread_index + 1) *
-                          num_cells / num_threads)
-        for i in range(start, end):
-            projection = positions[i, 0] * cos_angle + \
-                positions[i, 1] * sin_angle
-            bin = min(<unsigned> ((projection - minimum) * scale),
-                      num_bins - 1)
-            bins[i] = bin
-            histogram[bin] += 1
-
-    # Convert the counts to each thread's first position in each bin: cumsum
-    # each bin's counts over threads, then add the bin's start
-    for bin in prange(num_bins, num_threads=num_threads):
-        total = 0
-        for t in range(num_threads):
-            count = histograms[<unsigned long long> t * num_bins + bin]
-            histograms[<unsigned long long> t * num_bins + bin] = total
-            total = total + count
-        bin_starts[bin] = total
-    total = 0
-    for bin in range(num_bins):
-        count = bin_starts[bin]
-        bin_starts[bin] = total
-        total += count
-    for bin in prange(num_bins, num_threads=num_threads):
-        for t in range(num_threads):
-            histograms[<unsigned long long> t * num_bins + bin] += \
-                bin_starts[bin]
-
-    # Scatter cells to their sorted positions
-    with parallel(num_threads=num_threads):
-        thread_index = threadid()
-        histogram = &histograms[<unsigned long long> thread_index * num_bins]
-        start = <unsigned> (<unsigned long long> thread_index * num_cells /
-                            num_threads)
-        end = <unsigned> (<unsigned long long> (thread_index + 1) *
-                          num_cells / num_threads)
-        for i in range(start, end):
-            count = histogram[bins[i]]
-            histogram[bins[i]] = count + 1
-            order[count] = i
-            rank[i] = <unsigned> count
-
-
-cdef inline void umap_add_clipped_repulsion(const float[:, ::1] positions,
-                                            const unsigned source,
-                                            const unsigned negative,
-                                            const float a,
-                                            const float b,
-                                            const float gamma,
-                                            float& resultant_x,
-                                            float& resultant_y) \
-        noexcept nogil:
-    # Add the repulsive force on `source` from `negative`, softly clipped to
-    # a norm of at most `gamma`, to the resultant (`resultant_x`,
-    # `resultant_y`), as in umap-learn's `_sample_negative_force_ratio()`
-
-    cdef float dx = positions[source, 0] - positions[negative, 0], \
-        dy = positions[source, 1] - positions[negative, 1], \
-        dist_squared = dx * dx + dy * dy, distance, coefficient, scale
-    if dist_squared > <float> 0:
-        distance = sqrt(dist_squared)
-        coefficient = <float> 2 * gamma * b / (
-            (<float> 0.001 + dist_squared) *
-            (a * pow(dist_squared, b) + <float> 1))
-        scale = gamma * tanh(coefficient * distance / gamma) / distance
-        resultant_x += scale * dx
-        resultant_y += scale * dy
+    cdef unsigned row, chunk, num_rows = positions.shape[0], \
+        num_chunks = (num_rows + chunk_size - 1) / chunk_size
+    cdef float sum_x, sum_y, total_x = 0, total_y = 0
+    cdef uninitialized_vector[float] chunk_sums
+    chunk_sums.resize(2 * num_chunks)
+    for chunk in prange(num_chunks, num_threads=num_threads):
+        sum_x = 0
+        sum_y = 0
+        for row in range(chunk * chunk_size,
+                         min((chunk + 1) * chunk_size, num_rows)):
+            sum_x = sum_x + positions[row, 0]
+            sum_y = sum_y + positions[row, 1]
+        chunk_sums[2 * chunk] = sum_x
+        chunk_sums[2 * chunk + 1] = sum_y
+    for chunk in range(num_chunks):
+        total_x += chunk_sums[2 * chunk]
+        total_y += chunk_sums[2 * chunk + 1]
+    return total_x / num_rows, total_y / num_rows
 
 
 cdef inline float sorted_quantile(const float* values,
@@ -1972,49 +1891,64 @@ cdef inline float sorted_quantile(const float* values,
     # `np.quantile()`
 
     cdef float position = (num_values - 1) * quantile
-    cdef unsigned lo = <unsigned> position, \
-        hi = min(lo + 1, num_values - 1)
-    return values[lo] + (position - lo) * (values[hi] - values[lo])
+    cdef unsigned low = <unsigned> position, \
+        high = min(low + 1, num_values - 1)
+    return values[low] + (position - low) * (values[high] - values[low])
 
 
-cdef inline float umap_negative_force_ratio(const float[:, ::1] positions,
-                                            const unsigned[::1] order,
-                                            const unsigned window,
-                                            const float a,
-                                            const float b,
-                                            const float gamma,
-                                            unsigned long long* state) \
-        noexcept nogil:
+cdef inline float umap_negative_force_ratio(
+        const float[::1] sorted_positions,
+        const unsigned window,
+        const float a,
+        const float b,
+        const float gamma,
+        unsigned long long* state) noexcept nogil:
     # Estimate how much larger the resultant repulsive force on a cell is
     # from uniformly sampled negatives than from negatives sampled from its
     # window, as in umap-learn's `_sample_negative_force_ratio()`: for 128
     # random cells, compute the resultants of the forces from 5 negatives
-    # sampled each way, and return the exponentiated mean log ratio of the
-    # two, after clipping the log ratios to their 10th and 90th percentiles
+    # sampled from the cell's window and 5 sampled uniformly, and return the
+    # exponentiated mean log ratio of the two, after clipping the log ratios
+    # to their 10th and 90th percentiles. Forces are softly clipped to a norm
+    # of at most `gamma`. `sorted_positions` contains cells' (flattened)
+    # positions in the current projection order.
 
-    cdef unsigned source_index, k, position, window_start, source, \
-        num_cells = positions.shape[0], num_valid = 0
-    cdef float local_x, local_y, global_x, global_y, local_resultant, \
-        global_resultant, lower, upper, total = 0
+    cdef unsigned source_index, sample, position, negative, window_start, \
+        num_cells = sorted_positions.shape[0] / 2, num_valid = 0
+    cdef float dx, dy, dist_squared, distance, coefficient, scale, \
+        local_resultant, global_resultant, lower, upper, total = 0
+    cdef float resultant_x[2]
+    cdef float resultant_y[2]
     cdef float log_ratios[128]
 
     for source_index in range(128):
         position = randint(num_cells, state)
-        source = order[position]
         window_start = min(position - min(position, window / 2),
                            num_cells - window)
-        local_x = local_y = global_x = global_y = 0
-        for k in range(5):
-            umap_add_clipped_repulsion(
-                positions, source,
-                order[window_start + randint(window, state)], a, b, gamma,
-                local_x, local_y)
-        for k in range(5):
-            umap_add_clipped_repulsion(
-                positions, source, randint(num_cells, state), a, b, gamma,
-                global_x, global_y)
-        local_resultant = sqrt(local_x * local_x + local_y * local_y)
-        global_resultant = sqrt(global_x * global_x + global_y * global_y)
+        resultant_x[0] = resultant_x[1] = resultant_y[0] = resultant_y[1] = 0
+
+        # Samples 0-4 are from the window (and contribute to resultant 0) and
+        # samples 5-9 are uniform (and contribute to resultant 1)
+        for sample in range(10):
+            negative = window_start + randint(window, state) \
+                if sample < 5 else randint(num_cells, state)
+            dx = sorted_positions[2 * position] - \
+                sorted_positions[2 * negative]
+            dy = sorted_positions[2 * position + 1] - \
+                sorted_positions[2 * negative + 1]
+            dist_squared = dx * dx + dy * dy
+            if dist_squared > <float> 0:
+                distance = sqrt(dist_squared)
+                coefficient = <float> 2 * gamma * b / (
+                    (<float> 0.001 + dist_squared) *
+                    (a * pow(dist_squared, b) + <float> 1))
+                scale = gamma * tanh(coefficient * distance / gamma) / distance
+                resultant_x[sample / 5] += scale * dx
+                resultant_y[sample / 5] += scale * dy
+        local_resultant = sqrt(resultant_x[0] * resultant_x[0] +
+                               resultant_y[0] * resultant_y[0])
+        global_resultant = sqrt(resultant_x[1] * resultant_x[1] +
+                                resultant_y[1] * resultant_y[1])
         if local_resultant > <float> 0 and \
                 global_resultant > <float> 0:
             log_ratios[num_valid] = \
@@ -2025,118 +1959,13 @@ cdef inline float umap_negative_force_ratio(const float[:, ::1] positions,
     sort(log_ratios, log_ratios + num_valid)
     lower = sorted_quantile(log_ratios, num_valid, <float> 0.1)
     upper = sorted_quantile(log_ratios, num_valid, <float> 0.9)
-    for k in range(num_valid):
-        total += min(max(log_ratios[k], lower), upper)
+    for sample in range(num_valid):
+        total += min(max(log_ratios[sample], lower), upper)
     return exp(total / num_valid)
 
 
-cdef inline void umap_draw_samples(const float* positions,
-                                   const float* negative_positions,
-                                   const unsigned u,
-                                   const long long* indptr,
-                                   const unsigned* indices,
-                                   const float* weights,
-                                   const float max_weight,
-                                   const float negatives_per_edge,
-                                   const unsigned window,
-                                   const unsigned window_start,
-                                   unsigned long long state,
-                                   unsigned* neighbor_buffer,
-                                   unsigned* negative_buffer,
-                                   unsigned& num_accepted,
-                                   unsigned& num_negatives) noexcept nogil:
-    # Draw cell `u`'s random numbers and prefetch the positions
-    # `umap_cell_gradient()` will need for it. Sample each of `u`'s edges with
-    # probability proportional to its weight, storing the neighbors at the
-    # other ends of sampled edges in `neighbor_buffer`. Then draw
-    # `negatives_per_edge` negative samples per sampled edge (rounded
-    # randomly) uniformly from rows `window_start` to `window_start + window`
-    # of `negative_positions`, storing their row indices in `negative_buffer`.
-    # The caller draws each cell's samples while the previous cell's gradient
-    # is being calculated, so these prefetches overlap with that calculation.
-    # (This function and `umap_cell_gradient()` take raw pointers rather than
-    # memoryviews: they run once per cell per epoch, and copying several
-    # memoryview structs into each call made optimization twice as slow.)
-
-    cdef long long i
-    cdef unsigned k, v, accepted = 0, negatives
-
-    for i in range(indptr[u], indptr[u + 1]):
-        # Drop the edge with probability `1 - weight / max_weight`
-        if weights[i] < max_weight * random_uniform(&state):
-            continue
-        v = indices[i]
-        PREFETCH(&positions[2 * v])
-        neighbor_buffer[accepted] = v
-        accepted += 1
-    negatives = <unsigned> (accepted * negatives_per_edge +
-                            random_uniform(&state))
-    for k in range(negatives):
-        v = window_start + randint(window, &state)
-        PREFETCH(&negative_positions[2 * v])
-        negative_buffer[k] = v
-    num_accepted = accepted
-    num_negatives = negatives
-
-
-cdef inline (float, float) umap_cell_gradient(
-        const float* positions,
-        const float* negative_positions,
-        const unsigned u,
-        const unsigned* neighbor_buffer,
-        const unsigned num_accepted,
-        const unsigned* negative_buffer,
-        const unsigned num_negatives,
-        const float a,
-        const float b,
-        const float attraction_constant,
-        const float repulsion_constant,
-        const float clip_constant,
-        const float inverse_gamma) noexcept nogil:
-    # Return the gradient on cell `u`'s position from the neighbors and
-    # negative samples drawn by `umap_draw_samples()`: attract `u` towards
-    # each neighbor and repel it from each negative sample. Like umap-learn,
-    # softly clip each repulsive gradient's norm to at most `clip_constant`
-    # via `tanh()`, and only update `u`'s position, not its neighbors' or
-    # negative samples'.
-
-    cdef unsigned k, v
-    cdef float ux = positions[2 * u], uy = positions[2 * u + 1], dx, dy, \
-        dist_squared, dist_b_minus_1, inverse_distance, scale, gx = 0, \
-        gy = 0, b_minus_1 = b - <float> 1
-
-    # Attractive gradients
-    for k in range(num_accepted):
-        v = neighbor_buffer[k]
-        dx = ux - positions[2 * v]
-        dy = uy - positions[2 * v + 1]
-        dist_squared = dx * dx + dy * dy
-        if dist_squared > <float> 0:
-            dist_b_minus_1 = pow(dist_squared, b_minus_1)
-            scale = attraction_constant * dist_b_minus_1 / \
-                (<float> 1 + a * dist_b_minus_1 * dist_squared)
-            gx += scale * dx
-            gy += scale * dy
-
-    # Repulsive gradients
-    for k in range(num_negatives):
-        v = negative_buffer[k]
-        dx = ux - negative_positions[2 * v]
-        dy = uy - negative_positions[2 * v + 1]
-        dist_squared = dx * dx + dy * dy
-        if dist_squared > <float> 0:
-            inverse_distance = <float> 1 / sqrt(dist_squared)
-            scale = repulsion_constant / (
-                (<float> 0.001 + dist_squared) *
-                (<float> 1 + a * pow(dist_squared, b)))
-            scale = clip_constant * inverse_distance * tanh(
-                scale * dist_squared * inverse_distance * inverse_gamma)
-            gx -= scale * dx
-            gy -= scale * dy
-    return gx, gy
-
-
-cdef inline void umap_layout(float[:, ::1] embedding,
+cdef inline void umap_layout(float[::1] embedding,
+                             float[::1] embedding_buffer,
                              const long long[::1] indptr,
                              const unsigned[::1] indices,
                              const float[::1] weights,
@@ -2153,10 +1982,15 @@ cdef inline void umap_layout(float[:, ::1] embedding,
     # Optimize `embedding` with umap-learn 0.6's Adam optimizer. Each epoch,
     # every cell calculates the gradient on its position from the current
     # positions and immediately takes an Adam step, writing its new position
-    # to a second buffer, since other cells' gradients need its old position;
-    # the two buffers are swapped every epoch. Cell `u`'s random numbers in
-    # epoch `epoch` come from the stream `srand(seed + epoch * num_cells + u)`,
-    # so results do not depend on the number of threads.
+    # to a second buffer, since other cells' gradients need its old position.
+    # `embedding` and `embedding_buffer` swap roles every epoch, so after an
+    # odd number of epochs, the final positions are in `embedding_buffer`.
+    #
+    # Positions (and Adam's momentum and velocity) are flattened: cell `i`'s
+    # position is `embedding[2 * i:2 * i + 2]`. With 2D memoryviews, each
+    # access to another cell's position would multiply by the row stride in
+    # bytes, which prevents the compiler from vectorizing the gradient loops
+    # with gather instructions.
     #
     # When `window` is less than the number of cells (and there are more than
     # 1024 cells), negative samples are "hard negatives" drawn from each
@@ -2167,35 +2001,37 @@ cdef inline void umap_layout(float[:, ::1] embedding,
     # how much weaker the repulsion from window negatives is than from
     # uniformly sampled negatives.
 
-    cdef unsigned epoch, u, thread_index, start, end, window_start, \
+    cdef unsigned epoch, cell, previous_cell, neighbor, negative, sample, \
+        bin, other_thread, thread_index, start, end, window_start, slot, \
         buffer_size, num_bins, num_warmup_epochs, num_accepted, \
-        num_negatives, next_num_accepted, next_num_negatives, \
-        num_cells = embedding.shape[0], max_degree = 0
-    cdef long long i
-    cdef unsigned long long state
+        num_negatives, num_cells = embedding.shape[0] / 2, max_degree = 0
+    cdef long long edge
+    cdef unsigned long long state, position, count, total
     cdef bint use_window
     cdef float alpha, learning_rate, epsilon, max_weight, fraction, angle, \
+        cos_angle, sin_angle, minimum, maximum, projection, bin_scale, \
         attraction_constant, repulsion_constant, clip_constant, \
         inverse_gamma, negatives_per_edge, negative_scale, scale_prior, \
-        scale_anchor = -1, force_ratio, raw_scale, log_change, gradient_x, \
-        gradient_y, beta1 = <float> 0.9, beta2 = <float> 0.99
+        scale_anchor = -1, force_ratio, raw_scale, log_change, position_x, \
+        position_y, dx, dy, dist_squared, dist_b_minus_1, inverse_distance, \
+        scale, gradient_x, gradient_y, b_minus_1 = b - <float> 1, \
+        beta1 = <float> 0.9, beta2 = <float> 0.99
+    cdef unsigned long long* histogram
     cdef unsigned* neighbor_buffer
     cdef unsigned* negative_buffer
-    cdef unsigned* next_neighbor_buffer
-    cdef unsigned* next_negative_buffer
-    cdef unsigned* swap
-    cdef float[:, ::1] positions = embedding, new_positions, momentum, \
-        velocity, window_positions, negative_positions = embedding
-    cdef unsigned[::1] bins, order, rank
+    cdef float[::1] old_positions = embedding, \
+        new_positions = embedding_buffer, momentum, velocity, \
+        window_positions, negative_positions = embedding
+    cdef unsigned[::1] bins, rank
     cdef unsigned long long[::1] histograms, bin_starts
     cdef uninitialized_vector[float] thread_max_weights
     cdef uninitialized_vector[unsigned] thread_offsets, thread_max_degrees, \
-        cell_buffers
+        sample_buffers, sample_counts
     cdef uninitialized_vector[unsigned long long] histograms_buffer, \
         bin_starts_buffer
-    cdef numa_vector[float] new_positions_buffer, momentum_buffer, \
-        velocity_buffer, window_positions_buffer
-    cdef numa_vector[unsigned] bins_buffer, order_buffer, rank_buffer
+    cdef numa_vector[float] momentum_buffer, velocity_buffer, \
+        window_positions_buffer
+    cdef numa_vector[unsigned] bins_buffer, rank_buffer
 
     # Split cells into contiguous ranges with about the same number of edges
     # per thread
@@ -2210,12 +2046,12 @@ cdef inline void umap_layout(float[:, ::1] embedding,
         thread_index = threadid()
         max_weight = 0
         max_degree = 0
-        for u in range(thread_offsets[thread_index],
-                       thread_offsets[thread_index + 1]):
+        for cell in range(thread_offsets[thread_index],
+                          thread_offsets[thread_index + 1]):
             max_degree = max(max_degree,
-                             <unsigned> (indptr[u + 1] - indptr[u]))
-            for i in range(indptr[u], indptr[u + 1]):
-                max_weight = max(max_weight, weights[i])
+                             <unsigned> (indptr[cell + 1] - indptr[cell]))
+            for edge in range(indptr[cell], indptr[cell + 1]):
+                max_weight = max(max_weight, weights[edge])
         thread_max_weights[thread_index * 16] = max_weight
         thread_max_degrees[thread_index * 16] = max_degree
     max_weight = 0
@@ -2224,17 +2060,13 @@ cdef inline void umap_layout(float[:, ::1] embedding,
         max_weight = max(max_weight, thread_max_weights[thread_index * 16])
         max_degree = max(max_degree, thread_max_degrees[thread_index * 16])
 
-    # Allocate the second buffer of positions, and Adam's momentum and
-    # velocity
-    new_positions_buffer = numa_vector[float](num_threads)
-    new_positions_buffer.resize(2 * <unsigned long long> num_cells)
-    new_positions = <float[:num_cells, :2]> new_positions_buffer.data()
+    # Allocate Adam's momentum and velocity
     momentum_buffer = numa_vector[float](num_threads)
     momentum_buffer.resize(2 * <unsigned long long> num_cells)
-    momentum = <float[:num_cells, :2]> momentum_buffer.data()
+    momentum = <float[:2 * num_cells]> momentum_buffer.data()
     velocity_buffer = numa_vector[float](num_threads)
     velocity_buffer.resize(2 * <unsigned long long> num_cells)
-    velocity = <float[:num_cells, :2]> velocity_buffer.data()
+    velocity = <float[:2 * num_cells]> velocity_buffer.data()
 
     # Set up hard-negative windows, if used. Quantize projections into enough
     # bins that each window spans at least 32 of them: a power of 2 between
@@ -2254,16 +2086,14 @@ cdef inline void umap_layout(float[:, ::1] embedding,
         bins_buffer = numa_vector[unsigned_](num_threads)
         bins_buffer.resize(num_cells)
         bins = <unsigned[:num_cells]> bins_buffer.data()
-        order_buffer = numa_vector[unsigned_](num_threads)
-        order_buffer.resize(num_cells)
-        order = <unsigned[:num_cells]> order_buffer.data()
         rank_buffer = numa_vector[unsigned_](num_threads)
         rank_buffer.resize(num_cells)
         rank = <unsigned[:num_cells]> rank_buffer.data()
         window_positions_buffer = numa_vector[float](num_threads)
         window_positions_buffer.resize(2 * <unsigned long long> num_cells)
         window_positions = \
-            <float[:num_cells, :2]> window_positions_buffer.data()
+            <float[:2 * num_cells]> window_positions_buffer.data()
+        negative_positions = window_positions
         histograms_buffer.resize(<unsigned long long> num_threads * num_bins)
         histograms = <unsigned long long[:num_threads * num_bins]> \
             histograms_buffer.data()
@@ -2279,11 +2109,13 @@ cdef inline void umap_layout(float[:, ::1] embedding,
     inverse_gamma = <float> 1 / gamma
     negatives_per_edge = negative_sample_rate / <float> 1.5
 
-    # Each thread needs two sets of buffers for the neighbors and negative
-    # samples of the current and next cells
+    # Each thread alternates between two buffers for the sampled neighbors
+    # and negative samples of consecutive cells, and stores the number of
+    # each in `sample_counts`
     buffer_size = max_degree + 16 + \
         <unsigned> (max_degree * negatives_per_edge) + 16
-    cell_buffers.resize(<unsigned long long> num_threads * 2 * buffer_size)
+    sample_buffers.resize(<unsigned long long> num_threads * 2 * buffer_size)
+    sample_counts.resize(num_threads * 16)
 
     # umap-learn's Adam learning-rate schedule: a quadratic decay to 0.1 over
     # a warm-up period of up to 100 epochs, starting from `initial_alpha / 2`
@@ -2313,22 +2145,89 @@ cdef inline void umap_layout(float[:, ::1] embedding,
             epsilon = <float> 1e-4 * \
                 sqrt(<float> 1 - pow(beta2, <float> (epoch + 1)))
 
-            # Sort cells by their projection onto a random direction, gather
-            # their positions into this order so each cell's window is
-            # contiguous, and adapt the scale of the repulsion from window
-            # negatives
             if use_window:
+                # Sort cells by their projection onto a random direction,
+                # storing each cell's position in the sorted order in `rank`
+                # and gathering cells' positions into `window_positions` in
+                # this order, so each cell's window is contiguous. Unlike
+                # umap-learn, which sorts the projections exactly, quantize
+                # them into `num_bins` equal-width bins and counting-sort the
+                # bins. Ties are broken by index; since bins are much
+                # narrower than windows, this barely changes the windows.
+                # First, bin each cell's projection, and count each thread's
+                # cells in each bin.
                 angle = <float> 2 * <float> M_PI * random_uniform(&state)
-                umap_projection_order(positions, cos(angle), sin(angle),
-                                      num_bins, bins, order, rank,
-                                      histograms, bin_starts, num_threads)
-                for u in prange(num_cells, num_threads=num_threads):
-                    window_positions[u, 0] = positions[order[u], 0]
-                    window_positions[u, 1] = positions[order[u], 1]
-                negative_positions = window_positions
+                cos_angle = cos(angle)
+                sin_angle = sin(angle)
+                minimum, maximum = umap_projection_range(
+                    old_positions, cos_angle, sin_angle, num_threads)
+                bin_scale = num_bins / (maximum - minimum) \
+                    if maximum > minimum else <float> 0
+                with parallel(num_threads=num_threads):
+                    thread_index = threadid()
+                    histogram = &histograms[
+                        <unsigned long long> thread_index * num_bins]
+                    for bin in range(num_bins):
+                        histogram[bin] = 0
+                    start = <unsigned> (<unsigned long long> thread_index *
+                                        num_cells / num_threads)
+                    end = <unsigned> (<unsigned long long> (thread_index + 1) *
+                                      num_cells / num_threads)
+                    for cell in range(start, end):
+                        projection = old_positions[2 * cell] * cos_angle + \
+                            old_positions[2 * cell + 1] * sin_angle
+                        bin = min(<unsigned> ((projection - minimum) *
+                                              bin_scale), num_bins - 1)
+                        bins[cell] = bin
+                        histogram[bin] += 1
+
+                # Convert the counts to each thread's first position in each
+                # bin: cumsum each bin's counts over threads, then add the
+                # bin's start
+                for bin in prange(num_bins, num_threads=num_threads):
+                    total = 0
+                    for other_thread in range(num_threads):
+                        count = histograms[
+                            <unsigned long long> other_thread * num_bins + bin]
+                        histograms[<unsigned long long> other_thread *
+                                   num_bins + bin] = total
+                        total = total + count
+                    bin_starts[bin] = total
+                total = 0
+                for bin in range(num_bins):
+                    count = bin_starts[bin]
+                    bin_starts[bin] = total
+                    total += count
+                for bin in prange(num_bins, num_threads=num_threads):
+                    for other_thread in range(num_threads):
+                        histograms[<unsigned long long> other_thread *
+                                   num_bins + bin] += bin_starts[bin]
+
+                # Scatter each cell's position to its sorted position. Each
+                # thread handles the same contiguous range of cells it
+                # counted, so the result does not depend on the number of
+                # threads.
+                with parallel(num_threads=num_threads):
+                    thread_index = threadid()
+                    histogram = &histograms[
+                        <unsigned long long> thread_index * num_bins]
+                    start = <unsigned> (<unsigned long long> thread_index *
+                                        num_cells / num_threads)
+                    end = <unsigned> (<unsigned long long> (thread_index + 1) *
+                                      num_cells / num_threads)
+                    for cell in range(start, end):
+                        position = histogram[bins[cell]]
+                        histogram[bins[cell]] = position + 1
+                        rank[cell] = <unsigned> position
+                        window_positions[2 * position] = \
+                            old_positions[2 * cell]
+                        window_positions[2 * position + 1] = \
+                            old_positions[2 * cell + 1]
+
+                # Adapt the scale of the repulsion from window negatives
                 if 10 <= epoch <= num_epochs / 2 and epoch % 10 == 0:
                     force_ratio = umap_negative_force_ratio(
-                        positions, order, window, a, b, gamma, &state)
+                        window_positions, window, a, b, gamma, &state)
                     if scale_anchor < <float> 0:
                         scale_anchor = negative_scale / force_ratio
                     else:
@@ -2340,114 +2239,130 @@ cdef inline void umap_layout(float[:, ::1] embedding,
                                          log(<float> 1.1))
                         negative_scale *= exp(<float> 0.1 * log_change)
             else:
-                negative_positions = positions
+                negative_positions = old_positions
             repulsion_constant = <float> 2 * gamma * b * negative_scale
 
-            # Update each cell's position. Draw each cell's random numbers and
-            # prefetch its neighbors' and negative samples' positions one
-            # cell ahead, so their cache misses overlap with the previous
-            # cell's gradient calculation.
+            # Update each cell's position. Each iteration draws one cell's
+            # samples, then calculates the previous cell's gradient from the
+            # samples drawn in the previous iteration and takes its Adam step.
             with parallel(num_threads=num_threads):
                 thread_index = threadid()
-                neighbor_buffer = &cell_buffers[
-                    <unsigned long long> thread_index * 2 * buffer_size]
-                negative_buffer = neighbor_buffer + max_degree + 16
-                next_neighbor_buffer = neighbor_buffer + buffer_size
-                next_negative_buffer = negative_buffer + buffer_size
-                num_accepted = 0
-                num_negatives = 0
-                next_num_accepted = 0
-                next_num_negatives = 0
                 start = thread_offsets[thread_index]
                 end = thread_offsets[thread_index + 1]
-                if start < end:
-                    window_start = 0 if not use_window else min(
-                        rank[start] - min(rank[start], window / 2),
-                        num_cells - window)
-                    umap_draw_samples(
-                        &positions[0, 0], &negative_positions[0, 0], start,
-                        &indptr[0], &indices[0], &weights[0], max_weight,
-                        negatives_per_edge, window, window_start,
-                        srand(seed + <unsigned long long> epoch * num_cells +
-                              start), neighbor_buffer, negative_buffer,
-                        num_accepted, num_negatives)
-                for u in range(start, end):
-                    if u + 1 < end:
+                for cell in range(start, end + 1):
+                    if cell < end:
+                        # Sample each of the cell's edges with probability
+                        # proportional to its weight, then draw
+                        # `negatives_per_edge` negative samples per sampled
+                        # edge (rounded randomly) uniformly from the cell's
+                        # window. The cell's random numbers come from the
+                        # stream `srand(seed + epoch * num_cells + cell)`.
+                        slot = (cell - start) & 1
+                        neighbor_buffer = &sample_buffers[
+                            (2 * <unsigned long long> thread_index + slot) *
+                            buffer_size]
+                        negative_buffer = neighbor_buffer + max_degree + 16
+                        state = srand(seed + <unsigned long long> epoch *
+                                      num_cells + cell)
+                        num_accepted = 0
+                        for edge in range(indptr[cell], indptr[cell + 1]):
+                            # Drop the edge with probability
+                            # `1 - weight / max_weight`
+                            if weights[edge] < \
+                                    max_weight * random_uniform(&state):
+                                continue
+                            neighbor = indices[edge]
+                            # Prefetch the neighbor's position, so the cache
+                            # miss overlaps with the previous cell's gradient
+                            # calculation
+                            PREFETCH(&old_positions[2 * neighbor])
+                            neighbor_buffer[num_accepted] = neighbor
+                            num_accepted = num_accepted + 1
+                        num_negatives = <unsigned> (
+                            num_accepted * negatives_per_edge +
+                            random_uniform(&state))
                         window_start = 0 if not use_window else min(
-                            rank[u + 1] - min(rank[u + 1], window / 2),
+                            rank[cell] - min(rank[cell], window / 2),
                             num_cells - window)
-                        umap_draw_samples(
-                            &positions[0, 0], &negative_positions[0, 0],
-                            u + 1, &indptr[0], &indices[0], &weights[0],
-                            max_weight, negatives_per_edge, window,
-                            window_start,
-                            srand(seed + <unsigned long long> epoch *
-                                  num_cells + u + 1), next_neighbor_buffer,
-                            next_negative_buffer, next_num_accepted,
-                            next_num_negatives)
-                    gradient_x, gradient_y = umap_cell_gradient(
-                        &positions[0, 0], &negative_positions[0, 0], u,
-                        neighbor_buffer,
-                        num_accepted, negative_buffer, num_negatives, a, b,
-                        attraction_constant, repulsion_constant,
-                        clip_constant, inverse_gamma)
-                    new_positions[u, 0] = positions[u, 0]
-                    new_positions[u, 1] = positions[u, 1]
+                        for sample in range(num_negatives):
+                            negative = window_start + randint(window, &state)
+                            # Same for the negative sample's position
+                            PREFETCH(&negative_positions[2 * negative])
+                            negative_buffer[sample] = negative
+                        sample_counts[thread_index * 16 + 2 * slot] = \
+                            num_accepted
+                        sample_counts[thread_index * 16 + 2 * slot + 1] = \
+                            num_negatives
+                    if cell == start:
+                        continue
+
+                    # Calculate the previous cell's gradient: attract it
+                    # towards each sampled neighbor and repel it from each
+                    # negative sample. Like umap-learn, softly clip each
+                    # repulsive gradient's norm to at most `clip_constant` via
+                    # `tanh()`, and only update the cell's own position, not
+                    # its neighbors' or negative samples'.
+                    previous_cell = cell - 1
+                    slot = (previous_cell - start) & 1
+                    neighbor_buffer = &sample_buffers[
+                        (2 * <unsigned long long> thread_index + slot) *
+                        buffer_size]
+                    negative_buffer = neighbor_buffer + max_degree + 16
+                    num_accepted = sample_counts[thread_index * 16 + 2 * slot]
+                    num_negatives = \
+                        sample_counts[thread_index * 16 + 2 * slot + 1]
+                    position_x = old_positions[2 * previous_cell]
+                    position_y = old_positions[2 * previous_cell + 1]
+                    gradient_x = 0
+                    gradient_y = 0
+                    for sample in range(num_accepted):
+                        neighbor = neighbor_buffer[sample]
+                        dx = position_x - old_positions[2 * neighbor]
+                        dy = position_y - old_positions[2 * neighbor + 1]
+                        dist_squared = dx * dx + dy * dy
+                        if dist_squared > <float> 0:
+                            dist_b_minus_1 = pow(dist_squared, b_minus_1)
+                            scale = attraction_constant * dist_b_minus_1 / (
+                                <float> 1 +
+                                a * dist_b_minus_1 * dist_squared)
+                            gradient_x = gradient_x + scale * dx
+                            gradient_y = gradient_y + scale * dy
+                    for sample in range(num_negatives):
+                        negative = negative_buffer[sample]
+                        dx = position_x - negative_positions[2 * negative]
+                        dy = position_y - \
+                            negative_positions[2 * negative + 1]
+                        dist_squared = dx * dx + dy * dy
+                        if dist_squared > <float> 0:
+                            inverse_distance = <float> 1 / sqrt(dist_squared)
+                            scale = repulsion_constant / (
+                                (<float> 0.001 + dist_squared) *
+                                (<float> 1 + a * pow(dist_squared, b)))
+                            scale = clip_constant * inverse_distance * tanh(
+                                scale * dist_squared * inverse_distance *
+                                inverse_gamma)
+                            gradient_x = gradient_x - scale * dx
+                            gradient_y = gradient_y - scale * dy
+
+                    # Take the Adam step
+                    new_positions[2 * previous_cell] = position_x
+                    new_positions[2 * previous_cell + 1] = position_y
                     update_cell_embedding_adam(
-                        new_positions[u, 0], gradient_x, momentum[u, 0],
-                        velocity[u, 0], beta1, beta2, learning_rate, epsilon)
+                        new_positions[2 * previous_cell], gradient_x,
+                        momentum[2 * previous_cell],
+                        velocity[2 * previous_cell], beta1, beta2,
+                        learning_rate, epsilon)
                     update_cell_embedding_adam(
-                        new_positions[u, 1], gradient_y, momentum[u, 1],
-                        velocity[u, 1], beta1, beta2, learning_rate, epsilon)
-                    swap = neighbor_buffer
-                    neighbor_buffer = next_neighbor_buffer
-                    next_neighbor_buffer = swap
-                    swap = negative_buffer
-                    negative_buffer = next_negative_buffer
-                    next_negative_buffer = swap
-                    num_accepted = next_num_accepted
-                    num_negatives = next_num_negatives
-            positions, new_positions = new_positions, positions
+                        new_positions[2 * previous_cell + 1], gradient_y,
+                        momentum[2 * previous_cell + 1],
+                        velocity[2 * previous_cell + 1], beta1, beta2,
+                        learning_rate, epsilon)
+            old_positions, new_positions = new_positions, old_positions
 
             # Check for KeyboardInterrupts
-            with gil:
-                PyErr_CheckSignals()
-
-        # After an odd number of epochs, the final positions are in the
-        # second buffer; copy them to `embedding`
-        if &positions[0, 0] != &embedding[0, 0]:
-            for u in prange(num_cells, num_threads=num_threads):
-                embedding[u, 0] = positions[u, 0]
-                embedding[u, 1] = positions[u, 1]
-
-
-cdef inline void umap_center(float[:, ::1] positions,
-                             const unsigned num_threads) noexcept nogil:
-    # Subtract the mean of each column of the `num_rows` × 2 array
-    # `positions`
-
-    cdef unsigned i, chunk, num_rows = positions.shape[0], \
-        num_chunks = (num_rows + UMAP_CHUNK_SIZE - 1) / UMAP_CHUNK_SIZE
-    cdef float mean_x = 0, mean_y = 0, sum_x, sum_y
-    cdef vector[float] chunk_sums
-    chunk_sums.resize(2 * num_chunks)
-    for chunk in prange(num_chunks, num_threads=num_threads):
-        sum_x = 0
-        sum_y = 0
-        for i in range(chunk * UMAP_CHUNK_SIZE,
-                       min((chunk + 1) * UMAP_CHUNK_SIZE, num_rows)):
-            sum_x = sum_x + positions[i, 0]
-            sum_y = sum_y + positions[i, 1]
-        chunk_sums[2 * chunk] = sum_x
-        chunk_sums[2 * chunk + 1] = sum_y
-    for chunk in range(num_chunks):
-        mean_x += chunk_sums[2 * chunk]
-        mean_y += chunk_sums[2 * chunk + 1]
-    mean_x /= num_rows
-    mean_y /= num_rows
-    for i in prange(num_rows, num_threads=num_threads):
-        positions[i, 0] -= mean_x
-        positions[i, 1] -= mean_y
+            if epoch % 8 == 7:
+                with gil:
+                    PyErr_CheckSignals()
 
 
 cdef inline float umap_select(const float[:, ::1] positions,
@@ -2455,16 +2370,16 @@ cdef inline float umap_select(const float[:, ::1] positions,
                               unsigned long long k,
                               unsigned long long[::1] histograms,
                               const unsigned num_threads) noexcept nogil:
-    # Return the `k`th smallest (0-indexed) value in column `dimension` of
-    # `positions`, via an exact parallel radix select on the values' bits,
-    # mapped to unsigned integers with the same order (by flipping the sign
-    # bit of non-negative values and all bits of negative values). Each pass
-    # histograms the next (at most) 11 bits of the values whose earlier bits
-    # match those of the `k`th smallest value so far: bits 22-31, then 11-21,
-    # then 0-10.
+    # Return the `k`th smallest value in column `dimension` of `positions`
+    # (with `k = 0` giving the minimum), via an exact parallel radix select
+    # on the values' bits, mapped to unsigned integers with the same order
+    # (by flipping the sign bit of non-negative values and all bits of
+    # negative values). Each pass histograms the next (at most) 11 bits of the
+    # values whose earlier bits match those of the `k`th smallest value so
+    # far: bits 22-31, then 11-21, then 0-10.
 
-    cdef unsigned i, key, digit, t, thread_index, start, end, radix_pass, \
-        shift, prefix = 0, num_rows = positions.shape[0]
+    cdef unsigned row, key, digit, other_thread, thread_index, start, end, \
+        radix_pass, shift, prefix = 0, num_rows = positions.shape[0]
     cdef unsigned long long count
     cdef unsigned long long* histogram
     cdef float value
@@ -2480,19 +2395,19 @@ cdef inline float umap_select(const float[:, ::1] positions,
                                 num_threads)
             end = <unsigned> (<unsigned long long> (thread_index + 1) *
                               num_rows / num_threads)
-            for i in range(start, end):
-                # (`key` is assigned before `memcpy()` so Cython makes it
-                # thread-private)
+            for row in range(start, end):
+                # (Assigned first so Cython makes it thread-private)
                 key = 0
-                memcpy(&key, &positions[i, dimension], sizeof(unsigned))
+                memcpy(&key, &positions[row, dimension], sizeof(unsigned))
                 key = key ^ ((<unsigned> 0 - (key >> 31)) | 0x80000000u)
                 if radix_pass == 0 or \
                         key >> (shift + 11) == prefix >> (shift + 11):
                     histogram[(key >> shift) & 2047] += 1
         for digit in range(2048):
             count = 0
-            for t in range(num_threads):
-                count += histograms[<unsigned long long> t * 2048 + digit]
+            for other_thread in range(num_threads):
+                count += histograms[
+                    <unsigned long long> other_thread * 2048 + digit]
             if k < count:
                 break
             k -= count
@@ -2511,7 +2426,7 @@ cdef inline (float, float) umap_robust_spreads(
     # linearly interpolated, as in `np.quantile()`.
 
     cdef unsigned dimension, percentile
-    cdef unsigned long long numerator, lo, num_rows = positions.shape[0]
+    cdef unsigned long long numerator, low, num_rows = positions.shape[0]
     cdef float fraction, quantile
     cdef float spreads[2]
     cdef float quantiles[2]
@@ -2519,13 +2434,13 @@ cdef inline (float, float) umap_robust_spreads(
         for percentile in range(2):
             numerator = (num_rows - 1) * <unsigned long long> (
                 5 if percentile == 0 else 95)
-            lo = numerator / 100
+            low = numerator / 100
             fraction = (numerator % 100) / <float> 100
-            quantile = umap_select(positions, dimension, lo, histograms,
+            quantile = umap_select(positions, dimension, low, histograms,
                                    num_threads)
             if fraction > <float> 0:
                 quantile += fraction * (umap_select(
-                    positions, dimension, lo + 1, histograms, num_threads) -
+                    positions, dimension, low + 1, histograms, num_threads) -
                     quantile)
             quantiles[percentile] = quantile
         spreads[dimension] = quantiles[1] - quantiles[0]
@@ -2535,13 +2450,13 @@ cdef inline (float, float) umap_robust_spreads(
 
 
 cdef inline void umap_tally(unsigned* lookup_table,
-                                const unsigned lookup_table_mask,
-                                unsigned* tally_keys,
-                                float* tally_weights,
-                                unsigned* tally_slots,
-                                unsigned& num_tallied,
-                                const unsigned key,
-                                const float weight) noexcept nogil:
+                            const unsigned lookup_table_mask,
+                            unsigned* tally_keys,
+                            float* tally_weights,
+                            unsigned* tally_slots,
+                            unsigned& num_tallied,
+                            const unsigned key,
+                            const float weight) noexcept nogil:
     # Add `weight` to the tally for `key`. Tallies are kept in order of first
     # appearance in `tally_keys` and `tally_weights`, and `lookup_table` maps
     # keys to their positions in `tally_keys`. It is an open-addressing table
@@ -2569,8 +2484,8 @@ cdef inline void umap_tally(unsigned* lookup_table,
 cdef inline void umap_init_level(const long long[::1] indptr,
                                  const unsigned[::1] indices,
                                  const float[::1] label_weights,
-                                 const float[::1] summed_weights,
-                                 numa_vector[float]* summed_weights_owner,
+                                 numa_vector[float]& summed_weights_buffer,
+                                 const bint free_summed_weights,
                                  const float[:, ::1] anchor,
                                  float[:, ::1] result,
                                  const float a,
@@ -2579,6 +2494,7 @@ cdef inline void umap_init_level(const long long[::1] indptr,
                                  unsigned num_parts,
                                  const unsigned num_epochs,
                                  const unsigned long long seed,
+                                 const unsigned chunk_size,
                                  const unsigned num_threads):
     # One level of umap-learn 0.6's recursive initialization
     # (`label_propagation_init()`), writing the initial positions of this
@@ -2587,145 +2503,160 @@ cdef inline void umap_init_level(const long long[::1] indptr,
     # 1. Partition the graph into `num_parts` parts by label propagation from
     #    its `num_parts` highest-degree nodes, using `label_weights` as edge
     #    weights.
-    # 2. Build the coarse graph between parts. Its `summed_weights` are the
-    #    total `summed_weights` between parts' members (which, below the top
-    #    level, are themselves summed from the level above, so they always
-    #    total the original graph's weights). Its `label_weights` are the
-    #    fuzzy union of the two directed "transition" weights between each
-    #    pair of parts, i.e. the fraction of each part's summed weight that
-    #    goes to the other part.
+    # 2. Build the coarse graph between parts. Its summed weights are the
+    #    total summed weights (`summed_weights_buffer`) between parts'
+    #    members (which, below the top level, are themselves summed from the
+    #    level above, so they always total the original graph's weights). Its
+    #    label weights are the fuzzy union of the two directed "transition"
+    #    weights between each pair of parts, i.e. the fraction of each part's
+    #    summed weight that goes to the other part.
     # 3. Recursively initialize the coarse graph with about a quarter as many
     #    parts, then optimize it with a short UMAP run.
     # 4. Place each node halfway between its part's position and the
     #    weighted average of its neighbors' parts' positions, then center and
     #    rotate to best match `anchor`.
+    # If `free_summed_weights` is true, `summed_weights_buffer` is freed as
+    # soon as the coarse graph is built, instead of being kept while the
+    # levels below run.
 
-    cdef unsigned i, j, k, p, q, label, best_label, num_tallied, chunk, \
-        num_unlabeled, previous_unlabeled, iteration, num_coarse_edges, \
-        thread_index, num_iterations, window, level_threads, \
-        lookup_table_size, num_chunks, num_nodes = anchor.shape[0], \
-        max_degree = 0
-    cdef long long e, m, total, max_part_degree
+    cdef unsigned node, other_node, part, other_part, tally_index, label, \
+        best_label, num_tallied, chunk, num_unlabeled, previous_unlabeled, \
+        iteration, num_coarse_edges, thread_index, start, end, \
+        num_hubs, num_steps, window, level_threads, lookup_table_size, \
+        num_chunks, num_nodes = anchor.shape[0], max_degree = 0
+    cdef long long edge, member, total, max_part_degree
     cdef unsigned long long position, state, \
         level_seed = seed + (<unsigned long long> depth << 40)
     cdef bint found, use_share = depth > 1
-    cdef float w, total_weight, max_vote, sum_x, sum_y, mean_x, mean_y, \
-        spread_x, spread_y, scale, d_pq, d_qp, c00, c01, c10, c11, angle, \
-        cos_angle, sin_angle, x, y
+    cdef float weight, total_weight, max_vote, sum_x, sum_y, mean_x, \
+        mean_y, anchor_sum_x, anchor_sum_y, anchor_mean_x, anchor_mean_y, \
+        spread_x, spread_y, scale, transition_forward, transition_backward, \
+        c00, c01, c10, c11, angle, cos_angle, sin_angle, x, y
+    cdef pair[float, unsigned] threshold
     cdef unsigned* lookup_table
     cdef unsigned* tally_keys
     cdef unsigned* tally_slots
     cdef float* tally_weights
-    cdef vector[unsigned] stack
-    cdef vector[float] chunk_sums
+    cdef vector[vector[unsigned]] thread_stacks
+    cdef uninitialized_vector[pair[float, unsigned]] keys
+    cdef uninitialized_vector[float] chunk_sums
     cdef uninitialized_vector[long long] thread_num_coarse_edges
     cdef uninitialized_vector[unsigned long long] histograms_buffer
     cdef uninitialized_vector[unsigned] thread_offsets, thread_max_degrees, \
-        thread_num_unlabeled, chunk_num_hubs
+        thread_num_unlabeled, thread_num_hubs
     cdef numa_vector[long long] part_indptr_buffer, part_degrees_buffer, \
         coarse_indptr
-    cdef numa_vector[unsigned long long] keys_buffer, members_buffer
+    cdef numa_vector[unsigned long long] members_buffer
     cdef numa_vector[unsigned] labels_buffer, new_labels_buffer, \
         coarse_indices
-    cdef numa_vector[float] coarse_summed, coarse_label_weights, \
-        out_weights, coarse_anchor, coarse_layout
+    cdef numa_vector[float] weighted_degrees_buffer, coarse_summed, \
+        coarse_label_weights, out_weights, coarse_anchor, coarse_layout
     cdef vector[uninitialized_vector[unsigned]] thread_lookup_tables, \
         thread_tally_keys, thread_tally_slots, thread_coarse_indices
     cdef vector[uninitialized_vector[float]] thread_tally_weights, \
         thread_coarse_weights
     cdef unsigned[::1] labels, new_labels
-    cdef unsigned long long[::1] keys, members
+    cdef unsigned long long[::1] members
     cdef long long[::1] part_indptr, part_degrees
     cdef unsigned long long[::1] histograms
+    cdef float[::1] summed_weights, weighted_degrees
+    cdef float[:, ::1] coarse_positions
 
-    # Base case: place nodes at their (centered) anchor positions, scaled to
-    # a robust spread that grows with the number of nodes and the depth
+    # Base case: place nodes at their centered anchor positions, scaled to a
+    # robust spread that grows with the number of nodes and the depth
     level_threads = min(num_threads, num_nodes)
     if num_nodes <= 1024:
-        result[...] = anchor
         histograms_buffer.resize(<unsigned long long> level_threads * 2048)
         histograms = <unsigned long long[:level_threads * 2048]> \
             histograms_buffer.data()
         with nogil:
-            umap_center(result, level_threads)
-            spread_x, spread_y = umap_robust_spreads(result, histograms,
+            mean_x, mean_y = umap_mean(anchor, chunk_size, level_threads)
+            spread_x, spread_y = umap_robust_spreads(anchor, histograms,
                                                      level_threads)
         scale = log10(<float> num_nodes) * <float> 3 * \
             log2(<float> (depth + 1))
-        for i in range(num_nodes):
-            result[i, 0] *= scale / spread_x
-            result[i, 1] *= scale / spread_y
+        for node in range(num_nodes):
+            result[node, 0] = (anchor[node, 0] - mean_x) * (scale / spread_x)
+            result[node, 1] = (anchor[node, 1] - mean_y) * (scale / spread_y)
         return
 
     num_parts = max(2, min(num_parts, num_nodes / 2))
     thread_offsets.resize(level_threads + 1)
     get_thread_offsets(indptr, thread_offsets.data(), level_threads)
 
-    # Select the `num_parts` highest-degree nodes as hubs, breaking ties by
-    # index. Encode each node's degree (whose bits sort like unsigned
-    # integers, since it is non-negative) in the upper 32 bits of a key and
-    # its index in the lower 32, and partially sort the keys.
-    keys_buffer = numa_vector[unsigned_long_long_](level_threads)
-    keys_buffer.resize(num_nodes)
-    keys = <unsigned long long[:num_nodes]> keys_buffer.data()
+    # Select the `num_parts` nodes with the highest weighted degree as hubs,
+    # breaking ties by index: partially sort (weighted degree, index) pairs
+    # to find the `num_parts`th largest, `threshold`
+    weighted_degrees_buffer = numa_vector[float](level_threads)
+    weighted_degrees_buffer.resize(num_nodes)
+    weighted_degrees = <float[:num_nodes]> weighted_degrees_buffer.data()
+    keys.resize(num_nodes)
     thread_max_degrees.resize(level_threads * 16)
     with nogil, parallel(num_threads=level_threads):
         thread_index = threadid()
         max_degree = 0
-        for i in range(thread_offsets[thread_index],
-                       thread_offsets[thread_index + 1]):
-            w = 0
-            for e in range(indptr[i], indptr[i + 1]):
-                w = w + label_weights[e]
-            # (`label` is assigned before `memcpy()` so Cython makes it
-            # thread-private)
-            label = 0
-            memcpy(&label, &w, sizeof(unsigned))
-            keys[i] = (<unsigned long long> label << 32) | i
+        for node in range(thread_offsets[thread_index],
+                          thread_offsets[thread_index + 1]):
+            total_weight = 0
+            for edge in range(indptr[node], indptr[node + 1]):
+                total_weight = total_weight + label_weights[edge]
+            weighted_degrees[node] = total_weight
+            keys[node].first = total_weight
+            keys[node].second = node
             max_degree = \
-                max(max_degree, <unsigned> (indptr[i + 1] - indptr[i]))
+                max(max_degree, <unsigned> (indptr[node + 1] - indptr[node]))
         thread_max_degrees[thread_index * 16] = max_degree
     max_degree = 0
     for thread_index in range(level_threads):
         max_degree = max(max_degree, thread_max_degrees[thread_index * 16])
-    nth_element(&keys[0], &keys[0] + (num_nodes - num_parts),
-                &keys[0] + num_nodes)
+    nth_element(keys.data(), keys.data() + (num_nodes - num_parts),
+                keys.data() + num_nodes)
+    threshold = keys[num_nodes - num_parts]
+    keys.clear()
+    keys.shrink_to_fit()
 
     # Give each hub its own label, in ascending order of index, and leave
-    # other nodes unlabeled (`UINT_MAX`): mark hubs with 0, count the hubs in
-    # each chunk of nodes, then number each chunk's hubs starting after the
-    # previous chunks' hubs
+    # other nodes unlabeled (`UINT_MAX`): mark hubs with 0 and count each
+    # thread's hubs, then number each thread's hubs starting after the
+    # previous threads' hubs
     labels_buffer = numa_vector[unsigned_](level_threads)
     labels_buffer.resize(num_nodes)
     labels = <unsigned[:num_nodes]> labels_buffer.data()
-    num_chunks = (num_nodes + UMAP_CHUNK_SIZE - 1) / UMAP_CHUNK_SIZE
-    chunk_num_hubs.resize(num_chunks + 1)
-    with nogil:
-        for i in prange(num_nodes, num_threads=level_threads):
-            labels[i] = UINT_MAX
-        for e in prange(num_nodes - num_parts, num_nodes,
-                        num_threads=level_threads):
-            labels[<unsigned> keys[e]] = 0
-        for chunk in prange(num_chunks, num_threads=level_threads):
-            label = 0
-            for i in range(chunk * UMAP_CHUNK_SIZE,
-                           min((chunk + 1) * UMAP_CHUNK_SIZE, num_nodes)):
-                if labels[i] == 0:
-                    label = label + 1
-            chunk_num_hubs[chunk + 1] = label
-    chunk_num_hubs[0] = 0
-    for chunk in range(num_chunks):
-        chunk_num_hubs[chunk + 1] += chunk_num_hubs[chunk]
-    with nogil:
-        for chunk in prange(num_chunks, num_threads=level_threads):
-            label = chunk_num_hubs[chunk]
-            for i in range(chunk * UMAP_CHUNK_SIZE,
-                           min((chunk + 1) * UMAP_CHUNK_SIZE, num_nodes)):
-                if labels[i] == 0:
-                    labels[i] = label
-                    label = label + 1
-    keys_buffer.clear()
-    keys_buffer.shrink_to_fit()
+    thread_num_hubs.resize(level_threads * 16)
+    with nogil, parallel(num_threads=level_threads):
+        thread_index = threadid()
+        start = <unsigned> (<unsigned long long> thread_index * num_nodes /
+                            level_threads)
+        end = <unsigned> (<unsigned long long> (thread_index + 1) *
+                          num_nodes / level_threads)
+        num_hubs = 0
+        for node in range(start, end):
+            if weighted_degrees[node] > threshold.first or (
+                    weighted_degrees[node] == threshold.first and
+                    node >= threshold.second):
+                labels[node] = 0
+                num_hubs = num_hubs + 1
+            else:
+                labels[node] = UINT_MAX
+        thread_num_hubs[thread_index * 16] = num_hubs
+    num_hubs = 0
+    for thread_index in range(level_threads):
+        label = thread_num_hubs[thread_index * 16]
+        thread_num_hubs[thread_index * 16] = num_hubs
+        num_hubs += label
+    with nogil, parallel(num_threads=level_threads):
+        thread_index = threadid()
+        start = <unsigned> (<unsigned long long> thread_index * num_nodes /
+                            level_threads)
+        end = <unsigned> (<unsigned long long> (thread_index + 1) *
+                          num_nodes / level_threads)
+        label = thread_num_hubs[thread_index * 16]
+        for node in range(start, end):
+            if labels[node] == 0:
+                labels[node] = label
+                label = label + 1
+    weighted_degrees_buffer.clear()
+    weighted_degrees_buffer.shrink_to_fit()
 
     # Propagate labels for up to 100 iterations. Each unlabeled node adopts
     # the label with the largest total edge weight among its neighbors (the
@@ -2760,41 +2691,42 @@ cdef inline void umap_init_level(const long long[::1] indptr,
                 tally_weights = thread_tally_weights[thread_index].data()
                 tally_slots = thread_tally_slots[thread_index].data()
                 num_unlabeled = 0
-                for i in range(thread_offsets[thread_index],
-                               thread_offsets[thread_index + 1]):
-                    if labels[i] != UINT_MAX:
-                        new_labels[i] = labels[i]
+                for node in range(thread_offsets[thread_index],
+                                  thread_offsets[thread_index + 1]):
+                    if labels[node] != UINT_MAX:
+                        new_labels[node] = labels[node]
                         continue
                     total_weight = 0
                     num_tallied = 0
-                    for e in range(indptr[i], indptr[i + 1]):
+                    for edge in range(indptr[node], indptr[node + 1]):
                         # Prefetch the label of the neighbor 8 edges ahead
-                        if e + 8 < indptr[num_nodes]:
-                            PREFETCH(&labels[indices[e + 8]])
-                        w = label_weights[e]
-                        total_weight = total_weight + w
-                        label = labels[indices[e]]
+                        if edge + 8 < indptr[num_nodes]:
+                            PREFETCH(&labels[indices[edge + 8]])
+                        weight = label_weights[edge]
+                        total_weight = total_weight + weight
+                        label = labels[indices[edge]]
                         if label != UINT_MAX:
                             umap_tally(lookup_table, lookup_table_size - 1,
                                        tally_keys, tally_weights, tally_slots,
-                                       num_tallied, label, w)
+                                       num_tallied, label, weight)
                     max_vote = \
                         <float> 0.1 * total_weight if use_share else <float> 1
                     best_label = UINT_MAX
-                    for k in range(num_tallied):
-                        lookup_table[tally_slots[k]] = UINT_MAX
-                        if tally_weights[k] >= max_vote:
-                            max_vote = tally_weights[k]
-                            best_label = tally_keys[k]
-                    new_labels[i] = best_label
+                    for tally_index in range(num_tallied):
+                        lookup_table[tally_slots[tally_index]] = UINT_MAX
+                        if tally_weights[tally_index] >= max_vote:
+                            max_vote = tally_weights[tally_index]
+                            best_label = tally_keys[tally_index]
+                    new_labels[node] = best_label
                     if best_label == UINT_MAX:
                         num_unlabeled = num_unlabeled + 1
                 thread_num_unlabeled[thread_index * 16] = num_unlabeled
             labels, new_labels = new_labels, labels
 
             # Check for KeyboardInterrupts
-            with gil:
-                PyErr_CheckSignals()
+            if iteration % 8 == 7:
+                with gil:
+                    PyErr_CheckSignals()
 
             if iteration % 5 == 0:
                 num_unlabeled = 0
@@ -2806,27 +2738,39 @@ cdef inline void umap_init_level(const long long[::1] indptr,
 
     # Give each remaining unlabeled node the label of the first labeled node
     # found by a depth-first search of up to 100 steps, or a random label if
-    # none is found
-    state = srand(level_seed - 2)
-    for i in range(num_nodes):
-        if labels[i] != UINT_MAX:
-            continue
-        stack.clear()
-        stack.push_back(i)
-        found = False
-        num_iterations = 0
-        while not found and num_iterations < 100 and stack.size() > 0:
-            num_iterations += 1
-            j = stack.back()
-            stack.pop_back()
-            for e in range(indptr[j], indptr[j + 1]):
-                if labels[indices[e]] != UINT_MAX:
-                    labels[i] = labels[indices[e]]
-                    found = True
-                    break
-                stack.push_back(indices[e])
-        if not found:
-            labels[i] = randint(num_parts, &state)
+    # none is found. Unlike umap-learn, which searches nodes in order and lets
+    # later searches find labels assigned by earlier ones, every search only
+    # finds labels assigned by label propagation, so nodes can be searched in
+    # parallel. Node `node`'s random label comes from the stream
+    # `srand(level_seed - 2 - node)`.
+    thread_stacks.resize(level_threads)
+    with nogil, parallel(num_threads=level_threads):
+        thread_index = threadid()
+        for node in range(thread_offsets[thread_index],
+                          thread_offsets[thread_index + 1]):
+            new_labels[node] = labels[node]
+            if labels[node] != UINT_MAX:
+                continue
+            thread_stacks[thread_index].clear()
+            thread_stacks[thread_index].push_back(node)
+            found = False
+            num_steps = 0
+            while not found and num_steps < 100 and \
+                    thread_stacks[thread_index].size() > 0:
+                num_steps = num_steps + 1
+                other_node = thread_stacks[thread_index].back()
+                thread_stacks[thread_index].pop_back()
+                for edge in range(indptr[other_node], indptr[other_node + 1]):
+                    if labels[indices[edge]] != UINT_MAX:
+                        new_labels[node] = labels[indices[edge]]
+                        found = True
+                        break
+                    thread_stacks[thread_index].push_back(indices[edge])
+            if not found:
+                state = srand(level_seed - 2 - node)
+                new_labels[node] = randint(num_parts, &state)
+    labels, new_labels = new_labels, labels
+    thread_stacks.clear()
 
     # Group nodes by part (in ascending order of index within each part), and
     # cumsum each part's total degree, to balance work across threads
@@ -2838,21 +2782,24 @@ cdef inline void umap_init_level(const long long[::1] indptr,
     part_degrees_buffer.resize(num_parts + 1)
     part_degrees = <long long[:num_parts + 1]> part_degrees_buffer.data()
     with nogil:
-        for p in prange(num_parts, num_threads=level_threads):
+        for part in prange(num_parts, num_threads=level_threads):
             total = 0
-            for m in range(part_indptr[p], part_indptr[p + 1]):
-                total = total + indptr[members[m] + 1] - indptr[members[m]]
-            part_degrees[p + 1] = total
-    for p in range(num_parts):
-        part_degrees[p + 1] += part_degrees[p]
+            for member in range(part_indptr[part], part_indptr[part + 1]):
+                total = total + indptr[members[member] + 1] - \
+                    indptr[members[member]]
+            part_degrees[part + 1] = total
+    for part in range(num_parts):
+        part_degrees[part + 1] += part_degrees[part]
     PyErr_CheckSignals()
 
     # Build the coarse graph, omitting edges within parts: for each part,
-    # tally the weights of the edges from its members to each other part, in
-    # order of first appearance. Each thread sizes its tallies for the
-    # largest part in its range (some parts are much larger than the rest),
-    # appends its parts' rows to its own buffers, which are concatenated at
-    # the end.
+    # tally the summed weights of the edges from its members to each other
+    # part, in order of first appearance, and the part's total summed weight
+    # to other parts (`out_weights`). Each thread sizes its tallies for the
+    # largest part in its range (some parts are much larger than the rest)
+    # and appends its parts' rows to its own buffers, which are concatenated
+    # below.
+    summed_weights = <float[:indices.shape[0]]> summed_weights_buffer.data()
     thread_offsets.resize(level_threads + 1)
     get_thread_offsets(part_degrees, thread_offsets.data(), level_threads)
     coarse_indptr = numa_vector[long_long_](level_threads)
@@ -2864,10 +2811,10 @@ cdef inline void umap_init_level(const long long[::1] indptr,
     with nogil, parallel(num_threads=level_threads):
         thread_index = threadid()
         max_part_degree = 0
-        for p in range(thread_offsets[thread_index],
-                       thread_offsets[thread_index + 1]):
-            max_part_degree = \
-                max(max_part_degree, part_degrees[p + 1] - part_degrees[p])
+        for part in range(thread_offsets[thread_index],
+                          thread_offsets[thread_index + 1]):
+            max_part_degree = max(max_part_degree,
+                                  part_degrees[part + 1] - part_degrees[part])
         max_part_degree = min(max_part_degree, <long long> num_parts)
         lookup_table_size = 16
         while lookup_table_size < 2 * max_part_degree:
@@ -2880,43 +2827,42 @@ cdef inline void umap_init_level(const long long[::1] indptr,
         tally_keys = thread_tally_keys[thread_index].data()
         tally_weights = thread_tally_weights[thread_index].data()
         tally_slots = thread_tally_slots[thread_index].data()
-        for p in range(thread_offsets[thread_index],
-                       thread_offsets[thread_index + 1]):
+        for part in range(thread_offsets[thread_index],
+                          thread_offsets[thread_index + 1]):
             num_tallied = 0
             total_weight = 0
-            for m in range(part_indptr[p], part_indptr[p + 1]):
-                i = members[m]
-                for e in range(indptr[i], indptr[i + 1]):
-                    q = labels[indices[e]]
-                    if q == p:
+            for member in range(part_indptr[part], part_indptr[part + 1]):
+                node = members[member]
+                for edge in range(indptr[node], indptr[node + 1]):
+                    other_part = labels[indices[edge]]
+                    if other_part == part:
                         continue
-                    w = summed_weights[e]
-                    total_weight = total_weight + w
+                    weight = summed_weights[edge]
+                    total_weight = total_weight + weight
                     umap_tally(lookup_table, lookup_table_size - 1,
                                tally_keys, tally_weights, tally_slots,
-                               num_tallied, q, w)
-            for k in range(num_tallied):
-                lookup_table[tally_slots[k]] = UINT_MAX
-                thread_coarse_indices[thread_index].push_back(tally_keys[k])
+                               num_tallied, other_part, weight)
+            for tally_index in range(num_tallied):
+                lookup_table[tally_slots[tally_index]] = UINT_MAX
+                thread_coarse_indices[thread_index].push_back(
+                    tally_keys[tally_index])
                 thread_coarse_weights[thread_index].push_back(
-                    tally_weights[k])
-            coarse_indptr[p + 1] = num_tallied
-            out_weights[p] = total_weight
+                    tally_weights[tally_index])
+            coarse_indptr[part + 1] = num_tallied
+            out_weights[part] = total_weight
     thread_lookup_tables.clear()
     thread_tally_keys.clear()
     thread_tally_weights.clear()
     thread_tally_slots.clear()
+    if free_summed_weights:
+        summed_weights_buffer.clear()
+        summed_weights_buffer.shrink_to_fit()
 
-    # `summed_weights` is no longer needed. If it is the level above's
-    # `coarse_summed` (`summed_weights_owner`) rather than the original
-    # graph's weights, free it now instead of keeping it while the levels
-    # below run.
-    if summed_weights_owner != NULL:
-        summed_weights_owner.clear()
-        summed_weights_owner.shrink_to_fit()
-
-    # Cumsum the coarse graph's row lengths and concatenate the threads'
-    # buffers into the coarse graph
+    # Concatenate the threads' buffers into the coarse graph, cumsumming its
+    # row lengths. Also calculate its label weights: the fuzzy union of the
+    # transition weights `W_pq / out_p` and `W_pq / out_q` for each edge
+    # between parts `p` and `q` with summed weight `W_pq`. Also calculate
+    # the coarse anchor: the mean of each part's members' anchors.
     thread_num_coarse_edges.resize(level_threads + 1)
     total = 0
     for thread_index in range(level_threads):
@@ -2929,60 +2875,57 @@ cdef inline void umap_init_level(const long long[::1] indptr,
     coarse_summed.resize(num_coarse_edges)
     coarse_label_weights = numa_vector[float](level_threads)
     coarse_label_weights.resize(num_coarse_edges)
+    coarse_anchor = numa_vector[float](level_threads)
+    coarse_anchor.resize(2 * num_parts)
     coarse_indptr[0] = 0
     with nogil, parallel(num_threads=level_threads):
         thread_index = threadid()
-        total = thread_num_coarse_edges[thread_index]
-        for p in range(thread_offsets[thread_index],
-                       thread_offsets[thread_index + 1]):
-            total = total + coarse_indptr[p + 1]
-            coarse_indptr[p + 1] = total
-        for position in range(thread_coarse_indices[thread_index].size()):
-            e = thread_num_coarse_edges[thread_index] + <long long> position
-            coarse_indices[e] = thread_coarse_indices[thread_index][position]
-            coarse_summed[e] = thread_coarse_weights[thread_index][position]
-    thread_coarse_indices.clear()
-    thread_coarse_weights.clear()
-
-    # Calculate the coarse graph's label weights: the fuzzy union of the
-    # transition weights `d_pq = W_pq / out_p` and `d_qp = W_pq / out_q`. Also
-    # calculate the coarse anchor: the mean of each part's members' anchors.
-    coarse_anchor = numa_vector[float](level_threads)
-    coarse_anchor.resize(2 * num_parts)
-    with nogil, parallel(num_threads=level_threads):
-        thread_index = threadid()
-        for p in range(thread_offsets[thread_index],
-                       thread_offsets[thread_index + 1]):
-            for e in range(coarse_indptr[p], coarse_indptr[p + 1]):
-                d_pq = coarse_summed[e] / out_weights[p]
-                d_qp = coarse_summed[e] / out_weights[coarse_indices[e]]
-                coarse_label_weights[e] = \
-                    min(max(d_pq + d_qp - d_pq * d_qp, <float> 0), <float> 1)
+        edge = thread_num_coarse_edges[thread_index]
+        position = 0
+        for part in range(thread_offsets[thread_index],
+                          thread_offsets[thread_index + 1]):
+            for tally_index in range(<unsigned> coarse_indptr[part + 1]):
+                other_part = thread_coarse_indices[thread_index][position]
+                weight = thread_coarse_weights[thread_index][position]
+                coarse_indices[edge] = other_part
+                coarse_summed[edge] = weight
+                transition_forward = weight / out_weights[part]
+                transition_backward = weight / out_weights[other_part]
+                coarse_label_weights[edge] = min(max(
+                    transition_forward + transition_backward -
+                    transition_forward * transition_backward, <float> 0),
+                    <float> 1)
+                edge = edge + 1
+                position = position + 1
+            coarse_indptr[part + 1] = edge
             sum_x = 0
             sum_y = 0
-            for m in range(part_indptr[p], part_indptr[p + 1]):
-                sum_x = sum_x + anchor[members[m], 0]
-                sum_y = sum_y + anchor[members[m], 1]
-            coarse_anchor[2 * p] = \
-                sum_x / <float> (part_indptr[p + 1] - part_indptr[p])
-            coarse_anchor[2 * p + 1] = \
-                sum_y / <float> (part_indptr[p + 1] - part_indptr[p])
+            for member in range(part_indptr[part], part_indptr[part + 1]):
+                sum_x = sum_x + anchor[members[member], 0]
+                sum_y = sum_y + anchor[members[member], 1]
+            coarse_anchor[2 * part] = sum_x / <float> (
+                part_indptr[part + 1] - part_indptr[part])
+            coarse_anchor[2 * part + 1] = sum_y / <float> (
+                part_indptr[part + 1] - part_indptr[part])
+    thread_coarse_indices.clear()
+    thread_coarse_weights.clear()
     PyErr_CheckSignals()
 
     # Recursively initialize the coarse graph, with exponents of the curve
     # parameters closer to 1, a quarter as many parts, and √2 times as many
-    # epochs
+    # epochs. The second half of `coarse_layout` is a second buffer for
+    # `umap_layout()`.
     coarse_layout = numa_vector[float](level_threads)
-    coarse_layout.resize(2 * num_parts)
+    coarse_layout.resize(4 * num_parts)
+    coarse_positions = <float[:num_parts, :2]> coarse_layout.data()
     umap_init_level(
         <long long[:num_parts + 1]> coarse_indptr.data(),
         <unsigned[:num_coarse_edges]> coarse_indices.data(),
         <float[:num_coarse_edges]> coarse_label_weights.data(),
-        <float[:num_coarse_edges]> coarse_summed.data(), &coarse_summed,
-        <float[:num_parts, :2]> coarse_anchor.data(),
-        <float[:num_parts, :2]> coarse_layout.data(),
-        pow(a, <float> 0.25), pow(b, <float> 0.25), depth + 1, num_parts / 4,
-        <unsigned> (num_epochs * sqrt(<float> 2)), seed, num_threads)
+        coarse_summed, True, <float[:num_parts, :2]> coarse_anchor.data(),
+        coarse_positions, pow(a, <float> 0.25), pow(b, <float> 0.25),
+        depth + 1, num_parts / 4, <unsigned> (num_epochs * sqrt(<float> 2)),
+        seed, chunk_size, num_threads)
 
     # Optimize the coarse graph's layout with a repulsion strength of 4, one
     # negative sample per sampled edge, and windows of half the coarse graph
@@ -2990,75 +2933,93 @@ cdef inline void umap_init_level(const long long[::1] indptr,
     window = num_parts / 2
     if num_parts % 2 == 1 and window % 2 == 1:
         window += 1
-    umap_layout(<float[:num_parts, :2]> coarse_layout.data(),
+    umap_layout(<float[:2 * num_parts]> coarse_layout.data(),
+                <float[:2 * num_parts]> (coarse_layout.data() + 2 * num_parts),
                 <long long[:num_parts + 1]> coarse_indptr.data(),
                 <unsigned[:num_coarse_edges]> coarse_indices.data(),
                 <float[:num_coarse_edges]> coarse_label_weights.data(),
                 num_epochs, a, b, 4, <float> 0.5, 1, max(1, window),
                 num_parts / 4 > 1024, level_seed, num_threads)
+    if num_epochs & 1:
+        coarse_positions = \
+            <float[:num_parts, :2]> (coarse_layout.data() + 2 * num_parts)
 
     # Place each node halfway between its part's position and the weighted
-    # average of its neighbors' parts' positions, then center
-    thread_offsets.resize(level_threads + 1)
-    get_thread_offsets(indptr, thread_offsets.data(), level_threads)
-    with nogil, parallel(num_threads=level_threads):
-        thread_index = threadid()
-        for i in range(thread_offsets[thread_index],
-                       thread_offsets[thread_index + 1]):
-            sum_x = 0
-            sum_y = 0
-            total_weight = 0
-            for e in range(indptr[i], indptr[i + 1]):
-                # Prefetch the label of the neighbor 8 edges ahead
-                if e + 8 < indptr[num_nodes]:
-                    PREFETCH(&labels[indices[e + 8]])
-                w = label_weights[e]
-                total_weight = total_weight + w
-                p = labels[indices[e]]
-                sum_x = sum_x + w * coarse_layout[2 * p]
-                sum_y = sum_y + w * coarse_layout[2 * p + 1]
-            if total_weight > <float> 0:
-                sum_x = sum_x / total_weight
-                sum_y = sum_y / total_weight
-            p = labels[i]
-            result[i, 0] = <float> 0.5 * (sum_x + coarse_layout[2 * p])
-            result[i, 1] = <float> 0.5 * (sum_y + coarse_layout[2 * p + 1])
-
-    # Rotate the (centered) positions to best match `anchor`, via the
-    # orthogonal Procrustes rotation, which in 2D has the closed form
-    # `atan2(c10 - c01, c00 + c11)` in terms of the cross-covariance matrix
-    # `c = result.T @ (anchor - anchor.mean(axis=0))`
-    num_chunks = (num_nodes + UMAP_CHUNK_SIZE - 1) / UMAP_CHUNK_SIZE
+    # average of its neighbors' parts' positions. Process nodes in chunks of
+    # `chunk_size`, dynamically scheduled to balance work across threads, and
+    # also sum each chunk's positions and anchors.
+    num_chunks = (num_nodes + chunk_size - 1) / chunk_size
     chunk_sums.resize(4 * num_chunks)
     with nogil:
-        umap_center(result, level_threads)
-        for chunk in prange(num_chunks, num_threads=level_threads):
+        for chunk in prange(num_chunks, schedule='dynamic',
+                            num_threads=level_threads):
             sum_x = 0
             sum_y = 0
-            for i in range(chunk * UMAP_CHUNK_SIZE,
-                           min((chunk + 1) * UMAP_CHUNK_SIZE, num_nodes)):
-                sum_x = sum_x + anchor[i, 0]
-                sum_y = sum_y + anchor[i, 1]
+            anchor_sum_x = 0
+            anchor_sum_y = 0
+            for node in range(chunk * chunk_size,
+                              min((chunk + 1) * chunk_size, num_nodes)):
+                x = 0
+                y = 0
+                total_weight = 0
+                for edge in range(indptr[node], indptr[node + 1]):
+                    # Prefetch the label of the neighbor 8 edges ahead
+                    if edge + 8 < indptr[num_nodes]:
+                        PREFETCH(&labels[indices[edge + 8]])
+                    weight = label_weights[edge]
+                    total_weight = total_weight + weight
+                    part = labels[indices[edge]]
+                    x = x + weight * coarse_positions[part, 0]
+                    y = y + weight * coarse_positions[part, 1]
+                if total_weight > <float> 0:
+                    x = x / total_weight
+                    y = y / total_weight
+                part = labels[node]
+                x = <float> 0.5 * (x + coarse_positions[part, 0])
+                y = <float> 0.5 * (y + coarse_positions[part, 1])
+                result[node, 0] = x
+                result[node, 1] = y
+                sum_x = sum_x + x
+                sum_y = sum_y + y
+                anchor_sum_x = anchor_sum_x + anchor[node, 0]
+                anchor_sum_y = anchor_sum_y + anchor[node, 1]
             chunk_sums[4 * chunk] = sum_x
             chunk_sums[4 * chunk + 1] = sum_y
+            chunk_sums[4 * chunk + 2] = anchor_sum_x
+            chunk_sums[4 * chunk + 3] = anchor_sum_y
         mean_x = 0
         mean_y = 0
+        anchor_mean_x = 0
+        anchor_mean_y = 0
         for chunk in range(num_chunks):
             mean_x += chunk_sums[4 * chunk]
             mean_y += chunk_sums[4 * chunk + 1]
+            anchor_mean_x += chunk_sums[4 * chunk + 2]
+            anchor_mean_y += chunk_sums[4 * chunk + 3]
         mean_x /= num_nodes
         mean_y /= num_nodes
+        anchor_mean_x /= num_nodes
+        anchor_mean_y /= num_nodes
+
+        # Center the positions and rotate them to best match `anchor`, via
+        # the orthogonal Procrustes rotation, which in 2D has the closed form
+        # `atan2(c10 - c01, c00 + c11)` in terms of the cross-covariance
+        # matrix `c` between the centered positions and the centered anchor.
+        # (Centering and rotating takes a separate pass from calculating `c`,
+        # since the rotation depends on `c` summed over all nodes.)
         for chunk in prange(num_chunks, num_threads=level_threads):
             c00 = 0
             c01 = 0
             c10 = 0
             c11 = 0
-            for i in range(chunk * UMAP_CHUNK_SIZE,
-                           min((chunk + 1) * UMAP_CHUNK_SIZE, num_nodes)):
-                c00 = c00 + result[i, 0] * (anchor[i, 0] - mean_x)
-                c01 = c01 + result[i, 0] * (anchor[i, 1] - mean_y)
-                c10 = c10 + result[i, 1] * (anchor[i, 0] - mean_x)
-                c11 = c11 + result[i, 1] * (anchor[i, 1] - mean_y)
+            for node in range(chunk * chunk_size,
+                              min((chunk + 1) * chunk_size, num_nodes)):
+                x = result[node, 0] - mean_x
+                y = result[node, 1] - mean_y
+                c00 = c00 + x * (anchor[node, 0] - anchor_mean_x)
+                c01 = c01 + x * (anchor[node, 1] - anchor_mean_y)
+                c10 = c10 + y * (anchor[node, 0] - anchor_mean_x)
+                c11 = c11 + y * (anchor[node, 1] - anchor_mean_y)
             chunk_sums[4 * chunk] = c00
             chunk_sums[4 * chunk + 1] = c01
             chunk_sums[4 * chunk + 2] = c10
@@ -3075,14 +3036,15 @@ cdef inline void umap_init_level(const long long[::1] indptr,
         angle = atan2(c10 - c01, c00 + c11)
         cos_angle = cos(angle)
         sin_angle = sin(angle)
-        for i in prange(num_nodes, num_threads=level_threads):
-            x = result[i, 0]
-            y = result[i, 1]
-            result[i, 0] = x * cos_angle + y * sin_angle
-            result[i, 1] = y * cos_angle - x * sin_angle
+        for node in prange(num_nodes, num_threads=level_threads):
+            x = result[node, 0] - mean_x
+            y = result[node, 1] - mean_y
+            result[node, 0] = x * cos_angle + y * sin_angle
+            result[node, 1] = y * cos_angle - x * sin_angle
 
 
 def umap(float[:, ::1] embedding,
+         float[:, ::1] embedding_buffer,
          const float[:, ::1] PCs,
          const unsigned[:, ::1] neighbors,
          const float[:, ::1] distances,
@@ -3095,13 +3057,17 @@ def umap(float[:, ::1] embedding,
          const unsigned negative_sample_rate,
          const unsigned negative_window,
          const unsigned long long seed,
+         const unsigned chunk_size,
          str neighbors_key,
          unsigned num_threads):
-    cdef unsigned i, num_cells = embedding.shape[0]
+    # `embedding` and `embedding_buffer` swap roles every iteration, so after
+    # an odd number of iterations, the final embedding is in
+    # `embedding_buffer`
+    cdef unsigned cell, num_cells = embedding.shape[0]
     cdef unsigned long long num_edges
     cdef bint too_large = False, self_neighbors = False
-    cdef float min_x, max_x, min_y, max_y, scale_x, scale_y, spread_x, \
-        spread_y, scale
+    cdef float min_x, max_x, min_y, max_y, scale_x, scale_y, mean_x, \
+        mean_y, spread_x, spread_y, scale
     cdef str error_message
     cdef numa_vector[long long] indptr_buffer
     cdef numa_vector[unsigned] indices_buffer
@@ -3109,7 +3075,7 @@ def umap(float[:, ::1] embedding,
     cdef uninitialized_vector[unsigned long long] histograms_buffer
     cdef long long[::1] indptr
     cdef unsigned[::1] indices
-    cdef float[::1] weights
+    cdef float[::1] weights, anchor_flat
     cdef float[:, ::1] anchor
     cdef unsigned long long[::1] histograms
 
@@ -3149,40 +3115,49 @@ def umap(float[:, ::1] embedding,
     anchor_buffer = numa_vector[float](num_threads)
     anchor_buffer.resize(2 * <unsigned long long> num_cells)
     anchor = <float[:num_cells, :2]> anchor_buffer.data()
+    anchor_flat = <float[:2 * num_cells]> anchor_buffer.data()
     with nogil:
-        min_x, max_x = umap_projection_range(PCs, 1, 0, num_threads)
-        min_y, max_y = umap_projection_range(PCs, 0, 1, num_threads)
+        for cell in prange(num_cells, num_threads=num_threads):
+            anchor[cell, 0] = PCs[cell, 0]
+            anchor[cell, 1] = PCs[cell, 1]
+        min_x, max_x = umap_projection_range(anchor_flat, 1, 0, num_threads)
+        min_y, max_y = umap_projection_range(anchor_flat, 0, 1, num_threads)
         scale_x = <float> 10 / (max_x - min_x) if max_x > min_x else \
             <float> 10
         scale_y = <float> 10 / (max_y - min_y) if max_y > min_y else \
             <float> 10
-        for i in prange(num_cells, num_threads=num_threads):
-            anchor[i, 0] = (PCs[i, 0] - min_x) * scale_x
-            anchor[i, 1] = (PCs[i, 1] - min_y) * scale_y
+        for cell in prange(num_cells, num_threads=num_threads):
+            anchor[cell, 0] = (anchor[cell, 0] - min_x) * scale_x
+            anchor[cell, 1] = (anchor[cell, 1] - min_y) * scale_y
 
     # Initialize recursively, starting with a quarter as many parts as cells
-    # (but at least 1024), 50 epochs, and the curve parameters' fourth roots
-    umap_init_level(indptr, indices, weights, weights, NULL, anchor,
+    # (but at least 1024), 50 epochs, and the curve parameters' fourth roots.
+    # The graph's weights are still needed for the final layout, so do not
+    # free them.
+    umap_init_level(indptr, indices, weights, weights_buffer, False, anchor,
                     embedding, pow(a, <float> 0.25), pow(b, <float> 0.25), 1,
-                    max(1024, num_cells / 4), 50, seed, num_threads)
+                    max(1024, num_cells / 4), 50, seed, chunk_size,
+                    num_threads)
 
     # Center the initialization and scale it so the geometric mean of its two
     # robust spreads (the differences between their 95th and 5th
-    # percentiles) is `3 * log10(num_cells) * log2(gamma + 1)`
+    # percentiles, which do not depend on centering) is
+    # `3 * log10(num_cells) * log2(gamma + 1)`
     histograms_buffer.resize(<unsigned long long> num_threads * 2048)
     histograms = <unsigned long long[:num_threads * 2048]> \
         histograms_buffer.data()
     with nogil:
-        umap_center(embedding, num_threads)
+        mean_x, mean_y = umap_mean(embedding, chunk_size, num_threads)
         spread_x, spread_y = umap_robust_spreads(embedding, histograms,
                                                  num_threads)
         scale = <float> 3 * log10(<float> num_cells) * \
             log2(gamma + <float> 1) / sqrt(spread_x * spread_y)
-        for i in prange(num_cells, num_threads=num_threads):
-            embedding[i, 0] *= scale
-            embedding[i, 1] *= scale
+        for cell in prange(num_cells, num_threads=num_threads):
+            embedding[cell, 0] = (embedding[cell, 0] - mean_x) * scale
+            embedding[cell, 1] = (embedding[cell, 1] - mean_y) * scale
 
     # Optimize
-    umap_layout(embedding, indptr, indices, weights, num_iterations, a, b,
-                gamma, alpha, negative_sample_rate, negative_window, True,
-                seed, num_threads)
+    umap_layout(<float[:2 * num_cells]> &embedding[0, 0],
+                <float[:2 * num_cells]> &embedding_buffer[0, 0], indptr,
+                indices, weights, num_iterations, a, b, gamma, alpha,
+                negative_sample_rate, negative_window, True, seed, num_threads)
