@@ -17549,8 +17549,8 @@ class SingleCell:
         Follows the new initialization and optimizer introduced in umap-learn
         0.6 (with `compatibility_layout=False`): the embedding is initialized
         by recursively laying out coarser and coarser versions of the
-        nearest-neighbor graph, then optimized with Adam, updating every
-        cell's position in parallel each iteration.
+        nearest-neighbor graph, then optimized with Adam, updating every cell's
+        position in parallel on each iteration.
 
         This function is intended to be run after `pca()` and `neighbors()`. By
         default, it uses `obsm['pca']`, `obsm['neighbors']`, and

@@ -9,6 +9,7 @@ from libc.string cimport memcpy
 from libcpp.algorithm cimport nth_element, sort
 from libcpp.cmath cimport atan2, cos, exp, log, log2, log10, pow, sin, sqrt, \
     tanh
+from libcpp.utility cimport pair
 from libcpp.vector cimport vector
 from .cyutils cimport PREFETCH, atomic_or, get_thread_offsets, long_long_, \
     max_heap_replace_top, max_heap_sort, numa_vector, randint, \
@@ -1582,8 +1583,8 @@ cdef inline void umap_union_weights(const unsigned[:, ::1] neighbors,
                                     const unsigned cell,
                                     float* forward_weights) noexcept nogil:
     # Calculate `cell`'s fuzzy-union weights to each of its own nearest
-    # neighbors `j`: `w_ij + w_ji - w_ij * w_ji` if `cell` is also one of
-    # `j`'s nearest neighbors, and just `w_ij` otherwise.
+    # neighbors `j`: `w_ij + w_ji - w_ij * w_ji` if `cell` is also one of `j`'s
+    # nearest neighbors, and just `w_ij` otherwise.
     # `reverse[reverse_indptr[cell]:reverse_indptr[cell + 1]]` holds the flat
     # indices `j * num_neighbors + k` of every directed edge pointing to
     # `cell`. (`forward_weights` is a pointer into a per-thread buffer, since
@@ -1624,9 +1625,9 @@ cdef inline void umap_fuzzy_graph(const unsigned[:, ::1] neighbors,
     # Build UMAP's fuzzy simplicial set: convert each cell's nearest-neighbor
     # distances to directed membership weights `w_ij`, symmetrize them with the
     # fuzzy union `w_ij + w_ji - w_ij * w_ji`, and prune small weights. Each
-    # row of the resulting CSR graph lists the cell's own nearest neighbors
-    # (in order), followed by the cells that have it as a nearest neighbor but
-    # are not among its own nearest neighbors (in ascending order).
+    # row of the resulting CSR graph lists the cell's own nearest neighbors (in
+    # order), followed by the cells that have it as a nearest neighbor but are
+    # not among its own nearest neighbors (in ascending order).
 
     cdef unsigned cell, neighbor, neighbor_index, source, thread_index, \
         start, end, iteration, num_cells = neighbors.shape[0], \
@@ -1648,11 +1649,11 @@ cdef inline void umap_fuzzy_graph(const unsigned[:, ::1] neighbors,
     cdef long long[::1] reverse_indptr
     cdef unsigned long long[::1] reverse
 
-    # Convert each cell's nearest-neighbor distances to directed weights, as
-    # in umap-learn's `smooth_knn_dist()`: subtract the distance to the
-    # nearest neighbor (`rho`), then binary-search for the bandwidth
-    # (`middle`) at which the weights sum to `target`. Also check that
-    # nearest-neighbor indices are valid.
+    # Convert each cell's nearest-neighbor distances to directed weights, as in
+    # umap-learn's `smooth_knn_dist()`: subtract the distance to the nearest
+    # neighbor (`rho`), then binary-search for the bandwidth (`middle`) at
+    # which the weights sum to `target`. Also check that nearest-neighbor
+    # indices are valid.
     directed_weights_buffer = numa_vector[float](num_threads)
     directed_weights_buffer.resize(num_edges)
     directed_weights = <float[:num_edges]> directed_weights_buffer.data()
@@ -1728,14 +1729,14 @@ cdef inline void umap_fuzzy_graph(const unsigned[:, ::1] neighbors,
     thread_offsets.resize(num_threads + 1)
     get_thread_offsets(reverse_indptr, thread_offsets.data(), num_threads)
 
-    # Prune weights below `1 / num_pruning_iterations`. Like umap-learn,
-    # this is the maximum weight divided by the number of iterations, but the
+    # Prune weights below `1 / num_pruning_iterations`. Like umap-learn, this
+    # is the maximum weight divided by the number of iterations, but the
     # maximum weight is always 1 (up to rounding): each cell's directed weight
     # to its nearest neighbor is `exp(0) = 1`, and the fuzzy union of weights
     # between 0 and 1 is also between 0 and 1. So pruning removes the edges
-    # that would be sampled less than once in expectation during
-    # optimization, and each remaining edge is sampled as many times in
-    # expectation as in umap-learn.
+    # that would be sampled less than once in expectation during optimization,
+    # and each remaining edge is sampled as many times in expectation as in
+    # umap-learn.
     threshold = <float> 1 / num_pruning_iterations
     forward_weights_buffer.resize(num_threads * (num_neighbors + 16))
 
@@ -1823,10 +1824,10 @@ cdef inline (float, float) umap_projection_range(
         const float sin_angle,
         const unsigned num_threads) noexcept nogil:
     # Return the minimum and maximum over cells of the projection of their
-    # positions onto the direction (`cos_angle`, `sin_angle`). `positions`
-    # is flattened: cell `i`'s position is `positions[2 * i:2 * i + 2]`.
-    # Minima and maxima are exact, so unlike sums, they do not depend on how
-    # cells are split across threads.
+    # positions onto the direction (`cos_angle`, `sin_angle`). `positions` is
+    # flattened: cell `i`'s position is `positions[2 * i:2 * i + 2]`. Minima
+    # and maxima are exact, so unlike sums, they do not depend on how cells are
+    # split across threads.
 
     cdef unsigned cell, thread_index, start, end, \
         num_cells = positions.shape[0] / 2
@@ -1902,15 +1903,15 @@ cdef inline float umap_negative_force_ratio(
         const float b,
         const float gamma,
         unsigned long long* state) noexcept nogil:
-    # Estimate how much larger the resultant repulsive force on a cell is
-    # from uniformly sampled negatives than from negatives sampled from its
-    # window, as in umap-learn's `_sample_negative_force_ratio()`: for 128
-    # random cells, compute the resultants of the forces from 5 negatives
-    # sampled from the cell's window and 5 sampled uniformly, and return the
-    # exponentiated mean log ratio of the two, after clipping the log ratios
-    # to their 10th and 90th percentiles. Forces are softly clipped to a norm
-    # of at most `gamma`. `sorted_positions` contains cells' (flattened)
-    # positions in the current projection order.
+    # Estimate how much larger the resultant repulsive force on a cell is from
+    # uniformly sampled negatives than from negatives sampled from its window,
+    # as in umap-learn's `_sample_negative_force_ratio()`: for 128 random
+    # cells, compute the resultants of the forces from 5 negatives sampled from
+    # the cell's window and 5 sampled uniformly, and return the exponentiated
+    # mean log ratio of the two, after clipping the log ratios to their 10th
+    # and 90th percentiles. Forces are softly clipped to a norm of at most
+    # `gamma`. `sorted_positions` contains cells' (flattened) positions in the
+    # current projection order.
 
     cdef unsigned source_index, sample, position, negative, window_start, \
         num_cells = sorted_positions.shape[0] / 2, num_valid = 0
@@ -1980,8 +1981,8 @@ cdef inline void umap_layout(float[::1] embedding,
                              unsigned num_threads):
     # Optimize `embedding` with umap-learn 0.6's Adam optimizer. Each epoch,
     # every cell calculates the gradient on its position from the current
-    # positions and immediately takes an Adam step, writing its new position
-    # to a second buffer, since other cells' gradients need its old position.
+    # positions and immediately takes an Adam step, writing its new position to
+    # a second buffer, since other cells' gradients need its old position.
     # `embedding` and `embedding_buffer` swap roles every epoch, so after an
     # odd number of epochs, the final positions are in `embedding_buffer`.
     #
@@ -1992,13 +1993,13 @@ cdef inline void umap_layout(float[::1] embedding,
     # with gather instructions.
     #
     # When `window` is less than the number of cells (and there are more than
-    # 1024 cells), negative samples are "hard negatives" drawn from each
-    # cell's window of `window` nearby cells in a random 1D projection of the
+    # 1024 cells), negative samples are "hard negatives" drawn from each cell's
+    # window of `window` nearby cells in a random 1D projection of the
     # embedding, recomputed each epoch. Their repulsion is scaled down by a
     # factor that starts at `(window / num_cells) ** 0.75` and adapts every 10
-    # epochs during the first half of optimization, based on an estimate of
-    # how much weaker the repulsion from window negatives is than from
-    # uniformly sampled negatives.
+    # epochs during the first half of optimization, based on an estimate of how
+    # much weaker the repulsion from window negatives is than from uniformly
+    # sampled negatives.
 
     cdef unsigned epoch, cell, previous_cell, neighbor, negative, sample, \
         bin, other_thread, thread_index, start, end, window_start, slot, \
@@ -2006,9 +2007,10 @@ cdef inline void umap_layout(float[::1] embedding,
         num_negatives, num_cells = embedding.shape[0] / 2, max_degree = 0
     cdef long long edge
     cdef unsigned long long state, position, count, total
-    cdef bint use_window
+    cdef bint use_window, track_range
     cdef float alpha, learning_rate, epsilon, max_weight, fraction, angle, \
-        cos_angle, sin_angle, minimum, maximum, projection, bin_scale, \
+        cos_angle, sin_angle, next_cos_angle, next_sin_angle, minimum, \
+        maximum, thread_minimum, thread_maximum, projection, bin_scale, \
         attraction_constant, repulsion_constant, clip_constant, \
         inverse_gamma, negatives_per_edge, negative_scale, scale_prior, \
         scale_anchor = -1, force_ratio, raw_scale, log_change, position_x, \
@@ -2023,7 +2025,8 @@ cdef inline void umap_layout(float[::1] embedding,
         window_positions, negative_positions = embedding
     cdef unsigned[::1] bins, rank
     cdef unsigned long long[::1] histograms, bin_starts
-    cdef uninitialized_vector[float] thread_max_weights
+    cdef uninitialized_vector[float] thread_max_weights, thread_minima, \
+        thread_maxima
     cdef uninitialized_vector[unsigned] thread_offsets, thread_max_degrees, \
         sample_buffers, sample_counts
     cdef uninitialized_vector[unsigned long long] histograms_buffer, \
@@ -2068,8 +2071,8 @@ cdef inline void umap_layout(float[::1] embedding,
     velocity = <float[:2 * num_cells]> velocity_buffer.data()
 
     # Set up hard-negative windows, if used. Quantize projections into enough
-    # bins that each window spans at least 32 of them: a power of 2 between
-    # 16 and 2048.
+    # bins that each window spans at least 32 of them: a power of 2 between 16
+    # and 2048.
     window = min(num_cells, max(200, window))
     use_window = num_cells > 1024 and window < num_cells
     if not use_window:
@@ -2108,22 +2111,36 @@ cdef inline void umap_layout(float[::1] embedding,
     inverse_gamma = <float> 1 / gamma
     negatives_per_edge = negative_sample_rate / <float> 1.5
 
-    # Each thread alternates between two buffers for the sampled neighbors
-    # and negative samples of consecutive cells, and stores the number of
-    # each in `sample_counts`
+    # Each thread alternates between two buffers for the sampled neighbors and
+    # negative samples of consecutive cells, and stores the number of each in
+    # `sample_counts`
     buffer_size = max_degree + 16 + \
         <unsigned> (max_degree * negatives_per_edge) + 16
     sample_buffers.resize(<unsigned long long> num_threads * 2 * buffer_size)
     sample_counts.resize(num_threads * 16)
 
-    # umap-learn's Adam learning-rate schedule: a quadratic decay to 0.1 over
-    # a warm-up period of up to 100 epochs, starting from `initial_alpha / 2`
-    # (after a good initialization) or `2 * initial_alpha`, then a linear
-    # decay from 0.2 to 0.05
+    # umap-learn's Adam learning-rate schedule: a quadratic decay to 0.1 over a
+    # warm-up period of up to 100 epochs, starting from `initial_alpha / 2`
+    # (after a good initialization) or `2 * initial_alpha`, then a linear decay
+    # from 0.2 to 0.05
     num_warmup_epochs = <unsigned> min(<float> 100, num_epochs / <float> 8) \
         if good_initialization else \
         <unsigned> min(num_epochs / <float> 2, <float> 100)
+
+    # Draw the first epoch's random direction for hard-negative windows, and
+    # get the range of cells' projections onto it. Later epochs' directions are
+    # drawn during the previous epoch, whose update pass calculates the range
+    # of the updated positions' projections onto them, saving a pass over cells
+    # per epoch.
     state = srand(seed - 1)
+    thread_minima.resize(num_threads * 16)
+    thread_maxima.resize(num_threads * 16)
+    if use_window:
+        angle = <float> 2 * <float> M_PI * random_uniform(&state)
+        cos_angle = cos(angle)
+        sin_angle = sin(angle)
+        minimum, maximum = umap_projection_range(embedding, cos_angle,
+                                                 sin_angle, num_threads)
     with nogil:
         for epoch in range(num_epochs):
             # Get the learning rate, folding in Adam's bias correction, and
@@ -2145,21 +2162,16 @@ cdef inline void umap_layout(float[::1] embedding,
                 sqrt(<float> 1 - pow(beta2, <float> (epoch + 1)))
 
             if use_window:
-                # Sort cells by their projection onto a random direction,
-                # storing each cell's position in the sorted order in `rank`
-                # and gathering cells' positions into `window_positions` in
-                # this order, so each cell's window is contiguous. Unlike
-                # umap-learn, which sorts the projections exactly, quantize
-                # them into `num_bins` equal-width bins and counting-sort the
-                # bins. Ties are broken by index; since bins are much
-                # narrower than windows, this barely changes the windows.
-                # First, bin each cell's projection, and count each thread's
-                # cells in each bin.
-                angle = <float> 2 * <float> M_PI * random_uniform(&state)
-                cos_angle = cos(angle)
-                sin_angle = sin(angle)
-                minimum, maximum = umap_projection_range(
-                    old_positions, cos_angle, sin_angle, num_threads)
+                # Sort cells by their projection onto this epoch's random
+                # direction, storing each cell's position in the sorted order
+                # in `rank` and gathering cells' positions into
+                # `window_positions` in this order, so each cell's window is
+                # contiguous. Unlike umap-learn, which sorts the projections
+                # exactly, quantize them into `num_bins` equal-width bins and
+                # counting-sort the bins. Ties are broken by index; since bins
+                # are much narrower than windows, this barely changes the
+                # windows. First, bin each cell's projection, and count each
+                # thread's cells in each bin.
                 bin_scale = num_bins / (maximum - minimum) \
                     if maximum > minimum else <float> 0
                 with parallel(num_threads=num_threads):
@@ -2175,8 +2187,11 @@ cdef inline void umap_layout(float[::1] embedding,
                     for cell in range(start, end):
                         projection = old_positions[2 * cell] * cos_angle + \
                             old_positions[2 * cell + 1] * sin_angle
-                        bin = min(<unsigned> ((projection - minimum) *
-                                              bin_scale), num_bins - 1)
+                        # (Clamp the bin, since these projections can differ by
+                        # rounding from the ones the range was calculated from)
+                        bin = min(<unsigned> max(
+                            (projection - minimum) * bin_scale, <float> 0),
+                            num_bins - 1)
                         bins[cell] = bin
                         histogram[bin] += 1
 
@@ -2203,9 +2218,8 @@ cdef inline void umap_layout(float[::1] embedding,
                                    num_bins + bin] += bin_starts[bin]
 
                 # Scatter each cell's position to its sorted position. Each
-                # thread handles the same contiguous range of cells it
-                # counted, so the result does not depend on the number of
-                # threads.
+                # thread handles the same contiguous range of cells it counted,
+                # so the result does not depend on the number of threads.
                 with parallel(num_threads=num_threads):
                     thread_index = threadid()
                     histogram = &histograms[
@@ -2241,13 +2255,24 @@ cdef inline void umap_layout(float[::1] embedding,
                 negative_positions = old_positions
             repulsion_constant = <float> 2 * gamma * b * negative_scale
 
+            # Draw the next epoch's random direction
+            track_range = use_window and epoch + 1 < num_epochs
+            if track_range:
+                angle = <float> 2 * <float> M_PI * random_uniform(&state)
+                next_cos_angle = cos(angle)
+                next_sin_angle = sin(angle)
+
             # Update each cell's position. Each iteration draws one cell's
             # samples, then calculates the previous cell's gradient from the
             # samples drawn in the previous iteration and takes its Adam step.
+            # Also get the range of the new positions' projections onto the
+            # next epoch's direction.
             with parallel(num_threads=num_threads):
                 thread_index = threadid()
                 start = thread_offsets[thread_index]
                 end = thread_offsets[thread_index + 1]
+                thread_minimum = FLT_MAX
+                thread_maximum = -FLT_MAX
                 for cell in range(start, end + 1):
                     if cell < end:
                         # Sample each of the cell's edges with probability
@@ -2356,7 +2381,25 @@ cdef inline void umap_layout(float[::1] embedding,
                         momentum[2 * previous_cell + 1],
                         velocity[2 * previous_cell + 1], beta1, beta2,
                         learning_rate, epsilon)
+                    if track_range:
+                        projection = \
+                            new_positions[2 * previous_cell] * \
+                            next_cos_angle + \
+                            new_positions[2 * previous_cell + 1] * \
+                            next_sin_angle
+                        thread_minimum = min(thread_minimum, projection)
+                        thread_maximum = max(thread_maximum, projection)
+                thread_minima[thread_index * 16] = thread_minimum
+                thread_maxima[thread_index * 16] = thread_maximum
             old_positions, new_positions = new_positions, old_positions
+            if track_range:
+                cos_angle = next_cos_angle
+                sin_angle = next_sin_angle
+                minimum = FLT_MAX
+                maximum = -FLT_MAX
+                for thread_index in range(num_threads):
+                    minimum = min(minimum, thread_minima[thread_index * 16])
+                    maximum = max(maximum, thread_maxima[thread_index * 16])
 
             # Check for KeyboardInterrupts
             if epoch % 8 == 7:
@@ -2369,13 +2412,12 @@ cdef inline float umap_select(const float[:, ::1] positions,
                               unsigned long long k,
                               unsigned long long[::1] histograms,
                               const unsigned num_threads) noexcept nogil:
-    # Return the `k`th smallest value in column `dimension` of `positions`,
-    # via an exact parallel radix select on the values' bits, mapped to
-    # unsigned integers with the same order (by flipping the sign bit of
-    # non-negative values and all bits of negative values). Each pass
-    # histograms the next (at most) 11 bits of the values whose earlier bits
-    # match those of the `k`th smallest value so far: bits 22-31, then 11-21,
-    # then 0-10.
+    # Return the `k`th smallest value in column `dimension` of `positions`, via
+    # an exact parallel radix select on the values' bits, mapped to unsigned
+    # integers with the same order (by flipping the sign bit of non-negative
+    # values and all bits of negative values). Each pass histograms the next
+    # (at most) 11 bits of the values whose earlier bits match those of the
+    # `k`th smallest value so far: bits 22-31, then 11-21, then 0-10.
 
     cdef unsigned row, key, digit, other_thread, thread_index, start, end, \
         radix_pass, shift, prefix = 0, num_rows = positions.shape[0]
@@ -2420,9 +2462,9 @@ cdef inline (float, float) umap_robust_spreads(
         const float[:, ::1] positions,
         unsigned long long[::1] histograms,
         const unsigned num_threads) noexcept nogil:
-    # Return the difference between the 95th and 5th percentiles of each
-    # column of `positions`, or 1 if the difference is 0. Percentiles are
-    # linearly interpolated, as in `np.quantile()`.
+    # Return the difference between the 95th and 5th percentiles of each column
+    # of `positions`, or 1 if the difference is 0. Percentiles are linearly
+    # interpolated, as in `np.quantile()`.
 
     cdef unsigned dimension, percentile
     cdef unsigned long long numerator, low, num_rows = positions.shape[0]
@@ -2466,6 +2508,8 @@ cdef inline void umap_tally(unsigned* lookup_table,
     # would need one array per thread with an entry for every possible key,
     # which is too much memory with many threads and many keys.)
 
+    # Multiplying by 2654435761 (about 2^32 divided by the golden ratio)
+    # scatters nearby keys across the table (Knuth's multiplicative hashing)
     cdef unsigned slot = (key * 2654435761u) & lookup_table_mask
     while lookup_table[slot] != UINT_MAX and \
             tally_keys[lookup_table[slot]] != key:
@@ -2478,21 +2522,6 @@ cdef inline void umap_tally(unsigned* lookup_table,
         num_tallied += 1
     else:
         tally_weights[lookup_table[slot]] += weight
-
-
-# A node's weighted degree and index, for selecting hubs (as a `ctypedef`,
-# since Cython does not allow ctuples as template arguments)
-ctypedef (float, unsigned) umap_weighted_node
-
-
-cdef inline bint umap_lighter_node(const umap_weighted_node first,
-                                   const umap_weighted_node second) \
-        noexcept nogil:
-    # Whether `first` comes before `second` when sorting nodes by weighted
-    # degree, breaking ties by index
-
-    return first[0] < second[0] or \
-        (first[0] == second[0] and first[1] < second[1])
 
 
 cdef inline void umap_init_level(const long long[::1] indptr,
@@ -2517,21 +2546,21 @@ cdef inline void umap_init_level(const long long[::1] indptr,
     # 1. Partition the graph into `num_parts` parts by label propagation from
     #    its `num_parts` highest-degree nodes, using `label_weights` as edge
     #    weights.
-    # 2. Build the coarse graph between parts. Its summed weights are the
-    #    total summed weights (`summed_weights_buffer`) between parts'
-    #    members (which, below the top level, are themselves summed from the
-    #    level above, so they always total the original graph's weights). Its
-    #    label weights are the fuzzy union of the two directed "transition"
-    #    weights between each pair of parts, i.e. the fraction of each part's
-    #    summed weight that goes to the other part.
+    # 2. Build the coarse graph between parts. Its summed weights are the total
+    #    summed weights (`summed_weights_buffer`) between parts' members
+    #    (which, below the top level, are themselves summed from the level
+    #    above, so they always total the original graph's weights). Its label
+    #    weights are the fuzzy union of the two directed "transition" weights
+    #    between each pair of parts, i.e. the fraction of each part's summed
+    #    weight that goes to the other part.
     # 3. Recursively initialize the coarse graph with about a quarter as many
     #    parts, then optimize it with a short UMAP run.
-    # 4. Place each node halfway between its part's position and the
-    #    weighted average of its neighbors' parts' positions, then center and
-    #    rotate to best match `anchor`.
+    # 4. Place each node halfway between its part's position and the weighted
+    #    average of its neighbors' parts' positions, then center and rotate to
+    #    best match `anchor`.
     # If `free_summed_weights` is true, `summed_weights_buffer` is freed as
-    # soon as the coarse graph is built, instead of being kept while the
-    # levels below run.
+    # soon as the coarse graph is built, instead of being kept while the levels
+    # below run.
 
     cdef unsigned node, other_node, part, other_part, tally_index, label, \
         best_label, num_tallied, chunk, num_unlabeled, previous_unlabeled, \
@@ -2546,13 +2575,13 @@ cdef inline void umap_init_level(const long long[::1] indptr,
         mean_y, anchor_sum_x, anchor_sum_y, anchor_mean_x, anchor_mean_y, \
         spread_x, spread_y, scale, transition_forward, transition_backward, \
         c00, c01, c10, c11, angle, cos_angle, sin_angle, x, y
-    cdef umap_weighted_node threshold
+    cdef pair[float, unsigned] threshold
     cdef unsigned* lookup_table
     cdef unsigned* tally_keys
     cdef unsigned* tally_slots
     cdef float* tally_weights
     cdef vector[vector[unsigned]] thread_stacks
-    cdef uninitialized_vector[umap_weighted_node] keys
+    cdef uninitialized_vector[pair[float, unsigned]] keys
     cdef uninitialized_vector[float] chunk_sums
     cdef uninitialized_vector[long long] thread_num_coarse_edges
     cdef uninitialized_vector[unsigned long long] histograms_buffer
@@ -2599,8 +2628,8 @@ cdef inline void umap_init_level(const long long[::1] indptr,
     get_thread_offsets(indptr, thread_offsets.data(), level_threads)
 
     # Select the `num_parts` nodes with the highest weighted degree as hubs,
-    # breaking ties by index: partially sort (weighted degree, index) pairs
-    # to find the `num_parts`th largest, `threshold`
+    # breaking ties by index: partially sort (weighted degree, index) pairs to
+    # find the `num_parts`th largest, `threshold`
     weighted_degrees_buffer = numa_vector[float](level_threads)
     weighted_degrees_buffer.resize(num_nodes)
     weighted_degrees = <float[:num_nodes]> weighted_degrees_buffer.data()
@@ -2615,7 +2644,8 @@ cdef inline void umap_init_level(const long long[::1] indptr,
             for edge in range(indptr[node], indptr[node + 1]):
                 total_weight = total_weight + label_weights[edge]
             weighted_degrees[node] = total_weight
-            keys[node] = total_weight, node
+            keys[node].first = total_weight
+            keys[node].second = node
             max_degree = \
                 max(max_degree, <unsigned> (indptr[node + 1] - indptr[node]))
         thread_max_degrees[thread_index * 16] = max_degree
@@ -2623,15 +2653,15 @@ cdef inline void umap_init_level(const long long[::1] indptr,
     for thread_index in range(level_threads):
         max_degree = max(max_degree, thread_max_degrees[thread_index * 16])
     nth_element(keys.data(), keys.data() + (num_nodes - num_parts),
-                keys.data() + num_nodes, umap_lighter_node)
+                keys.data() + num_nodes)
     threshold = keys[num_nodes - num_parts]
     keys.clear()
     keys.shrink_to_fit()
 
-    # Give each hub its own label, in ascending order of index, and leave
-    # other nodes unlabeled (`UINT_MAX`): mark hubs with 0 and count each
-    # thread's hubs, then number each thread's hubs starting after the
-    # previous threads' hubs
+    # Give each hub its own label, in ascending order of index, and leave other
+    # nodes unlabeled (`UINT_MAX`): mark hubs with 0 and count each thread's
+    # hubs, then number each thread's hubs starting after the previous threads'
+    # hubs
     labels_buffer = numa_vector[unsigned_](level_threads)
     labels_buffer.resize(num_nodes)
     labels = <unsigned[:num_nodes]> labels_buffer.data()
@@ -2644,8 +2674,9 @@ cdef inline void umap_init_level(const long long[::1] indptr,
                           num_nodes / level_threads)
         num_hubs = 0
         for node in range(start, end):
-            if not umap_lighter_node((weighted_degrees[node], node),
-                                     threshold):
+            if weighted_degrees[node] > threshold.first or (
+                    weighted_degrees[node] == threshold.first and
+                    node >= threshold.second):
                 labels[node] = 0
                 num_hubs = num_hubs + 1
             else:
@@ -2670,12 +2701,12 @@ cdef inline void umap_init_level(const long long[::1] indptr,
     weighted_degrees_buffer.clear()
     weighted_degrees_buffer.shrink_to_fit()
 
-    # Propagate labels for up to 100 iterations. Each unlabeled node adopts
-    # the label with the largest total edge weight among its neighbors (the
-    # last one among ties, in order of first appearance), if that total is at
-    # least 1 (at the top level) or 10% of the node's total edge weight
-    # (below the top level, where weights are normalized). Stop early if no
-    # nodes became labeled over the last 5 iterations.
+    # Propagate labels for up to 100 iterations. Each unlabeled node adopts the
+    # label with the largest total edge weight among its neighbors (the last
+    # one among ties, in order of first appearance), if that total is at least
+    # 1 (at the top level) or 10% of the node's total edge weight (below the
+    # top level, where weights are normalized). Stop early if no nodes became
+    # labeled over the last 5 iterations.
     new_labels_buffer = numa_vector[unsigned_](level_threads)
     new_labels_buffer.resize(num_nodes)
     new_labels = <unsigned[:num_nodes]> new_labels_buffer.data()
@@ -2804,13 +2835,12 @@ cdef inline void umap_init_level(const long long[::1] indptr,
         part_degrees[part + 1] += part_degrees[part]
     PyErr_CheckSignals()
 
-    # Build the coarse graph, omitting edges within parts: for each part,
-    # tally the summed weights of the edges from its members to each other
-    # part, in order of first appearance, and the part's total summed weight
-    # to other parts (`out_weights`). Each thread sizes its tallies for the
-    # largest part in its range (some parts are much larger than the rest)
-    # and appends its parts' rows to its own buffers, which are concatenated
-    # below.
+    # Build the coarse graph, omitting edges within parts: for each part, tally
+    # the summed weights of the edges from its members to each other part, in
+    # order of first appearance, and the part's total summed weight to other
+    # parts (`out_weights`). Each thread sizes its tallies for the largest part
+    # in its range (some parts are much larger than the rest) and appends its
+    # parts' rows to its own buffers, which are concatenated below.
     summed_weights = <float[:indices.shape[0]]> summed_weights_buffer.data()
     thread_offsets.resize(level_threads + 1)
     get_thread_offsets(part_degrees, thread_offsets.data(), level_threads)
@@ -2965,10 +2995,10 @@ cdef inline void umap_init_level(const long long[::1] indptr,
 
     # Place each node halfway between its part's position and the weighted
     # average of its neighbors' parts' positions, and sum each chunk of
-    # `chunk_size` nodes' positions and anchors. Give each thread a
-    # contiguous range of whole chunks with about the same number of edges,
-    # by rounding the boundaries of edge-balanced ranges of nodes to the
-    # nearest chunk boundary.
+    # `chunk_size` nodes' positions and anchors. Give each thread a contiguous
+    # range of whole chunks with about the same number of edges, by rounding
+    # the boundaries of edge-balanced ranges of nodes to the nearest chunk
+    # boundary.
     num_chunks = (num_nodes + chunk_size - 1) / chunk_size
     chunk_sums.resize(4 * num_chunks)
     get_thread_offsets(indptr, thread_offsets.data(), level_threads)
@@ -3031,10 +3061,10 @@ cdef inline void umap_init_level(const long long[::1] indptr,
         anchor_mean_x /= num_nodes
         anchor_mean_y /= num_nodes
 
-        # Center the positions and rotate them to best match `anchor`, via
-        # the orthogonal Procrustes rotation, which in 2D has the closed form
-        # `atan2(c10 - c01, c00 + c11)` in terms of the cross-covariance
-        # matrix `c` between the centered positions and the centered anchor.
+        # Center the positions and rotate them to best match `anchor`, via the
+        # orthogonal Procrustes rotation, which in 2D has the closed form
+        # `atan2(c10 - c01, c00 + c11)` in terms of the cross-covariance matrix
+        # `c` between the centered positions and the centered anchor.
         # (Centering and rotating takes a separate pass from calculating `c`,
         # since the rotation depends on `c` summed over all nodes.)
         for chunk in prange(num_chunks, num_threads=level_threads):
@@ -3091,8 +3121,7 @@ def umap(float[:, ::1] embedding,
          str neighbors_key,
          unsigned num_threads):
     # `embedding` and `embedding_buffer` swap roles every iteration, so after
-    # an odd number of iterations, the final embedding is in
-    # `embedding_buffer`
+    # an odd number of iterations, the final embedding is in `embedding_buffer`
     cdef unsigned cell, num_cells = embedding.shape[0]
     cdef unsigned long long num_edges
     cdef bint too_large = False, self_neighbors = False
@@ -3116,8 +3145,8 @@ def umap(float[:, ::1] embedding,
                      indptr_buffer, indices_buffer, weights_buffer, too_large,
                      self_neighbors, num_threads)
 
-    # If any nearest-neighbor indices were out of bounds or equal to the
-    # cell's own index, raise an error
+    # If any nearest-neighbor indices were out of bounds or equal to the cell's
+    # own index, raise an error
     if too_large:
         error_message = (
             f'some nearest-neighbor indices in obsm[{neighbors_key!r}] are '
@@ -3141,8 +3170,8 @@ def umap(float[:, ::1] embedding,
     weights = <float[:num_edges]> weights_buffer.data()
 
     # Use the first two PCs, min-max scaled to [0, 10], as the anchor that
-    # orients each level of the recursive initialization. `embedding_buffer`
-    # is not needed until the final layout, so store the anchor in it.
+    # orients each level of the recursive initialization. `embedding_buffer` is
+    # not needed until the final layout, so store the anchor in it.
     anchor = embedding_buffer
     anchor_flat = <float[:2 * num_cells]> &embedding_buffer[0, 0]
     with nogil:
@@ -3161,16 +3190,16 @@ def umap(float[:, ::1] embedding,
 
     # Initialize recursively, starting with a quarter as many parts as cells
     # (but at least 1024), 50 epochs, and the curve parameters' fourth roots.
-    # The graph's weights are still needed for the final layout, so do not
-    # free them.
+    # The graph's weights are still needed for the final layout, so do not free
+    # them.
     umap_init_level(indptr, indices, weights, weights_buffer, False, anchor,
                     embedding, pow(a, <float> 0.25), pow(b, <float> 0.25), 1,
                     max(1024, num_cells / 4), 50, seed, chunk_size,
                     num_threads)
 
     # Center the initialization and scale it so the geometric mean of its two
-    # robust spreads (the differences between their 95th and 5th
-    # percentiles, which do not depend on centering) is
+    # robust spreads (the differences between their 95th and 5th percentiles,
+    # which do not depend on centering) is
     # `3 * log10(num_cells) * log2(gamma + 1)`
     histograms_buffer.resize(<unsigned long long> num_threads * 2048)
     histograms = <unsigned long long[:num_threads * 2048]> \
