@@ -17805,7 +17805,9 @@ class SingleCell:
 
         # Run UMAP. Like umap-learn, prune graph edges whose weights are less
         # than `1 / num_pruning_iterations` of the maximum weight, since they
-        # would be sampled less than once during optimization.
+        # would be sampled less than once in expectation during optimization.
+        # Since the same edges are pruned, each remaining edge is sampled as
+        # many times in expectation as umap-learn samples it.
         num_pruning_iterations = num_iterations if num_iterations > 10 else \
             500 if num_cells <= 10_000 else 200
         embedding = numa_zeros((num_cells, 2), dtype=np.float32,

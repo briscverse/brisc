@@ -330,7 +330,7 @@ Each resolution adds a column to {attr}`~brisc.SingleCell.obs`: `cluster_0` thro
 
 ## Embedding
 
-To visualize the data, brisc embeds the cells in two dimensions. Most single-cell workflows use [UMAP](https://arxiv.org/abs/1802.03426):
+To visualize the data, brisc embeds the cells in two dimensions. brisc supports three embedding methods: {meth}`~brisc.SingleCell.umap` ([UMAP](https://arxiv.org/abs/1802.03426)), which most single-cell workflows use; {meth}`~brisc.SingleCell.pacmap` ([PaCMAP](https://arxiv.org/abs/2012.04456)), a relative of UMAP that also captures global structure better; and {meth}`~brisc.SingleCell.localmap` ([LocalMAP](https://arxiv.org/abs/2412.15426)), a newer relative of PaCMAP that further sharpens local cluster separation. Here, we use UMAP:
 
 ```python
 sc = sc.umap()
@@ -348,9 +348,7 @@ sc.plot_umap('cell_type', 'umap.png')
 :align: center
 :::
 
-UMAP is the slowest of brisc's embeddings. It follows the new initialization and optimizer from umap-learn 0.6, which lay out a coarse version of the nearest-neighbor graph first and then optimize every cell's position in parallel, giving identical results for any number of threads.
-
-To go faster, switch to a faster method: {meth}`~brisc.SingleCell.pacmap` ([PaCMAP](https://arxiv.org/abs/2012.04456)), a relative of UMAP that also captures global structure better, or {meth}`~brisc.SingleCell.localmap` ([LocalMAP](https://arxiv.org/abs/2412.15426)), a newer relative of PaCMAP that further sharpens local cluster separation. Each has its own plotter — {meth}`~brisc.SingleCell.plot_pacmap` and {meth}`~brisc.SingleCell.plot_localmap`.
+PaCMAP and LocalMAP work the same way, storing their embeddings in `obsm['pacmap']` and `obsm['localmap']`, and each has its own plotter: {meth}`~brisc.SingleCell.plot_pacmap` and {meth}`~brisc.SingleCell.plot_localmap`.
 
 ## Marker genes
 
