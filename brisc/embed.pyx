@@ -2859,10 +2859,7 @@ cdef inline void umap_init_level(const long long[::1] indptr,
         summed_weights_buffer.shrink_to_fit()
 
     # Concatenate the threads' buffers into the coarse graph, cumsumming its
-    # row lengths. Also calculate its label weights: the fuzzy union of the
-    # transition weights `W_pq / out_p` and `W_pq / out_q` for each edge
-    # between parts `p` and `q` with summed weight `W_pq`. Also calculate
-    # the coarse anchor: the mean of each part's members' anchors.
+    # row lengths
     thread_num_coarse_edges.resize(level_threads + 1)
     total = 0
     for thread_index in range(level_threads):
@@ -2873,31 +2870,44 @@ cdef inline void umap_init_level(const long long[::1] indptr,
     coarse_indices.resize(num_coarse_edges)
     coarse_summed = numa_vector[float](level_threads)
     coarse_summed.resize(num_coarse_edges)
+    coarse_indptr[0] = 0
+    with nogil, parallel(num_threads=level_threads):
+        thread_index = threadid()
+        total = thread_num_coarse_edges[thread_index]
+        for part in range(thread_offsets[thread_index],
+                          thread_offsets[thread_index + 1]):
+            total = total + coarse_indptr[part + 1]
+            coarse_indptr[part + 1] = total
+        for position in range(thread_coarse_indices[thread_index].size()):
+            edge = thread_num_coarse_edges[thread_index] + <long long> position
+            coarse_indices[edge] = \
+                thread_coarse_indices[thread_index][position]
+            coarse_summed[edge] = thread_coarse_weights[thread_index][position]
+    thread_coarse_indices.clear()
+    thread_coarse_weights.clear()
+
+    # Calculate the coarse graph's label weights: the fuzzy union of the
+    # transition weights `W_pq / out_p` and `W_pq / out_q` for each edge
+    # between parts `p` and `q` with summed weight `W_pq`. Also calculate the
+    # coarse anchor: the mean of each part's members' anchors. (This is a
+    # separate pass from the one above so that the threads' buffers are freed
+    # before the label weights are allocated, lowering peak memory.)
     coarse_label_weights = numa_vector[float](level_threads)
     coarse_label_weights.resize(num_coarse_edges)
     coarse_anchor = numa_vector[float](level_threads)
     coarse_anchor.resize(2 * num_parts)
-    coarse_indptr[0] = 0
     with nogil, parallel(num_threads=level_threads):
         thread_index = threadid()
-        edge = thread_num_coarse_edges[thread_index]
-        position = 0
         for part in range(thread_offsets[thread_index],
                           thread_offsets[thread_index + 1]):
-            for tally_index in range(<unsigned> coarse_indptr[part + 1]):
-                other_part = thread_coarse_indices[thread_index][position]
-                weight = thread_coarse_weights[thread_index][position]
-                coarse_indices[edge] = other_part
-                coarse_summed[edge] = weight
-                transition_forward = weight / out_weights[part]
-                transition_backward = weight / out_weights[other_part]
+            for edge in range(coarse_indptr[part], coarse_indptr[part + 1]):
+                transition_forward = coarse_summed[edge] / out_weights[part]
+                transition_backward = \
+                    coarse_summed[edge] / out_weights[coarse_indices[edge]]
                 coarse_label_weights[edge] = min(max(
                     transition_forward + transition_backward -
                     transition_forward * transition_backward, <float> 0),
                     <float> 1)
-                edge = edge + 1
-                position = position + 1
-            coarse_indptr[part + 1] = edge
             sum_x = 0
             sum_y = 0
             for member in range(part_indptr[part], part_indptr[part + 1]):
@@ -2907,16 +2917,13 @@ cdef inline void umap_init_level(const long long[::1] indptr,
                 part_indptr[part + 1] - part_indptr[part])
             coarse_anchor[2 * part + 1] = sum_y / <float> (
                 part_indptr[part + 1] - part_indptr[part])
-    thread_coarse_indices.clear()
-    thread_coarse_weights.clear()
     PyErr_CheckSignals()
 
     # Recursively initialize the coarse graph, with exponents of the curve
     # parameters closer to 1, a quarter as many parts, and √2 times as many
-    # epochs. The second half of `coarse_layout` is a second buffer for
-    # `umap_layout()`.
+    # epochs
     coarse_layout = numa_vector[float](level_threads)
-    coarse_layout.resize(4 * num_parts)
+    coarse_layout.resize(2 * num_parts)
     coarse_positions = <float[:num_parts, :2]> coarse_layout.data()
     umap_init_level(
         <long long[:num_parts + 1]> coarse_indptr.data(),
@@ -2929,20 +2936,20 @@ cdef inline void umap_init_level(const long long[::1] indptr,
 
     # Optimize the coarse graph's layout with a repulsion strength of 4, one
     # negative sample per sampled edge, and windows of half the coarse graph
-    # (rounded like `np.round()`)
+    # (rounded like `np.round()`). The coarse anchor is no longer needed, so
+    # use it as `umap_layout()`'s second buffer.
     window = num_parts / 2
     if num_parts % 2 == 1 and window % 2 == 1:
         window += 1
     umap_layout(<float[:2 * num_parts]> coarse_layout.data(),
-                <float[:2 * num_parts]> (coarse_layout.data() + 2 * num_parts),
+                <float[:2 * num_parts]> coarse_anchor.data(),
                 <long long[:num_parts + 1]> coarse_indptr.data(),
                 <unsigned[:num_coarse_edges]> coarse_indices.data(),
                 <float[:num_coarse_edges]> coarse_label_weights.data(),
                 num_epochs, a, b, 4, <float> 0.5, 1, max(1, window),
                 num_parts / 4 > 1024, level_seed, num_threads)
     if num_epochs & 1:
-        coarse_positions = \
-            <float[:num_parts, :2]> (coarse_layout.data() + 2 * num_parts)
+        coarse_positions = <float[:num_parts, :2]> coarse_anchor.data()
 
     # Place each node halfway between its part's position and the weighted
     # average of its neighbors' parts' positions. Process nodes in chunks of
@@ -3071,7 +3078,7 @@ def umap(float[:, ::1] embedding,
     cdef str error_message
     cdef numa_vector[long long] indptr_buffer
     cdef numa_vector[unsigned] indices_buffer
-    cdef numa_vector[float] weights_buffer, anchor_buffer
+    cdef numa_vector[float] weights_buffer
     cdef uninitialized_vector[unsigned long long] histograms_buffer
     cdef long long[::1] indptr
     cdef unsigned[::1] indices
@@ -3111,11 +3118,10 @@ def umap(float[:, ::1] embedding,
     weights = <float[:num_edges]> weights_buffer.data()
 
     # Use the first two PCs, min-max scaled to [0, 10], as the anchor that
-    # orients each level of the recursive initialization
-    anchor_buffer = numa_vector[float](num_threads)
-    anchor_buffer.resize(2 * <unsigned long long> num_cells)
-    anchor = <float[:num_cells, :2]> anchor_buffer.data()
-    anchor_flat = <float[:2 * num_cells]> anchor_buffer.data()
+    # orients each level of the recursive initialization. `embedding_buffer`
+    # is not needed until the final layout, so store the anchor in it.
+    anchor = embedding_buffer
+    anchor_flat = <float[:2 * num_cells]> &embedding_buffer[0, 0]
     with nogil:
         for cell in prange(num_cells, num_threads=num_threads):
             anchor[cell, 0] = PCs[cell, 0]
