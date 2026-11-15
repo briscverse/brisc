@@ -15,7 +15,7 @@ authors = [
 dependencies = [
     "anndata",
     "h5py",
-    "matplotlib>=3.5.0",
+    "matplotlib>=3.6.0",
     "numpy>=1.17.0",
     "pandas",
     "polars>=1.43.0",
