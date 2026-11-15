@@ -409,9 +409,11 @@ class DE:
                          `'#FF0000'`), a named color (e.g. 'red'), a 3- or
                          4-element RGB/RGBA tuple of integers 0-255 or floats
                          0-1, or a single float 0-1 for grayscale.
-            point_size: the size of the points in the voom plot. Can be a
-                        single number or a dictionary mapping each of the group
-                        names in `self.groups[cell_type]` to numbers.
+            point_size: the size of each gene's point, as in Matplotlib's
+                        `ax.scatter()`: the square of its diameter in points.
+                        Can be a single number or a dictionary mapping each of
+                        the group names in `self.groups[cell_type]` to
+                        numbers.
             line_color: the color of the LOESS trendline. Can be a single color
                         or a dictionary mapping each of the group names in
                         `self.groups[cell_type]` to colors. When not using
@@ -437,7 +439,8 @@ class DE:
                               points to a raster (bitmap) image when saving to
                               a vector format like PDF. Defaults to `True`,
                               instead of Matplotlib's default of `False`.
-                            - `marker`: the shape to use for plotting each gene
+                            - `marker`: the shape to use for plotting each
+                              gene. Defaults to `'o'` (a circle).
                             - `alpha`: the transparency of each point
                             - `linewidths` and `edgecolors`: the width and
                               color of the borders around each marker. These
@@ -764,8 +767,8 @@ class DE:
                                     raise ValueError(error_message)
 
         # Override the defaults for certain keys of `scatter_kwargs`
-        default_scatter_kwargs = dict(rasterized=True, linewidths=0,
-                                      edgecolors=(0, 0, 0, 0))
+        default_scatter_kwargs = dict(rasterized=True, marker='o',
+                                      linewidths=0, edgecolors=(0, 0, 0, 0))
         if scatter_kwargs_is_nested_dict:
             scatter_kwargs = {
                 group: default_scatter_kwargs | group_scatter_kwargs
@@ -1101,9 +1104,15 @@ class DE:
                        a named color (e.g. 'red'), a 3- or 4-element RGB/RGBA
                        tuple of integers 0-255 or floats 0-1, or a single float
                        0-1 for grayscale.
-            upregulated_size: the size of each upregulated gene's point
-            downregulated_size: the size of each downregulated gene's point
-            non_significant_size: the size of each non-significant gene's point
+            upregulated_size: the size of each upregulated gene's point, as in
+                              Matplotlib's `ax.scatter()`: the square of its
+                              diameter in points
+            downregulated_size: the size of each downregulated gene's point,
+                                as in Matplotlib's `ax.scatter()`: the square
+                                of its diameter in points
+            non_significant_size: the size of each non-significant gene's
+                                  point, as in Matplotlib's `ax.scatter()`:
+                                  the square of its diameter in points
             upregulated_color: the color of each upregulated gene's point. Can
                                be any valid Matplotlib color, like a hex string
                                (e.g. `'#FF0000'`), a named color (e.g. 'red'),
@@ -1134,7 +1143,8 @@ class DE:
                                           `True`, instead of Matplotlib's
                                           default of `False`.
                                         - `marker`: the shape to use for
-                                          plotting each gene
+                                          plotting each gene. Defaults to
+                                          `'o'` (a circle).
                                         - `alpha`: the transparency of each
                                           point
                                         - `linewidths` and `edgecolors`: the
@@ -1433,8 +1443,8 @@ class DE:
 
         # Override the defaults for certain values of the three
         # `scatter_kwargs` arguments
-        default_scatter_kwargs = dict(rasterized=True, linewidths=0,
-                                      edgecolors=(0, 0, 0, 0))
+        default_scatter_kwargs = dict(rasterized=True, marker='o',
+                                      linewidths=0, edgecolors=(0, 0, 0, 0))
         upregulated_scatter_kwargs = \
             default_scatter_kwargs | upregulated_scatter_kwargs \
             if upregulated_scatter_kwargs is not None else \
