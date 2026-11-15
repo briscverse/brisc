@@ -17941,8 +17941,10 @@ class SingleCell:
             cells_to_plot_column: SingleCellColumn | None = 'passed_QC',
             ax: 'Axes' | None = None,
             figure_kwargs: dict[str, Any] | None = None,
-            point_size: int | float | np.integer | np.floating | str |
-                        None = None,
+            point_size: int | float | np.integer | np.floating |
+                        SingleCellColumn | None = None,
+            relative_point_size: int | float | np.integer | np.floating |
+                                 SingleCellColumn = 1,
             sort_by_frequency: bool = False,
             colormap: str | 'Colormap' | dict[Any, Color] = None,
             lightness_range: tuple[float | np.floating, float | np.floating] |
@@ -18015,10 +18017,26 @@ class SingleCell:
                              `'constrained'`, instead of Matplotlib's default
                              of `None`.
 
-            point_size: the size of the points for each cell; defaults to
-                        20,000 divided by the number of cells. Can be a single
-                        number, or the name of a column of `obs` to make each
-                        point a different size.
+            point_size: the size of each cell's point, as in Matplotlib's
+                        `ax.scatter()`: the square of its diameter in points.
+                        By default, matches Scanpy's embedding plots in terms
+                        of the fraction of the plot area covered by points.
+                        Can be a single number, or a numeric column of `obs`
+                        to give each cell its own size: a column name, a
+                        polars expression, a polars Series, a 1D NumPy array,
+                        or a function that takes in this SingleCell dataset
+                        and returns a polars Series or 1D NumPy array.
+                        Mutually exclusive with `relative_point_size`.
+            relative_point_size: the area of each cell's point, as a multiple
+                                 of the default area (e.g. 2 for twice the
+                                 default area). Can be a single number, or a
+                                 numeric column of `obs` to give each cell its
+                                 own multiple: a column name, a polars
+                                 expression, a polars Series, a 1D NumPy
+                                 array, or a function that takes in this
+                                 SingleCell dataset and returns a polars
+                                 Series or 1D NumPy array. Mutually exclusive
+                                 with `point_size`.
             sort_by_frequency: if `True`, assign colors and sort the legend in
                                order of decreasing frequency; if `False` (the
                                default), use
@@ -18086,7 +18104,8 @@ class SingleCell:
                               points to a raster (bitmap) image when saving to
                               a vector format like PDF. Defaults to `True`,
                               instead of Matplotlib's default of `False`.
-                            - `marker`: the shape to use for plotting each cell
+                            - `marker`: the shape to use for plotting each
+                              cell. Defaults to `'o'` (a circle).
                             - `norm`, `vmin`, and `vmax`: control how the
                               `colormap` maps the numbers in `color_column` to
                               colors, if `color_column` is numeric
@@ -18228,6 +18247,7 @@ class SingleCell:
         self.plot_embedding('pacmap', color_column, filename,
                             cells_to_plot_column=cells_to_plot_column, ax=ax,
                             figure_kwargs=figure_kwargs, point_size=point_size,
+                            relative_point_size=relative_point_size,
                             sort_by_frequency=sort_by_frequency,
                             colormap=colormap, lightness_range=lightness_range,
                             chroma_range=chroma_range, hue_range=hue_range,
@@ -18251,8 +18271,10 @@ class SingleCell:
             cells_to_plot_column: SingleCellColumn | None = 'passed_QC',
             ax: 'Axes' | None = None,
             figure_kwargs: dict[str, Any] | None = None,
-            point_size: int | float | np.integer | np.floating | str |
-                        None = None,
+            point_size: int | float | np.integer | np.floating |
+                        SingleCellColumn | None = None,
+            relative_point_size: int | float | np.integer | np.floating |
+                                 SingleCellColumn = 1,
             sort_by_frequency: bool = False,
             colormap: str | 'Colormap' | dict[Any, Color] = None,
             lightness_range: tuple[float | np.floating, float | np.floating] |
@@ -18325,10 +18347,26 @@ class SingleCell:
                              `'constrained'`, instead of Matplotlib's default
                              of `None`.
 
-            point_size: the size of the points for each cell; defaults to
-                        20,000 divided by the number of cells. Can be a single
-                        number, or the name of a column of `obs` to make each
-                        point a different size.
+            point_size: the size of each cell's point, as in Matplotlib's
+                        `ax.scatter()`: the square of its diameter in points.
+                        By default, matches Scanpy's embedding plots in terms
+                        of the fraction of the plot area covered by points.
+                        Can be a single number, or a numeric column of `obs`
+                        to give each cell its own size: a column name, a
+                        polars expression, a polars Series, a 1D NumPy array,
+                        or a function that takes in this SingleCell dataset
+                        and returns a polars Series or 1D NumPy array.
+                        Mutually exclusive with `relative_point_size`.
+            relative_point_size: the area of each cell's point, as a multiple
+                                 of the default area (e.g. 2 for twice the
+                                 default area). Can be a single number, or a
+                                 numeric column of `obs` to give each cell its
+                                 own multiple: a column name, a polars
+                                 expression, a polars Series, a 1D NumPy
+                                 array, or a function that takes in this
+                                 SingleCell dataset and returns a polars
+                                 Series or 1D NumPy array. Mutually exclusive
+                                 with `point_size`.
             sort_by_frequency: if `True`, assign colors and sort the legend in
                                order of decreasing frequency; if `False` (the
                                default), use
@@ -18395,7 +18433,8 @@ class SingleCell:
                               points to a raster (bitmap) image when saving to
                               a vector format like PDF. Defaults to `True`,
                               instead of Matplotlib's default of `False`.
-                            - `marker`: the shape to use for plotting each cell
+                            - `marker`: the shape to use for plotting each
+                              cell. Defaults to `'o'` (a circle).
                             - `norm`, `vmin`, and `vmax`: control how the
                               `colormap` maps the numbers in `color_column` to
                               colors, if `color_column` is numeric
@@ -18538,6 +18577,7 @@ class SingleCell:
         self.plot_embedding('localmap', color_column, filename,
                             cells_to_plot_column=cells_to_plot_column, ax=ax,
                             figure_kwargs=figure_kwargs, point_size=point_size,
+                            relative_point_size=relative_point_size,
                             sort_by_frequency=sort_by_frequency,
                             colormap=colormap, lightness_range=lightness_range,
                             chroma_range=chroma_range, hue_range=hue_range,
@@ -18561,8 +18601,10 @@ class SingleCell:
             cells_to_plot_column: SingleCellColumn | None = 'passed_QC',
             ax: 'Axes' | None = None,
             figure_kwargs: dict[str, Any] | None = None,
-            point_size: int | float | np.integer | np.floating | str |
-                        None = None,
+            point_size: int | float | np.integer | np.floating |
+                        SingleCellColumn | None = None,
+            relative_point_size: int | float | np.integer | np.floating |
+                                 SingleCellColumn = 1,
             sort_by_frequency: bool = False,
             colormap: str | 'Colormap' | dict[Any, Color] = None,
             lightness_range: tuple[float | np.floating, float | np.floating] |
@@ -18635,10 +18677,26 @@ class SingleCell:
                              `'constrained'`, instead of Matplotlib's default
                              of `None`.
 
-            point_size: the size of the points for each cell; defaults to
-                        20,000 divided by the number of cells. Can be a single
-                        number, or the name of a column of `obs` to make each
-                        point a different size.
+            point_size: the size of each cell's point, as in Matplotlib's
+                        `ax.scatter()`: the square of its diameter in points.
+                        By default, matches Scanpy's embedding plots in terms
+                        of the fraction of the plot area covered by points.
+                        Can be a single number, or a numeric column of `obs`
+                        to give each cell its own size: a column name, a
+                        polars expression, a polars Series, a 1D NumPy array,
+                        or a function that takes in this SingleCell dataset
+                        and returns a polars Series or 1D NumPy array.
+                        Mutually exclusive with `relative_point_size`.
+            relative_point_size: the area of each cell's point, as a multiple
+                                 of the default area (e.g. 2 for twice the
+                                 default area). Can be a single number, or a
+                                 numeric column of `obs` to give each cell its
+                                 own multiple: a column name, a polars
+                                 expression, a polars Series, a 1D NumPy
+                                 array, or a function that takes in this
+                                 SingleCell dataset and returns a polars
+                                 Series or 1D NumPy array. Mutually exclusive
+                                 with `point_size`.
             sort_by_frequency: if `True`, assign colors and sort the legend in
                                order of decreasing frequency; if `False` (the
                                default), use
@@ -18705,7 +18763,8 @@ class SingleCell:
                               points to a raster (bitmap) image when saving to
                               a vector format like PDF. Defaults to `True`,
                               instead of Matplotlib's default of `False`.
-                            - `marker`: the shape to use for plotting each cell
+                            - `marker`: the shape to use for plotting each
+                              cell. Defaults to `'o'` (a circle).
                             - `norm`, `vmin`, and `vmax`: control how the
                               `colormap` maps the numbers in `color_column` to
                               colors, if `color_column` is numeric
@@ -18848,6 +18907,7 @@ class SingleCell:
         self.plot_embedding('umap', color_column, filename,
                             cells_to_plot_column=cells_to_plot_column, ax=ax,
                             figure_kwargs=figure_kwargs, point_size=point_size,
+                            relative_point_size=relative_point_size,
                             sort_by_frequency=sort_by_frequency,
                             colormap=colormap, lightness_range=lightness_range,
                             chroma_range=chroma_range, hue_range=hue_range,
@@ -18872,8 +18932,10 @@ class SingleCell:
             cells_to_plot_column: SingleCellColumn | None = 'passed_QC',
             ax: 'Axes' | None = None,
             figure_kwargs: dict[str, Any] | None = None,
-            point_size: int | float | np.integer | np.floating | str |
-                        None = None,
+            point_size: int | float | np.integer | np.floating |
+                        SingleCellColumn | None = None,
+            relative_point_size: int | float | np.integer | np.floating |
+                                 SingleCellColumn = 1,
             sort_by_frequency: bool = False,
             colormap: str | 'Colormap' | dict[Any, Color] = None,
             lightness_range: tuple[float | np.floating, float | np.floating] |
@@ -18947,10 +19009,26 @@ class SingleCell:
                              `'constrained'`, instead of Matplotlib's default
                              of `None`.
 
-            point_size: the size of the points for each cell; defaults to
-                        20,000 divided by the number of cells. Can be a single
-                        number, or the name of a column of `obs` to make each
-                        point a different size.
+            point_size: the size of each cell's point, as in Matplotlib's
+                        `ax.scatter()`: the square of its diameter in points.
+                        By default, matches Scanpy's embedding plots in terms
+                        of the fraction of the plot area covered by points.
+                        Can be a single number, or a numeric column of `obs`
+                        to give each cell its own size: a column name, a
+                        polars expression, a polars Series, a 1D NumPy array,
+                        or a function that takes in this SingleCell dataset
+                        and returns a polars Series or 1D NumPy array.
+                        Mutually exclusive with `relative_point_size`.
+            relative_point_size: the area of each cell's point, as a multiple
+                                 of the default area (e.g. 2 for twice the
+                                 default area). Can be a single number, or a
+                                 numeric column of `obs` to give each cell its
+                                 own multiple: a column name, a polars
+                                 expression, a polars Series, a 1D NumPy
+                                 array, or a function that takes in this
+                                 SingleCell dataset and returns a polars
+                                 Series or 1D NumPy array. Mutually exclusive
+                                 with `point_size`.
             sort_by_frequency: if `True`, assign colors and sort the legend in
                                order of decreasing frequency; if `False` (the
                                default), use
@@ -19019,7 +19097,8 @@ class SingleCell:
                               points to a raster (bitmap) image when saving to
                               a vector format like PDF. Defaults to `True`,
                               instead of Matplotlib's default of `False`.
-                            - `marker`: the shape to use for plotting each cell
+                            - `marker`: the shape to use for plotting each
+                              cell. Defaults to `'o'` (a circle).
                             - `norm`, `vmin`, and `vmax`: control how the
                               `colormap` maps the numbers in `color_column` to
                               colors, if `color_column` is numeric
@@ -19302,38 +19381,41 @@ class SingleCell:
                 'existing axis')
             raise ValueError(error_message)
 
-        # If `point_size` is `None`, default to 20,000 / num_cells; otherwise,
-        # check that it is a positive number or the name of a numeric column of
-        # `obs` with all-positive numbers
+        # Check that `point_size` and `relative_point_size` are not both
+        # specified, and that whichever is used is a positive number or the
+        # name of a numeric column of `obs` with all-positive numbers. Relative
+        # point sizes are multiplied by the default point size when the plot
+        # is drawn, once the axes' final size is known (below).
         num_cells = len(embedding)
-        if point_size is None:
-            point_size = 20_000 / num_cells
+        relative = point_size is None
+        if relative:
+            point_size, point_size_name = \
+                relative_point_size, 'relative_point_size'
         else:
-            check_type(point_size, 'point_size', (int, float, str),
-                       'a positive number or string')
-            if isinstance(point_size, (int, float)):
-                check_bounds(point_size, 'point_size', 0, left_open=True)
-            else:
-                if point_size not in self._obs:
-                    error_message = \
-                        f'point_size {point_size!r} is not a column of obs'
-                    raise ValueError(error_message)
-                point_size_name = point_size
-                point_size = self._obs[point_size]
-                if cells_to_plot_column is not None:
-                    point_size = point_size.filter(cells_to_plot_column)
-                if not (point_size.dtype.is_integer() or
-                        point_size.dtype.is_float()):
-                    error_message = (
-                        f'the point_size column, obs[{point_size_name!r}], '
-                        f'must have an integer or floating-point data type, '
-                        f'but has data type {point_size.dtype.base_type()!r}')
-                    raise TypeError(error_message)
-                if point_size.min() <= 0:
-                    error_message = (
-                        f'the point_size column, obs[{point_size_name!r}], '
-                        f'does not have all-positive elements')
-                    raise ValueError(error_message)
+            if not isinstance(relative_point_size, (int, float)) or \
+                    relative_point_size != 1:
+                error_message = (
+                    'point_size and relative_point_size cannot both be '
+                    'specified')
+                raise ValueError(error_message)
+            point_size_name = 'point_size'
+        if isinstance(point_size, (int, float)):
+            check_bounds(point_size, point_size_name, 0, left_open=True)
+        else:
+            original_point_size = point_size
+            point_size = self._get_column(
+                'obs', point_size, point_size_name,
+                ('integer', 'floating-point'),
+                QC_column=cells_to_plot_column)
+            if cells_to_plot_column is not None:
+                point_size = point_size.filter(cells_to_plot_column)
+            if point_size.min() <= 0:
+                point_size_description = SingleCell._describe_column(
+                    point_size_name, original_point_size)
+                error_message = (
+                    f'{point_size_description} does not have all-positive '
+                    f'elements')
+                raise ValueError(error_message)
 
         # If `sort_by_frequency=True`, ensure `colormap` is `None` and
         # `color_column` is discrete
@@ -19468,8 +19550,8 @@ class SingleCell:
         default_color = plt.matplotlib.colors.to_rgba(default_color)
 
         # Override the defaults for certain keys of `scatter_kwargs`
-        default_scatter_kwargs = dict(rasterized=True, linewidths=0,
-                                      edgecolors=(0, 0, 0, 0))
+        default_scatter_kwargs = dict(rasterized=True, marker='o',
+                                      linewidths=0, edgecolors=(0, 0, 0, 0))
         scatter_kwargs = default_scatter_kwargs | scatter_kwargs \
             if scatter_kwargs is not None else default_scatter_kwargs
 
@@ -19618,18 +19700,31 @@ class SingleCell:
             # plotted are the same color). Cells with missing (`null`) values,
             # or with values not in `colormap`, are plotted first (at the
             # bottom) in `default_color`.
+            scatters = []
             if isinstance(colormap, dict):
-                color_values = color_column.to_numpy()
+                # Map each cell to the index of its color in `colormap`, or
+                # `len(colormap)` if its value is missing or not in
+                # `colormap`, in a single pass, rather than comparing each
+                # cell's value to each color
+                color_indices = {color_label: index for index, color_label
+                                 in enumerate(colormap)}
+                color_codes = color_column\
+                    .cast(pl.String)\
+                    .replace_strict(color_indices, default=len(colormap),
+                                    return_dtype=pl.UInt32)\
+                    .fill_null(len(colormap))\
+                    .to_numpy()
                 point_size_per_cell = isinstance(point_size, pl.Series)
                 if point_size_per_cell:
                     point_size = point_size.to_numpy()
-                unknown_mask = ~np.isin(color_values, tuple(colormap))
+                unknown_mask = color_codes == len(colormap)
                 if unknown_mask.any():
                     scatter = ax.scatter(
                         embedding[unknown_mask, 0], embedding[unknown_mask, 1],
                         s=point_size[unknown_mask]
                           if point_size_per_cell else point_size,
                         color=default_color, **scatter_kwargs)
+                    scatters.append(scatter)
                 ordered_labels = color_column\
                     .value_counts(sort=True)\
                     .to_series()\
@@ -19637,16 +19732,18 @@ class SingleCell:
                 for color_label in ordered_labels:
                     if color_label not in colormap:
                         continue
-                    mask = color_values == color_label
+                    mask = color_codes == color_indices[color_label]
                     scatter = ax.scatter(
                         embedding[mask, 0], embedding[mask, 1],
                         s=point_size[mask]
                           if point_size_per_cell else point_size,
                         color=colormap[color_label], **scatter_kwargs)
+                    scatters.append(scatter)
             else:
                 scatter = ax.scatter(embedding[:, 0], embedding[:, 1],
                                      s=point_size, c=c, cmap=cmap,
                                      **scatter_kwargs)
+                scatters.append(scatter)
             ax.set_aspect('equal')
 
             # Add the title, axis labels and axis limits
@@ -19725,6 +19822,41 @@ class SingleCell:
                 spines = ax.spines
                 spines['top'].set_visible(False)
                 spines['right'].set_visible(False)
+
+            # If the point sizes are relative, multiply them by the default
+            # point size. The default makes the points' total area the same
+            # fraction of the axes' area as in Scanpy's embedding plots (like
+            # `sc.pl.umap()`) at the default figure size, which use a point
+            # size of `120000 / num_cells` with the '.' marker (equivalent to
+            # `30000 / num_cells` with the 'o' marker used here, since '.' is
+            # drawn at half the diameter) on axes of 357.12 x 266.112 points
+            # (Matplotlib's default). So unlike Scanpy's, our default point
+            # size scales with the size of the axes, keeping the plot's density
+            # the same regardless of the figure size.
+            #
+            # The axes' final size is only known when the figure is drawn,
+            # after its layout has made room for the legend or colorbar and
+            # given the axes an equal aspect ratio. So set the point sizes
+            # then, just before the first scatter plot is drawn (all the
+            # scatter plots have the same z-order, so they are drawn in the
+            # order they were created). This also keeps the point sizes correct
+            # if the layout changes later, e.g. when more is added to the
+            # figure.
+            if relative:
+                relative_point_sizes = \
+                    [scatter.get_sizes() for scatter in scatters]
+
+                def draw_with_default_point_size(renderer,
+                                                 draw=scatters[0].draw):
+                    bbox = ax.get_window_extent()
+                    axes_area = \
+                        bbox.width * bbox.height * (72 / ax.figure.dpi) ** 2
+                    default_point_size = \
+                        30_000 * axes_area / (357.12 * 266.112) / num_cells
+                    for scatter, sizes in zip(scatters, relative_point_sizes):
+                        scatter.set_sizes(default_point_size * sizes)
+                    draw(renderer)
+                scatters[0].draw = draw_with_default_point_size
 
             # Save, if `filename` is not `None`; override the defaults for
             # certain keys of `savefig_kwargs`
