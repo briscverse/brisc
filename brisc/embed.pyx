@@ -9,7 +9,6 @@ from libc.string cimport memcpy
 from libcpp.algorithm cimport nth_element, sort
 from libcpp.cmath cimport atan2, cos, exp, log, log2, log10, pow, sin, sqrt, \
     tanh
-from libcpp.utility cimport pair
 from libcpp.vector cimport vector
 from .cyutils cimport PREFETCH, atomic_or, get_thread_offsets, long_long_, \
     max_heap_replace_top, max_heap_sort, numa_vector, randint, \
@@ -2481,6 +2480,21 @@ cdef inline void umap_tally(unsigned* lookup_table,
         tally_weights[lookup_table[slot]] += weight
 
 
+# A node's weighted degree and index, for selecting hubs (as a `ctypedef`,
+# since Cython does not allow ctuples as template arguments)
+ctypedef (float, unsigned) umap_weighted_node
+
+
+cdef inline bint umap_lighter_node(const umap_weighted_node first,
+                                   const umap_weighted_node second) \
+        noexcept nogil:
+    # Whether `first` comes before `second` when sorting nodes by weighted
+    # degree, breaking ties by index
+
+    return first[0] < second[0] or \
+        (first[0] == second[0] and first[1] < second[1])
+
+
 cdef inline void umap_init_level(const long long[::1] indptr,
                                  const unsigned[::1] indices,
                                  const float[::1] label_weights,
@@ -2532,13 +2546,13 @@ cdef inline void umap_init_level(const long long[::1] indptr,
         mean_y, anchor_sum_x, anchor_sum_y, anchor_mean_x, anchor_mean_y, \
         spread_x, spread_y, scale, transition_forward, transition_backward, \
         c00, c01, c10, c11, angle, cos_angle, sin_angle, x, y
-    cdef pair[float, unsigned] threshold
+    cdef umap_weighted_node threshold
     cdef unsigned* lookup_table
     cdef unsigned* tally_keys
     cdef unsigned* tally_slots
     cdef float* tally_weights
     cdef vector[vector[unsigned]] thread_stacks
-    cdef uninitialized_vector[pair[float, unsigned]] keys
+    cdef uninitialized_vector[umap_weighted_node] keys
     cdef uninitialized_vector[float] chunk_sums
     cdef uninitialized_vector[long long] thread_num_coarse_edges
     cdef uninitialized_vector[unsigned long long] histograms_buffer
@@ -2601,8 +2615,7 @@ cdef inline void umap_init_level(const long long[::1] indptr,
             for edge in range(indptr[node], indptr[node + 1]):
                 total_weight = total_weight + label_weights[edge]
             weighted_degrees[node] = total_weight
-            keys[node].first = total_weight
-            keys[node].second = node
+            keys[node] = total_weight, node
             max_degree = \
                 max(max_degree, <unsigned> (indptr[node + 1] - indptr[node]))
         thread_max_degrees[thread_index * 16] = max_degree
@@ -2610,7 +2623,7 @@ cdef inline void umap_init_level(const long long[::1] indptr,
     for thread_index in range(level_threads):
         max_degree = max(max_degree, thread_max_degrees[thread_index * 16])
     nth_element(keys.data(), keys.data() + (num_nodes - num_parts),
-                keys.data() + num_nodes)
+                keys.data() + num_nodes, umap_lighter_node)
     threshold = keys[num_nodes - num_parts]
     keys.clear()
     keys.shrink_to_fit()
@@ -2631,9 +2644,8 @@ cdef inline void umap_init_level(const long long[::1] indptr,
                           num_nodes / level_threads)
         num_hubs = 0
         for node in range(start, end):
-            if weighted_degrees[node] > threshold.first or (
-                    weighted_degrees[node] == threshold.first and
-                    node >= threshold.second):
+            if not umap_lighter_node((weighted_degrees[node], node),
+                                     threshold):
                 labels[node] = 0
                 num_hubs = num_hubs + 1
             else:
