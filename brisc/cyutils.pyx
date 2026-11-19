@@ -870,8 +870,8 @@ def getnnz_at_least_threshold_csr(
 
 
 def greater_than_or_equal(
-        const integer[::1] nnz,
-        const integer threshold,
+        const numeric[::1] values,
+        const numeric threshold,
         char[::1] output,
         unsigned num_threads):
     cdef unsigned long long i, num_major = output.shape[0]
@@ -879,11 +879,11 @@ def greater_than_or_equal(
     num_threads = min(num_threads, num_major)
     if num_threads <= 1:
         for i in range(num_major):
-            output[i] = nnz[i] >= threshold
+            output[i] = values[i] >= threshold
     else:
         for i in prange(num_major, nogil=True,
                         num_threads=num_threads):
-            output[i] = nnz[i] >= threshold
+            output[i] = values[i] >= threshold
 
 
 def has_all_zero_columns(const numeric[:, ::1] X):

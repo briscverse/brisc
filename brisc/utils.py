@@ -682,8 +682,8 @@ def get_count_at_least_threshold(
                            num_threads=num_threads)
         if output is None:
             output = np.empty(len(counts), dtype=bool)
-        greater_than_or_equal(nnz=counts, threshold=threshold, output=output,
-                              num_threads=num_threads)
+        greater_than_or_equal(values=counts, threshold=threshold,
+                              output=output, num_threads=num_threads)
     return output
 
 
@@ -771,7 +771,7 @@ def getnnz_at_least_threshold(
                        num_threads=num_threads)
         if output is None:
             output = np.empty(len(nnz), dtype=bool)
-        greater_than_or_equal(nnz=nnz, threshold=threshold, output=output,
+        greater_than_or_equal(values=nnz, threshold=threshold, output=output,
                               num_threads=num_threads)
     return output
 
