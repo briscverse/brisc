@@ -16,6 +16,15 @@ from .cyutils cimport atomic_or, bit_width, integer, numa_allocate, \
     numa_free, numa_vector, numeric, recv, signed_integer, uninitialized_vector
 
 
+ctypedef fused count_type:
+    int
+    unsigned
+    long long
+    unsigned long long
+    float
+    double
+
+
 cdef class NumaBuffer:
     """
     Zeroed memory from `numa_allocate()`, exposed via the buffer protocol so
@@ -786,16 +795,27 @@ def get_count_at_least_threshold_csr(const numeric[::1] data,
     cdef unsigned long long i, j, num_major = output.shape[0]
     cdef unsigned thread_index
     cdef numeric count
+    cdef unsigned wide_count
     cdef unsigned start_row, end_row
 
+    # 16-bit counts are summed in a 32-bit accumulator (`wide_count`) to avoid
+    # overflow; all other counts are summed in their own data type (`count`).
+    # The branches on `sizeof(numeric)` are resolved at compile time.
     num_threads = min(num_threads, num_major)
     if num_threads <= 1:
         for i in range(num_major):
-            count = 0
-            for j in range(<unsigned long long> indptr[i],
-                           <unsigned long long> indptr[i + 1]):
-                count += data[j]
-            output[i] = count >= <numeric> threshold
+            if sizeof(numeric) == 2:
+                wide_count = 0
+                for j in range(<unsigned long long> indptr[i],
+                               <unsigned long long> indptr[i + 1]):
+                    wide_count += <unsigned> data[j]
+                output[i] = wide_count >= threshold
+            else:
+                count = 0
+                for j in range(<unsigned long long> indptr[i],
+                               <unsigned long long> indptr[i + 1]):
+                    count += data[j]
+                output[i] = count >= <numeric> threshold
     else:
         with nogil, parallel(num_threads=num_threads):
             thread_index = threadid()
@@ -803,11 +823,18 @@ def get_count_at_least_threshold_csr(const numeric[::1] data,
                 get_thread_offset(indptr, thread_index, num_threads)
 
             for i in range(start_row, end_row):
-                count = 0
-                for j in range(<unsigned long long> indptr[i],
-                               <unsigned long long> indptr[i + 1]):
-                    count = count + data[j]
-                output[i] = count >= <numeric> threshold
+                if sizeof(numeric) == 2:
+                    wide_count = 0
+                    for j in range(<unsigned long long> indptr[i],
+                                   <unsigned long long> indptr[i + 1]):
+                        wide_count = wide_count + <unsigned> data[j]
+                    output[i] = wide_count >= threshold
+                else:
+                    count = 0
+                    for j in range(<unsigned long long> indptr[i],
+                                   <unsigned long long> indptr[i + 1]):
+                        count = count + data[j]
+                    output[i] = count >= <numeric> threshold
 
 
 def getnnz_csr(const signed_integer[::1] indptr,
@@ -894,21 +921,23 @@ def parallel_subset_2d_cython(const bit_width[:, ::1] input_arr,
             output_arr[i, j] = input_arr[input_row, j]
 
 
-def weighted_bin_count(const integer[::1] arr,
+def weighted_bin_count(const signed_integer[::1] arr,
                        const numeric[::1] weights,
-                       numeric[::1] counts,
+                       count_type[::1] counts,
                        unsigned num_threads):
+    # `counts` has the same data type as `weights`, except for 16-bit
+    # `weights`, where it is `unsigned` to avoid overflow
     cdef unsigned long long start, end, i, num_bins, chunk_size, \
         num_elements = arr.shape[0]
     cdef unsigned thread_index
-    cdef vector[numa_vector[numeric]] thread_counts
-    cdef numeric* counts_pointer
+    cdef vector[numa_vector[count_type]] thread_counts
+    cdef count_type* counts_pointer
 
     num_threads = min(num_threads, num_elements)
     if num_threads <= 1:
         counts[:] = 0
         for i in range(num_elements):
-            counts[arr[i]] += weights[i]
+            counts[arr[i]] += <count_type> weights[i]
     else:
         # Store sums for each thread in a temporary buffer, then aggregate at
         # the end. As an optimization, put the sums for the last thread
@@ -923,13 +952,13 @@ def weighted_bin_count(const integer[::1] arr,
                 end = num_elements
                 counts[:] = 0
                 for i in range(start, end):
-                    counts[arr[i]] += weights[i]
+                    counts[arr[i]] += <count_type> weights[i]
             else:
                 thread_counts[thread_index].resize(num_bins)
                 counts_pointer = thread_counts[thread_index].data()
                 end = min(start + chunk_size, num_elements)
                 for i in range(start, end):
-                    counts_pointer[arr[i]] += weights[i]
+                    counts_pointer[arr[i]] += <count_type> weights[i]
 
         # Aggregate counts from all threads except the last
         for thread_index in range(num_threads - 1):

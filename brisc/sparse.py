@@ -8,7 +8,8 @@ import operator
 from scipy import sparse
 from scipy.sparse._compressed import _cs_matrix
 from typing import Any
-from .utils import bitview, check_type, import_cython, sparse_equal
+from .utils import bitview, check_type, import_cython, sparse_equal, \
+    X_DTYPES
 import_cython({'cysparse': (
     'cast', 'check_bounds_only', 'check_bounds_and_negative_indices',
     'check_bounds_and_wrap_around', 'csr_column_index1', 'csr_column_index2',
@@ -895,13 +896,8 @@ class cs_matrix(_cs_matrix):
             return self.copy() if copy else self
         old_data = self.data
         old_dtype = old_data.dtype
-        if casting == 'unsafe' and \
-                (old_dtype == np.float64 or old_dtype == np.float32 or
-                 old_dtype == np.int64 or old_dtype == np.int32 or
-                 old_dtype == np.uint64 or old_dtype == np.uint32) and \
-                (dtype == np.float64 or dtype == np.float32 or
-                 dtype == np.int64 or dtype == np.int32 or
-                 dtype == np.uint64 or dtype == np.uint32):
+        if casting == 'unsafe' and old_dtype in X_DTYPES and \
+                dtype in X_DTYPES:
             # Fast path
             new_data = np.empty_like(old_data, dtype=dtype)
             cast(old_data, new_data, self._num_threads)

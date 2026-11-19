@@ -17,7 +17,7 @@ from .type_aliases import Indexer, Scalar, SingleCellColumn, PseudobulkColumn
 from .utils import array_equal, bonferroni, cast_to_Enum, check_bounds, \
     check_dtype, check_type, check_types, concatenate, fdr, import_cython, \
     is_in, plural, to_tuple, to_tuple_checked, FLOAT_DTYPES, INTEGER_DTYPES, \
-    NUMERIC_DTYPES
+    NUMERIC_DTYPES, X_DTYPES
 from .validated_dict import Obs, Var, X_
 import_cython({'cyutils': 'has_all_zero_columns',
                'norm_factors': 'calc_norm_factors'})
@@ -189,12 +189,10 @@ class Pseudobulk:
             raise ValueError(error_message)
         for cell_type in X:
             dtype = X[cell_type].dtype
-            if dtype != np.int32 and dtype != np.int64 and \
-                    dtype != np.float32 and dtype != np.float64 and \
-                    dtype != np.uint32 and dtype != np.uint64:
+            if dtype not in X_DTYPES:
                 error_message = (
-                    f'X must be (u)int32/64 or float32/64, but has data type '
-                    f'{str(dtype)}')
+                    f'X must be (u)int16/32/64 or float32/64, but has data '
+                    f'type {str(dtype)}')
                 raise TypeError(error_message)
             if len(obs[cell_type]) == 0:
                 error_message = \

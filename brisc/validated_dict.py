@@ -7,7 +7,8 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from typing import Self  # only available in Python 3.11+
 from .sparse import csr_array, csc_array
-from .utils import array_equal, check_type, sparse_equal, INTEGER_DTYPES
+from .utils import array_equal, check_type, sparse_equal, INTEGER_DTYPES, \
+    X_DTYPES
 
 
 class ValidatedDict(dict):
@@ -436,13 +437,11 @@ class X_(FixedKeyValidatedDict):
                     f'{old_shape[0]:,} × {old_shape[1]:,}')
                 raise ValueError(error_message)
 
-        # Check that the data type is (u)int32/64 or float32/64
+        # Check that the data type is (u)int16/32/64 or float32/64
         dtype = value.dtype
-        if dtype != np.int32 and dtype != np.int64 and \
-                dtype != np.float32 and dtype != np.float64 and \
-                dtype != np.uint32 and dtype != np.uint64:
+        if dtype not in X_DTYPES:
             error_message = (
-                f'X must be (u)int32/64 or float32/64, but new '
+                f'X must be (u)int16/32/64 or float32/64, but new '
                 f'X[{key!r}] has data type {str(dtype)}')
             raise TypeError(error_message)
 

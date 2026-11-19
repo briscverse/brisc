@@ -29,7 +29,7 @@ from .utils import array_equal, cast_to_Enum, check_bounds, check_dtype, \
     numa_zeros, parallel_subset_1d, parallel_subset_2d, plural, \
     read_parallel_multiprocessing, sparse_equal, sparse_major_stack, \
     sparse_minor_stack, to_tuple, to_tuple_checked, INTEGER_DTYPES, \
-    NUMERIC_DTYPES
+    NUMERIC_DTYPES, X_DTYPES
 from .validated_dict import Obsm, Obsp, Uns, Varm, Varp
 import_cython({
     'doublets': ('call_doublets', 'compute_cxds', 'compute_obs', 'compute_S',
@@ -1393,11 +1393,9 @@ class SingleCell:
         except AttributeError:  # `self._X` may not have been assigned yet
             pass
         dtype = X.dtype
-        if dtype != np.int32 and dtype != np.int64 and \
-                dtype != np.float32 and dtype != np.float64 and \
-                dtype != np.uint32 and dtype != np.uint64:
+        if dtype not in X_DTYPES:
             error_message = (
-                f'X must be (u)int32/64 or float32/64, but has data type '
+                f'X must be (u)int16/32/64 or float32/64, but has data type '
                 f'{str(dtype)}')
             raise TypeError(error_message)
         try:

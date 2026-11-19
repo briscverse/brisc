@@ -23,6 +23,11 @@ INTEGER_DTYPES = pl.Int8, pl.UInt8, pl.Int16, pl.UInt16, pl.Int32, pl.UInt32, \
     pl.Int64, pl.UInt64, pl.Int128, pl.UInt128
 NUMERIC_DTYPES = FLOAT_DTYPES + INTEGER_DTYPES
 
+# The NumPy data types supported for count matrices (`X`)
+X_DTYPES = frozenset(map(np.dtype, (
+    np.int16, np.uint16, np.int32, np.uint32, np.int64, np.uint64,
+    np.float32, np.float64)))
+
 
 def import_cython(imports: dict[str, Union[str, Sequence[str]]]) -> None:
     """
@@ -111,27 +116,29 @@ def bitview(arr: np.ndarray) -> np.ndarray:
     bit width.
 
     This facilitates Cython "type erasure", allowing memory-movement operations
-    to be compiled for just two fused types (uint32 and uint64) rather than
-    generating separate machine code for every possible 32- and 64-bit numeric
-    type (float32, float64, int32, int64, uint32, uint64), vastly reducing
-    Cython compilation time and binary size.
+    to be compiled for just three fused types (uint16, uint32 and uint64)
+    rather than generating separate machine code for every possible 16-, 32-
+    and 64-bit numeric type (int16, uint16, float32, float64, int32, int64,
+    uint32, uint64), vastly reducing Cython compilation time and binary size.
 
     Args:
         arr: the input array
 
     Returns:
-        A view of the input array as `np.uint32` (if 32-bit) or `np.uint64`
-        (if 64-bit).
+        A view of the input array as `np.uint16` (if 16-bit), `np.uint32`
+        (if 32-bit) or `np.uint64` (if 64-bit).
     """
     itemsize = arr.itemsize
-    if itemsize == 4:
+    if itemsize == 2:
+        return arr.view(np.uint16)
+    elif itemsize == 4:
         return arr.view(np.uint32)
     elif itemsize == 8:
         return arr.view(np.uint64)
     else:
         error_message = (
             f'X has unsupported type {arr.dtype!r} (size {itemsize} bytes); '
-            'use .cast_X(dtype) to cast to a 32- or 64-bit data type')
+            'use .cast_X(dtype) to cast to a 16-, 32- or 64-bit data type')
         raise TypeError(error_message)
 
 
@@ -666,8 +673,10 @@ def get_count_at_least_threshold(
                                          threshold=threshold, output=output,
                                          num_threads=num_threads)
     else:
+        # Sum 16-bit counts in a 32-bit accumulator to avoid overflow
         counts = np.zeros(sparse_matrix.shape[is_csr],
-                          dtype=sparse_matrix.dtype)
+                          dtype=np.uint32 if sparse_matrix.dtype.itemsize == 2
+                          else sparse_matrix.dtype)
         weighted_bin_count(arr=sparse_matrix.indices,
                            weights=sparse_matrix.data, counts=counts,
                            num_threads=num_threads)

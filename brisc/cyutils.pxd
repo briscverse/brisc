@@ -8,6 +8,7 @@ from scipy.linalg.cython_blas cimport sgemm as sgemm_, sgemv as sgemv_
 
 
 ctypedef fused bit_width:
+    unsigned short
     unsigned
     unsigned long long
 
@@ -20,6 +21,8 @@ ctypedef fused integer:
 
 
 ctypedef fused numeric:
+    short
+    unsigned short
     int
     unsigned
     long long

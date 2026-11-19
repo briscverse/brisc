@@ -17,6 +17,8 @@ ctypedef fused integer2:
 
 
 ctypedef fused numeric2:
+    short
+    unsigned short
     int
     unsigned
     long long
