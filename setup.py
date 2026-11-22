@@ -19,6 +19,19 @@ class BuildExt(build_ext):
             self.compiler.compile_options = [
                 opt for opt in self.compiler.compile_options
                 if opt != '/W3']
+        else:
+            # Let the compiler assume signed integer overflow never happens by
+            # removing -fwrapv and -fno-strict-overflow, which may be
+            # inherited from Python's CFLAGS. (Removing them is more robust
+            # than overriding them on Clang.)
+            for attr in ('compiler', 'compiler_so', 'compiler_cxx',
+                         'compiler_so_cxx'):
+                command = getattr(self.compiler, attr, None)
+                if command is None:
+                    continue
+                setattr(self.compiler, attr, [
+                    arg for arg in command
+                    if arg not in ('-fwrapv', '-fno-strict-overflow')])
 
         # Avoid "ld: warning: duplicate -rpath '<path>' ignored" on Mac
         for attr in ('linker_so', 'linker_so_cxx'):
@@ -123,7 +136,7 @@ try:
             compiler_flags = [
                 '-O3', '-ffast-math', '-std=c++17', '-g0', '-Xpreprocessor',
                 '-fopenmp', '-fvisibility=hidden',
-                '-fvisibility-inlines-hidden', '-fstrict-overflow',
+                '-fvisibility-inlines-hidden',
                 f'-I{omp_base}/include',
                 # Baseline warnings
                 '-Wall', '-Wextra', '-Werror', '-Wno-uninitialized',
@@ -138,7 +151,6 @@ try:
             compiler_flags = [
                 '-Ofast', '-funroll-loops', '-std=c++17', '-g0', '-fopenmp',
                 '-fvisibility=hidden', '-fvisibility-inlines-hidden',
-                '-fstrict-overflow',
                 # Baseline warnings
                 '-Wall', '-Wextra', '-Werror', '-Wno-uninitialized',
                 '-Wno-maybe-uninitialized', '-Wno-ignored-qualifiers',
