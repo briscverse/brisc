@@ -11717,6 +11717,7 @@ class SingleCell:
             chunk_size: int | np.integer = 1024,
             seed: int | np.integer = 0,
             match_parallel: bool = False,
+            scale: bool = True,
             overwrite: bool = False,
             verbose: bool = False,
             num_threads: int | np.integer | None = None) -> \
@@ -11797,6 +11798,11 @@ class SingleCell:
                             results of the multithreaded version when
                             `num_threads=1`. Must be `False` unless
                             `num_threads=1`.
+            scale: if `True` (the default), scale each gene to unit variance
+                   as well as zero mean before computing PCs, like Seurat's
+                   `ScaleData()`. If `False`, only mean-center each gene, like
+                   Scanpy's `pca()`, so genes with higher variance contribute
+                   more to the PCs.
             overwrite: if `True`, overwrite `PC_key` if already present in
                        obsm, instead of raising an error
             verbose: whether to print a message when the singular values did
@@ -11826,7 +11832,8 @@ class SingleCell:
             [`ScaleData()`](https://satijalab.org/seurat/reference/scaledata)
             to be run first, this function does not require the data to be
             scaled beforehand. Instead, it implicitly scales the data to zero
-            mean and unit variance while performing PCA.
+            mean and unit variance while performing PCA (or only to zero mean,
+            when `scale=False`).
         """
         # If `others` was specified, check that all elements of `others` are
         # SingleCell datasets
@@ -11930,6 +11937,9 @@ class SingleCell:
             error_message = \
                 'match_parallel must be False unless num_threads is 1'
             raise ValueError(error_message)
+
+        # Check that `scale` is Boolean
+        check_type(scale, 'scale', bool, 'Boolean')
 
         # Get the matrix to compute PCA across: a sparse matrix of counts for
         # highly variable genes (or all genes, if `hvg_column` is `None`)
@@ -12166,7 +12176,7 @@ class SingleCell:
                     num_genes=num_genes, k=num_PCs,
                     subspace_size=subspace_size, tolerance=tolerance,
                     max_iterations=max_iterations, seed=seed,
-                    match_parallel=match_parallel, is_csr=is_csr,
+                    match_parallel=match_parallel, scale=scale, is_csr=is_csr,
                     num_threads=num_threads, chunk_size=chunk_size, PCs=PCs)
         finally:
             X._num_threads = original_num_threads

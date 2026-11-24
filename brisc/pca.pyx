@@ -671,6 +671,7 @@ def irlba(const float[::1] data_matvec,
           const unsigned max_iterations,
           const unsigned long long seed,
           const bint match_parallel,
+          const bint scale,
           const bint is_csr,
           const unsigned num_threads,
           const unsigned long long chunk_size,
@@ -789,9 +790,13 @@ def irlba(const float[::1] data_matvec,
                            num_rmatvec_threads)
 
     # Get the clipped standard deviation of each gene, for variance scaling;
-    # use CSC for this if available, for speed
+    # use CSC for this if available, for speed. Without scaling, divide by 1,
+    # which leaves only the mean-centering.
 
-    if num_threads == 1 and is_csr and not match_parallel:
+    if not scale:
+        for i in range(num_genes):
+            clipped_stddev[i] = 1
+    elif num_threads == 1 and is_csr and not match_parallel:
         clipped_stddev_csr(data_matvec, indices_matvec, indptr_matvec,
                            num_cells, num_genes, clip_val, clipped_stddev)
     else:
